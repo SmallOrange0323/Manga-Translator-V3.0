@@ -1,5 +1,5 @@
 /**
- * 漫譯 V2 - 純淨版彈出視窗邏輯
+ * 漫譯 V3 - 純淨版彈出視窗邏輯
  */
 
 const btnPanel    = document.getElementById('btn-open-panel');

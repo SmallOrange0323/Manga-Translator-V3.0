@@ -1,10 +1,10 @@
-# Manga Translator V2.0
+# Manga Translator V3.0
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg)
 ![Build](https://img.shields.io/badge/Build-Vite-blueviolet.svg)
 
-Manga Translator V2.0 是一個基於 Chrome Extension Manifest V3 的現代化重構專案。本專案旨在提供更穩定、更流暢的漫畫與小說翻譯體驗，並解決 Service Worker 隨機失效、CSS 污染以及行動端適配等實務痛點。
+Manga Translator V3.0 是一個基於 Chrome Extension Manifest V3 的現代化重構專案。本專案旨在提供更穩定、更流暢的漫畫與小說翻譯體驗，並解決 Service Worker 隨機失效、CSS 污染以及行動端適配等實務痛點。
 
 ## 🌟 核心特色
 

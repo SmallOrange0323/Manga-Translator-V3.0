@@ -2,7 +2,7 @@
 import { log } from './logger.js';
 
 /**
- * StateManager: Manga Translator V2.0 狀態管理器
+ * StateManager: Manga Translator V3.0 狀態管理器
  * 
  * 核心設計：
  * 1. Storage-First: 所有狀態變更立即或延後寫入 chrome.storage.local

@@ -3,7 +3,7 @@ import { state } from './state.js';
 import { GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
 import { log } from './logger.js';
 
-const SYNC_FILE_NAME = 'manga_translator_v2_sync.json';
+const SYNC_FILE_NAME = 'manga_translator_v3_sync.json';
 const SETTINGS_LAST_MODIFIED_KEY = 'settingsLastModified';
 const SYNC_ENABLED_KEY = 'enableCloudSync';
 const SYNC_LAST_TIME_KEY = 'googleSyncLastTime';

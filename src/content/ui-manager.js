@@ -19,7 +19,7 @@ class UIManager {
 
     // 1. 建立 Host 元素
     this.host = document.createElement('div');
-    this.host.id = 'mt-v2-host';
+    this.host.id = 'mt-v3-host';
     
     // 2. 使用 closed 模式確保純淨隔離
     this.shadowRoot = this.host.attachShadow({ mode: 'closed' });
@@ -36,7 +36,7 @@ class UIManager {
 
     // 5. 注入到宿主網頁的 Body
     document.body.appendChild(this.host);
-    console.log('[Manga Translator V2] Shadow UI Manager Initialized');
+    console.log('[Manga Translator V3] Shadow UI Manager Initialized');
   }
 
   /**

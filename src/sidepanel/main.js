@@ -2,7 +2,7 @@ import { state } from '../utils/state.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import { LOADING_GIF_FILENAME, RUNNING_ANIMS, STANDING_ASSETS, PRICONNE_LOADING_SPRITES } from '../utils/constants.js';
 
-console.log('[Manga Translator V2] Classic Sidepanel Initialized');
+console.log('[Manga Translator V3] Classic Sidepanel Initialized');
 
 // ── 主題相關狀態 ──
 let currentTheme = 'umamusume';

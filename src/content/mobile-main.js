@@ -204,7 +204,7 @@ export function initMobileMode() {
   drawer.className = 'drawer';
   drawer.innerHTML = `
     <div class="drawer-header">
-      <h2>🎌 漫譯 V2 控制台</h2>
+      <h2>🎌 漫譯 V3 控制台</h2>
       <button class="close-btn">&times;</button>
     </div>
     <div class="drawer-content">

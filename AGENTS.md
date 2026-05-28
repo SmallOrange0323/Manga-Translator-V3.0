@@ -1,7 +1,7 @@
-# Manga Translator V2.0 開發規範 (AGENTS.md)
+# Manga Translator V3.0 開發規範 (AGENTS.md)
 
 ## 📌 專案脈絡 (Context)
-本專案為 Manga Translator Extension 的現代化重構版本（V2.0）。主要目標是從「單體腳本」重構為符合 Vite 模組化規範的專案，解決 Manifest V3 下 Service Worker 隨機失效的痛點，並實現 PC 模式與行動端（Mobile）的差異化 UI 策略。
+本專案為 Manga Translator Extension 的現代化重構版本（V3.0）。主要目標是從「單體腳本」重構為符合 Vite 模組化規範的專案，解決 Manifest V3 下 Service Worker 隨機失效的痛點，並實現 PC 模式與行動端（Mobile）的差異化 UI 策略。
 
 ## 🛠 技術棧 (Tech Stack)
 - **建置工具**：Vite + `@crxjs/vite-plugin`

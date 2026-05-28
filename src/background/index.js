@@ -13,7 +13,7 @@ let capturedScreenshotForSelection = null;
 const lastNovelUrlByTab = {};
 
 
-log.info('Background', '漫譯 V2 背景服務程式已啟動');
+log.info('Background', '漫譯 V3 背景服務程式已啟動');
 
 // 檢查是否處於無痕模式背景實例中 (用於 split 模式分流)
 const isIncognitoProcess = chrome.extension ? chrome.extension.inIncognitoContext : false;
@@ -249,7 +249,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   log.info('Messenger', `收到訊息: ${message.action}`, { tabId: sender.tab?.id });
 
   if (message.action === 'PING') {
-    sendResponse({ status: 'PONG', version: '2.0.0' });
+    sendResponse({ status: 'PONG', version: '3.0.0' });
   }
 
   if (message.action === 'STOP_TRANSLATION') {

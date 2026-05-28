@@ -1,7 +1,7 @@
 // src/utils/logger.js
 
 /**
- * Logger Utility for Manga Translator V2.0
+ * Logger Utility for Manga Translator V3.0
  * 支援 Service Worker 環境偵測與樣式化輸出
  */
 

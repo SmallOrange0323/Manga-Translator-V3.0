@@ -1,7 +1,7 @@
 // src/content/novel-engine.js
 /**
  * NovelEngine: 經典小說 DOM 偵測、譯文注入與全網頁 UI 翻譯核心
- * 完美移植自 V1.8.6 經典版實戰邏輯，適配 V2.0 模組化架構
+ * 完美移植自 V1.8.6 經典版實戰邏輯，適配 V3.0 模組化架構
  */
 
 import { log } from '../utils/logger.js';
@@ -119,7 +119,7 @@ export function insertPlaceholders(paragraphs) {
 
 /**
  * 3. 收到批次翻譯結果，精確替換佔位符
- * 支援 1:1 精確對位、淡入動畫、雙語動作按鈕及重試邏輯，徹底解決 2.0 段落漏失 Bug
+ * 支援 1:1 精確對位、淡入動畫、雙語動作按鈕及重試邏輯，徹底解決 3.0 段落漏失 Bug
  */
 export function injectNovelBatchResult(batchIndex, translations, retryIndices, isFailed = false) {
     // 從 sessionStorage 或全域動態讀取 batchSize
