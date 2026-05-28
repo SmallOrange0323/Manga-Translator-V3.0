@@ -1,0 +1,14 @@
+{
+  "name": "manga-translator-v2",
+  "version": "3.0.0",
+  "description": "Manga Translator V2.0 - Modernized with Vite & MV3",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "@crxjs/vite-plugin": "^2.0.0-beta.23"
+  }
+}

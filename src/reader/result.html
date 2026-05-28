@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>漫譯 — 批次翻譯結果</title>
+    <link rel="stylesheet" href="result.css">
+</head>
+<body>
+    <div class="page-grain"></div>
+
+    <header class="result-header">
+        <div class="header-left">
+            <svg class="header-logo" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>
+                <path d="M8 7h6M8 11h8"/>
+            </svg>
+            <div>
+                <h1>批次翻譯結果 <span id="manga-title-display" style="font-size:16px; color:#666; margin-left:8px; font-weight:normal; vertical-align: middle;"></span> <span id="glossary-info-badge" class="glossary-badge"></span></h1>
+                <p class="header-sub">漫譯 Manga Translator</p>
+            </div>
+        </div>
+        <div class="actions">
+            <button id="export-html-btn" class="btn-export secondary">
+                儲存 HTML
+            </button>
+            <button id="export-pdf-btn" class="btn-export accent">
+                儲存為 PDF
+            </button>
+            <button id="export-txt-btn" class="btn-export">
+                匯出 TXT
+            </button>
+            <button id="toggle-mode-btn" class="btn-export secondary">
+                切換模式
+            </button>
+        </div>
+    </header>
+
+    <div id="loading-overlay" class="loading-overlay">
+        <div id="main-loading-anim-container" class="loading-anim-container">
+            <img id="main-loading-anim" class="loading-anim-small" src="" alt="少女祈禱中">
+        </div>
+        <div id="loading-text">翻譯中… <span id="progress-text">0 / 0</span></div>
+        <button id="btn-stop-translation" style="margin-left: 8px; padding: 6px 14px; font-size: 13px; font-weight: bold; border-radius: 20px; border: none; background: #ef4444; color: #fff; cursor: pointer; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);">中止</button>
+    </div>
+
+    <main id="results-container" class="results-container"></main>
+
+    <!-- 整批重試按鈕（翻譯完成後有失敗圖片才顯示） -->
+    <div id="retry-all-container" style="display:none; justify-content:center; padding: 12px 0 4px;">
+        <button id="btn-retry-all-failed" style="
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 22px; border-radius: 24px; border: none;
+            background: linear-gradient(135deg, #f97316, #ef4444);
+            color: #fff; font-size: 14px; font-weight: 700;
+            cursor: pointer; box-shadow: 0 4px 14px rgba(249,115,22,0.4);
+            transition: transform 0.15s, box-shadow 0.15s;
+        ">
+            🔁 重試所有失敗圖片（<span id="retry-failed-count">0</span> 張）
+        </button>
+    </div>
+
+    <nav id="nav-footer" class="nav-footer" style="display:none;">
+        <button id="prev-btn" class="nav-btn nav-btn--prev">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+            </svg>
+            上一話
+        </button>
+        <button id="next-btn" class="nav-btn nav-btn--next">
+            下一話
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+        </button>
+    </nav>
+
+    <!-- 快速語彙編輯 Modal -->
+    <div id="mt-glossary-modal" class="mt-modal">
+        <div class="mt-modal-backdrop"></div>
+        <div class="mt-modal-content">
+            <div class="mt-modal-header">
+                <h3>📖 新增至語彙庫</h3>
+                <button class="mt-modal-close">&times;</button>
+            </div>
+            <div class="mt-modal-body">
+                <div class="mt-input-group">
+                    <label>原文 (日文)</label>
+                    <input type="text" id="mt-glossary-ori" placeholder="例如：ラインフェルト">
+                </div>
+                <div class="mt-input-group">
+                    <label>譯文 (中文)</label>
+                    <input type="text" id="mt-glossary-trans" placeholder="例如：萊茵費爾特">
+                </div>
+                <p class="mt-modal-hint">儲存後，未來的翻譯將會優先套用此譯名。</p>
+            </div>
+            <div class="mt-modal-footer">
+                <button id="mt-glossary-cancel" class="mt-btn-secondary">取消</button>
+                <button id="mt-glossary-save" class="mt-btn-accent">儲存條目</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="./result.js"></script>
+</body>
+</html>

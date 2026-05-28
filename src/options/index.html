@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>漫譯 V3.0 - 設定</title>
+    <style>
+        :root {
+            --primary-color: #4CAF50;
+            --primary-hover: #45a049;
+            --accent-color: #008CBA;
+            --danger-color: #f44336;
+            --danger-hover: #d32f2f;
+            --bg-color: #f9f9f9;
+            --sidebar-bg: #fff;
+            --border-color: #ddd;
+            --text-main: #333;
+            --text-muted: #666;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            background: var(--bg-color);
+            color: var(--text-main);
+        }
+
+        .tabs-header {
+            display: flex;
+            background: #fff;
+            border-bottom: 1px solid var(--border-color);
+            padding: 0 20px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .tab-btn {
+            padding: 15px 25px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            color: var(--text-muted);
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover { color: var(--primary-color); }
+        .tab-btn.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .settings-form { max-width: 600px; margin: 0 auto; }
+
+        label {
+            display: block;
+            margin-top: 15px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        input[type="text"], input[type="password"], input[type="number"], textarea, select {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            box-sizing: border-box;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+
+        textarea {
+            font-family: monospace;
+            resize: vertical;
+        }
+
+        button {
+            padding: 10px 16px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        button:hover { background: var(--primary-hover); }
+        .btn-danger { background: var(--danger-color); }
+        .btn-danger:hover { background: var(--danger-hover); }
+        .btn-accent { background: var(--accent-color); }
+        .btn-secondary { background: #607d8b; color: white; }
+
+        .api-key-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+        .api-key-row input { flex: 1; margin-top: 0; }
+        .remove-key-btn { flex-shrink: 0; padding: 8px 12px; margin-top: 0; background: var(--danger-color); }
+
+        .status-tip {
+            display: none;
+            text-align: center;
+            color: var(--primary-color);
+            margin-top: 10px;
+            font-weight: bold;
+        }
+
+        .glossary-layout {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 25px;
+            margin-top: 10px;
+        }
+        .manga-sidebar {
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            overflow-y: auto;
+            border-radius: 8px;
+            padding: 10px;
+            min-height: 400px;
+        }
+        .manga-item {
+            padding: 12px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-bottom: 5px;
+            transition: background 0.2s;
+            border: 1px solid transparent;
+        }
+        .manga-item.active {
+            background: #e8f5e9;
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+            font-weight: bold;
+        }
+        .manga-meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+        /* 行動端響應式調整 */
+        @media (max-width: 600px) {
+            .tabs-header {
+                padding: 0 10px;
+                overflow-x: auto;
+                white-space: nowrap;
+                -webkit-overflow-scrolling: touch;
+            }
+            .tab-btn {
+                padding: 12px 15px;
+                font-size: 14px;
+                flex-shrink: 0;
+            }
+            .container {
+                margin: 0;
+                padding: 15px;
+                border-radius: 0;
+                box-shadow: none;
+            }
+            .settings-form {
+                max-width: 100%;
+            }
+            .api-key-row {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .glossary-layout {
+                grid-template-columns: 1fr;
+            }
+            .manga-sidebar {
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+                min-height: 200px;
+                max-height: 300px;
+            }
+            input[type="text"], input[type="password"], input[type="number"], textarea, select {
+                font-size: 16px; /* 防止 iOS 自動放大 */
+            }
+        }
+
+        /* Switch 開關樣式 */
+        .switch-container {
+            position: relative;
+            display: inline-block;
+            width: 46px;
+            height: 24px;
+        }
+
+        .switch-container input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .switch-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+
+        .switch-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+
+        input:checked + .switch-slider {
+            background-color: #4CAF50;
+        }
+
+        input:checked + .switch-slider:before {
+            transform: translateX(22px);
+        }
+
+        /* Spinner 動畫樣式 */
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .sync-spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body>
+    <nav class="tabs-header">
+        <button class="tab-btn active" data-tab="settings">⚙️ 漫畫設定</button>
+        <button class="tab-btn" data-tab="novel">📖 小說模式</button>
+        <button class="tab-btn" data-tab="glossary">📚 詞彙庫管理</button>
+    </nav>
+
+    <div class="container">
+        <!-- Settings Tab -->
+        <div id="settings-tab" class="tab-content active">
+            <div class="settings-form">
+                <!-- Google 雲端同步設定面板 -->
+                <div class="sync-panel" style="margin-bottom: 25px; padding: 20px; border-radius: 8px; background: linear-gradient(135deg, #e3f2fd 0%, #e8f5e9 100%); border: 1px solid #bbdefb; box-shadow: 0 4px 15px rgba(0,0,0,0.05); transition: all 0.3s ease;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                        <h3 style="margin: 0; color: #1565c0; font-size: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>☁️ Google 雲端同步設定</span>
+                        </h3>
+                        <label class="switch-container" style="margin-top: 0;">
+                            <input type="checkbox" id="enableCloudSync">
+                            <span class="switch-slider"></span>
+                        </label>
+                    </div>
+                    
+                    <!-- GCP Web Client ID 自訂輸入框（解決 Edge/Chrome 跨端 WebAuthFlow 相容性） -->
+                    <div id="googleClientIdContainer" style="margin-bottom: 15px; background: rgba(255,255,255,0.6); padding: 12px; border-radius: 6px; border: 1px solid #bbdefb;">
+                        <label for="googleClientId" style="font-size: 12px; font-weight: bold; color: #1565c0; margin-bottom: 6px; display: block;">GCP Web Client ID (Edge / 跨端授權專用):</label>
+                        <input type="text" id="googleClientId" placeholder="格式為: xxxxxxxx.apps.googleusercontent.com" style="width: 100%; padding: 8px; font-size: 12px; border: 1px solid #bbdefb; border-radius: 4px; box-sizing: border-box; outline: none; margin-bottom: 6px;">
+                        <small style="color: #555; font-size: 11px; display: block; line-height: 1.4;">
+                            ⚠️ <strong>重要 (Edge 使用者)</strong>：請至 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color: #1565c0; font-weight: bold;">Google Cloud 憑證頁面</a> 建立一個類型為<strong>「Web 應用程式 (Web Application)」</strong>的憑證，並將下方的已授權重新導向 URI 填入 GCP 中：<br>
+                            <code id="googleRedirectUri" style="background: #fff; padding: 3px 6px; border-radius: 3px; border: 1px solid #bbdefb; font-family: monospace; font-size: 10px; word-break: break-all; display: inline-block; margin-top: 4px; font-weight: bold; color: #333;">載入中...</code>
+                        </small>
+                    </div>
+                    
+                    <p style="margin: 0 0 15px 0; font-size: 12px; color: #555; line-height: 1.5;">
+                        開啟後將自動將您的多金鑰池設定與詞彙術語庫備份至 Google 雲端帳戶的專屬沙盒中，實現跨瀏覽器與裝置間的無縫雙向同步。
+                    </p>
+
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                        <div id="syncStatusWrapper" style="font-size: 13px; color: #333; display: flex; flex-direction: column; gap: 4px;">
+                            <div><strong>同步狀態：</strong><span id="googleSyncStatus">未啟用</span></div>
+                            <div style="font-size: 11px; color: #666;"><strong>上次同步：</strong><span id="googleSyncLastTime">無紀錄</span></div>
+                        </div>
+
+                        <button type="button" id="googleSyncNowBtn" class="btn-accent" style="display: flex; align-items: center; gap: 6px; padding: 8px 16px; font-weight: bold; border-radius: 4px;" disabled>
+                            <span id="googleSyncSpinner" class="sync-spinner" style="display: none;"></span>
+                            <span id="googleSyncBtnText">🔄 立即手動同步</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div style="display: flex; justify-content: space-between; align-items: flex-end;">
+                    <label>Gemini API Key（支援多組輪替）:</label>
+                    <a href="https://aistudio.google.com/app/apikey" target="_blank" style="font-size: 12px; color: var(--accent-color); text-decoration: none; margin-bottom: 4px; font-weight: bold;">[ 獲取 API 金鑰 (Google AI Studio) ]</a>
+                </div>
+                <div id="apiKeysContainer"></div>
+                <button id="add-key-btn" type="button" class="btn-secondary" style="width:100%; margin-top:10px;">+ 新增備用金鑰</button>
+
+                <label for="translationMode">處理模式:</label>
+                <select id="translationMode">
+                    <option value="one-step" selected>一條龍服務 (單一模型同時負責辨識與翻譯)</option>
+                    <option value="two-step">雙階段處理 [較慢]</option>
+                </select>
+
+                <label for="modelName">主要翻譯模型:</label>
+                <select id="modelName">
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                </select>
+
+                <div id="fallbackModelContainer">
+                    <label for="fallbackModelName">備援模型 (主要模型失敗時自動切換):</label>
+                    <select id="fallbackModelName">
+                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                        <option value="gemma-2-27b-it">Gemma 2 27B IT</option>
+                    </select>
+
+                    <label style="display: flex; align-items: center; gap: 8px; margin-top: 10px; font-weight: normal;">
+                        <input type="checkbox" id="useFallbackModelOnBatchRetry" style="width: auto; margin-top: 0;">
+                        當批次翻譯重試時，強制使用備援模型
+                    </label>
+                </div>
+
+                <label for="ocrBatchSize">批次翻譯張數 (每次同時翻譯的圖片數):</label>
+                <input type="number" id="ocrBatchSize" min="1" max="30" value="5">
+                <small style="color: #888; font-size:12px;">建議：1 組 API Key 設 1~3 張；多組 Key 可依比例增加，數值越高速度越快但越容易觸發限速。</small>
+
+                <label for="requestDelay">API 呼叫間隔 (毫秒 ms):</label>
+                <input type="number" id="requestDelay" min="0" max="30000" step="500" value="4000">
+                <small style="color: #888; font-size:12px;">建議：4000 ms（4 秒）。若遇到頻繁的 429 錯誤，可適當增加此數值。</small>
+
+                <label for="imageMaxDimension">傳送至 AI 的圖片最大寬高限制 (px):</label>
+                <select id="imageMaxDimension">
+                    <option value="0">不縮放 (傳送原圖)</option>
+                    <option value="720">720 px</option>
+                    <option value="1024">1024 px (預設/推薦)</option>
+                    <option value="1280">1280 px</option>
+                    <option value="1600">1600 px</option>
+                    <option value="2048">2048 px</option>
+                </select>
+                <small style="color: #888; font-size:12px;">等比例縮放至此大小後再傳送給 AI，能大幅加快翻譯速度、節約流量並避免因體積過大被 Google 退件。</small>
+
+                <button id="fetchModelsBtn" type="button" class="btn-accent" style="width:100%; margin-top:12px;">🔄 從 Google 取得最新模型清單</button>
+
+                <label for="customPrompt">自訂翻譯規則 (Prompt):</label>
+                <textarea id="customPrompt" rows="10"></textarea>
+
+                <button id="resetPromptBtn" type="button" class="btn-danger" style="width:100%; margin-top:8px;">↺ 恢復預設規則</button>
+
+
+
+                <button id="saveBtn" style="margin-top: 30px; width: 100%; font-size: 16px; padding: 15px; background: var(--primary-color); color:white; border:none; border-radius:4px; cursor:pointer;">💾 儲存設定</button>
+                <div id="status" class="status-tip">✅ 設定已儲存！</div>
+            </div>
+        </div>
+
+        <!-- Novel Tab -->
+        <div id="novel-tab" class="tab-content">
+            <div class="settings-form">
+                <label for="novelModelName">小說專用模型:</label>
+                <select id="novelModelName">
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                </select>
+
+                <label for="novelBatchSize">單次翻譯數量 (Batch Size):</label>
+                <input type="number" id="novelBatchSize" min="5" max="200" value="50">
+
+                <label for="novelPrompt">小說翻譯規則 (Prompt):</label>
+                <textarea id="novelPrompt" rows="12"></textarea>
+
+                <button id="resetNovelPromptBtn" type="button" class="btn-danger" style="width:100%; margin-top:8px;">↺ 恢復預設規則</button>
+
+                <button id="saveNovelBtn" style="margin-top: 30px; width: 100%; font-size: 16px; padding: 15px; background: var(--primary-color); color:white; border:none; border-radius:4px; cursor:pointer;">💾 儲存小說設定</button>
+                <div id="novel-status" class="status-tip">✅ 小說設定已儲存！</div>
+            </div>
+        </div>
+
+        <!-- Glossary Tab -->
+        <div id="glossary-tab" class="tab-content">
+            <div class="glossary-layout">
+                <div class="manga-sidebar" id="mangaList"></div>
+                <div class="manga-detail" id="mangaDetail">
+                    <div class="empty-state">請由左側選擇作品進行管理</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="./main.js"></script>
+</body>
+</html>

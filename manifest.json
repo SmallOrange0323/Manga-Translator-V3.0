@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxbSJ/RZr3GkCCyIcbENBAFQWL91p2Sl2REChKSUIW/pyJhup+VI/jl3ShXFprfbABqkZ6fywwRivXva3sc2Ceh2jizXPvRBMOutnrteXq5BLjtSA8tX4IrDQKUwR+RRer6pJW6xLHcdRNLeOf4ZmeDM711EBnzCSwB2jnKMG5yZOrcjPpkGAxiqvt0kXMFLEhCtdv7QZ+BURd85sBgg3/ZWa7LtzA1TD59Zd30WDRk1Y/4NUA5RZDAd+bt7Iq7M3ik/wmvOicnnYxNcpzHvLzMF55+pVXSAWhc3a76x0rZn2H+u6Tf56VhiPkSDXkEkp4EKLSvPVtqSGyG1MWY1SawIDAQAB",
+  "name": "Manga Translator V3.0",
+  "version": "3.0.0",
+  "description": "Modernized Manga Translator with Storage-First Architecture",
+  "incognito": "split",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "identity"
+  ],
+  "oauth2": {
+    "client_id": "892014744898-ea2t1djhd9sqs350hb244pifstrlre4q.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/drive.appdata"
+    ]
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background/index.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "js": ["src/content/main.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "options_ui": {
+    "page": "src/options/index.html",
+    "open_in_tab": true
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icon.svg",
+        "icon128.png",
+        "src/mobile/index.html",
+        "src/popup/index.html",
+        "src/popup/main.js",
+        "src/options/index.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "漫譯 V3.0"
+  },
+  "icons": {
+    "128": "icon128.png"
+  }
+}
