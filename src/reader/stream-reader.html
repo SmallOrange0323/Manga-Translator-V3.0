@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>串聯流式閱讀器 - Manga Translator V3</title>
+    <link rel="stylesheet" href="stream-reader.css">
+</head>
+<body class="theme-dark">
+    <!-- 固定控制列 -->
+    <header class="control-panel">
+        <div class="panel-left">
+            <span class="manga-icon">📖</span>
+            <h1 id="manga-title" class="manga-title">載入中...</h1>
+        </div>
+        
+        <div class="panel-center">
+            <button id="btn-prev-chapter" class="nav-btn" disabled>⏮️ 上一話</button>
+            <div class="page-indicator">
+                <span id="current-page">1</span> / <span id="total-pages">1</span>
+            </div>
+            <button id="btn-next-chapter" class="nav-btn" disabled>下一話 ⏭️</button>
+        </div>
+
+        <div class="panel-right">
+            <!-- 圖片寬度滑桿 -->
+            <div class="slider-container">
+                <span>🔍 寬度</span>
+                <input type="range" id="width-slider" min="400" max="1200" value="800" step="50">
+                <span id="width-val">800px</span>
+            </div>
+            
+            <button id="btn-trans-all" class="action-btn accent">⚡ 全頁翻譯</button>
+            <button id="btn-download-zip" class="action-btn">📦 打包下載</button>
+            <button id="btn-toggle-theme" class="action-btn">🌓 切換主題</button>
+        </div>
+    </header>
+
+    <!-- 全局翻譯進度條 -->
+    <div id="global-progress-bar" class="progress-bar-container" style="display: none;">
+        <div id="progress-fill" class="progress-fill"></div>
+        <span id="progress-text" class="progress-text">翻譯中: 0%</span>
+    </div>
+
+    <!-- 流式條漫主容器 -->
+    <main id="reader-container" class="reader-container">
+        <!-- 圖片容器會動態注入到這裡 -->
+        <div class="initial-loading">
+            <div class="spinner"></div>
+            <p>正在初始化流式閱讀器，請稍候...</p>
+        </div>
+    </main>
+
+    <!-- 浮動返回頂端按鈕 -->
+    <button id="btn-scroll-top" class="scroll-top-btn">▲</button>
+
+    <script type="module" src="stream-reader.js"></script>
+</body>
+</html>

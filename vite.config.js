@@ -32,7 +32,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         reader: 'src/reader/result.html',
-        mobile: 'src/mobile/index.html'
+        mobile: 'src/mobile/index.html',
+        streamReader: 'src/reader/stream-reader.html'
       },
       output: {
         manualChunks: undefined,

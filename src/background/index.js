@@ -1,6 +1,7 @@
 import { state } from '../utils/state.js';
 import * as Constants from '../utils/constants.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
+import './download-helper.js';
 import { loadGlossary, saveGlossary, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
 import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch } from './translate-api.js';
 import { log } from '../utils/logger.js';
