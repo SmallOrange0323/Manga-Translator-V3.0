@@ -131,14 +131,14 @@ function initPageContainers() {
     startBackgroundDownloadQueue();
 }
 
-// 自動背景下載佇列主邏輯 (限制最大併發數為 3，防網站阻擋並實現絲滑流式載入)
+// 自動背景下載佇列主邏輯 (將併發數提升至 5，此為 N網 官方預載的安全限流上限，兼顧極速與防封鎖)
 async function startBackgroundDownloadQueue() {
     progressBar.style.display = 'block';
     progressFill.style.width = '0%';
     progressText.textContent = `正在預載圖片中... (0 / ${totalPages})`;
 
     const queue = Array.from({ length: totalPages }, (_, i) => i);
-    const maxConcurrency = 3;
+    const maxConcurrency = 5;
     let activeWorkers = 0;
     let completedCount = 0;
 
