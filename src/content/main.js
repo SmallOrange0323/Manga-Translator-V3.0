@@ -2,6 +2,7 @@ import { log } from '../utils/logger.js';
 import { initDesktopMode } from './desktop-main.js';
 import { initMobileMode } from './mobile-main.js';
 import { detectNavigationLinks } from '../utils/nav-detector.js';
+import { initNEExtractor } from './n-e-extractor.js';
 
 /**
  * 偵測是否為行動端環境 (Edge Android / Kiwi / etc.)
@@ -27,6 +28,9 @@ function isMobileDevice() {
 function bootstrap() {
     const isMobile = isMobileDevice();
     log.info('Content', `系統啟動 - 偵測到環境: ${isMobile ? '行動端' : '電腦端'}`);
+
+    // 初始化 N網/E網 集中閱讀器提取器
+    initNEExtractor();
 
     if (isMobile) {
         initMobileMode();

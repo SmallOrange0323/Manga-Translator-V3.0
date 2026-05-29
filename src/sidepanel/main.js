@@ -626,6 +626,16 @@ function renderPreviewList() {
     document.querySelector('.mt-main-actions').style.display = 'none';
     document.querySelector('.mt-batch-controls').style.display = 'block';
 
+    const streamBtn = document.getElementById('mt-stream-read-btn');
+    if (streamBtn) {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const tab = tabs[0];
+            const url = tab?.url || '';
+            const isNE = url.includes('nhentai.net') || url.includes('e-hentai.org') || url.includes('exhentai.org');
+            streamBtn.style.display = isNE ? 'flex' : 'none';
+        });
+    }
+
     const listContainer = document.createElement('div');
     listContainer.className = 'mt-preview-list';
 
@@ -881,3 +891,28 @@ if (novelRetryAllBtn) {
 // 初始化載入
 updateQuotaUI();
 refreshGlossaryStatus();
+
+// 綁定串聯流式閱讀按鈕點擊事件
+const streamBtn = document.getElementById('mt-stream-read-btn');
+if (streamBtn) {
+    streamBtn.onclick = () => {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const tab = tabs[0];
+            if (!tab) return;
+            streamBtn.innerText = '⏳ 正在讀取詳情...';
+            chrome.tabs.sendMessage(tab.id, { action: 'extractNEMetadata' }, async (response) => {
+                if (chrome.runtime.lastError || !response || !response.success || !response.metadata) {
+                    console.error('[Sidepanel] 讀取 N/E 詳情失敗:', chrome.runtime.lastError?.message || '無回應');
+                    alert('無法自當前頁面提取漫畫資訊，請確保您是在 N/E 網的漫畫詳情首頁！');
+                    streamBtn.innerText = '📖 串聯流式閱讀';
+                    return;
+                }
+                
+                await chrome.storage.local.set({ mt_current_stream: response.metadata });
+                const readerUrl = chrome.runtime.getURL('src/reader/stream-reader.html');
+                window.open(readerUrl, '_blank');
+                streamBtn.innerText = '📖 串聯流式閱讀';
+            });
+        });
+    };
+}
