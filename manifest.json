@@ -12,7 +12,8 @@
     "activeTab",
     "scripting",
     "contextMenus",
-    "identity"
+    "identity",
+    "downloads"
   ],
   "oauth2": {
     "client_id": "892014744898-ea2t1djhd9sqs350hb244pifstrlre4q.apps.googleusercontent.com",
@@ -48,7 +49,8 @@
         "src/mobile/index.html",
         "src/popup/index.html",
         "src/popup/main.js",
-        "src/options/index.html"
+        "src/options/index.html",
+        "src/reader/stream-reader.html"
       ],
       "matches": [
         "<all_urls>"
