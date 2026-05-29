@@ -67,49 +67,28 @@ async function loadMangaData() {
     initPageContainers();
 }
 
-// 建立佔位容器並啟動 Intersection Observer
+// 建立佔位容器並啟動 Intersection Observer 與背景下載佇列
 function initPageContainers() {
     readerContainer.innerHTML = '';
     const currentWidth = widthSlider.value + 'px';
 
-    const observerOptions = {
-        root: null,
-        rootMargin: '600px 0px', // 提前載入
-        threshold: 0.01
-    };
-
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const index = parseInt(entry.target.dataset.index);
-                loadPageImage(index);
-                
-                // 更新當前閱讀頁碼
-                currentPageEl.textContent = index + 1;
-            }
-        });
-    }, observerOptions);
-
+    // 1. 先建立所有頁面的 HTML 骨架與佔位容器
     mangaData.pages.forEach((page, idx) => {
         const wrapper = document.createElement('div');
         wrapper.className = 'page-wrapper';
         wrapper.id = `page-wrapper-${idx}`;
         wrapper.dataset.index = idx;
         wrapper.style.width = currentWidth;
-        
-        // 預設高度以維持條漫排版防抖
-        wrapper.style.minHeight = '600px';
+        wrapper.style.minHeight = '600px'; // 預設高度以防抖
 
-        // 載入中 Overlay
         const overlay = document.createElement('div');
         overlay.className = 'page-overlay';
         overlay.id = `overlay-${idx}`;
         overlay.innerHTML = `
             <div class="spinner"></div>
-            <p>正在載入第 ${idx + 1} 頁...</p>
+            <p id="overlay-text-${idx}">等待下載佇列... (P. ${idx + 1})</p>
         `;
 
-        // 單頁功能控制列
         const actions = document.createElement('div');
         actions.className = 'page-actions';
         actions.innerHTML = `
@@ -119,41 +98,112 @@ function initPageContainers() {
         wrapper.appendChild(overlay);
         wrapper.appendChild(actions);
 
-        // 監聽單頁翻譯
         actions.querySelector('.btn-trans-page').onclick = (e) => {
             e.stopPropagation();
             translateSinglePage(idx);
         };
 
         readerContainer.appendChild(wrapper);
-        observer.observe(wrapper);
-        pageObservers.push({ element: wrapper, observer });
     });
+
+    // 2. 啟動 Intersection Observer 僅用於更新頂部當前閱讀頁碼
+    const observerOptions = {
+        root: null,
+        rootMargin: '100px 0px',
+        threshold: 0.1
+    };
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const index = parseInt(entry.target.dataset.index);
+                currentPageEl.textContent = index + 1;
+            }
+        });
+    }, observerOptions);
+
+    document.querySelectorAll('.page-wrapper').forEach(el => {
+        observer.observe(el);
+        pageObservers.push({ element: el, observer });
+    });
+
+    // 3. 立刻啟動自動背景併發佇列下載圖片
+    startBackgroundDownloadQueue();
 }
 
-// 載入單一頁面的真實圖片連結
-async function loadPageImage(index) {
-    const wrapper = document.getElementById(`page-wrapper-${index}`);
-    const overlay = document.getElementById(`overlay-${index}`);
-    
-    // 若已加載圖片，直接返回
-    if (loadedImagesMap.has(index)) return;
-    
-    // 設定正在載入狀態
-    loadedImagesMap.set(index, 'loading');
+// 自動背景下載佇列主邏輯 (限制最大併發數為 3，防網站阻擋並實現絲滑流式載入)
+async function startBackgroundDownloadQueue() {
+    progressBar.style.display = 'block';
+    progressFill.style.width = '0%';
+    progressText.textContent = `正在預載圖片中... (0 / ${totalPages})`;
 
-    const pageObj = mangaData.pages[index];
-    if (!pageObj || !pageObj.url) {
-        showErrorPage(index, '無效的分頁網址');
-        return;
-    }
+    const queue = Array.from({ length: totalPages }, (_, i) => i);
+    const maxConcurrency = 3;
+    let activeWorkers = 0;
+    let completedCount = 0;
 
-    try {
-        // 向 background 發送抓取請求
+    const runWorker = async () => {
+        while (queue.length > 0) {
+            const index = queue.shift();
+            activeWorkers++;
+            
+            try {
+                // 更新該頁的 UI Loading 狀態為「正在下載...」
+                const overlayText = document.getElementById(`overlay-text-${index}`);
+                if (overlayText) overlayText.textContent = `正在下載中... (P. ${index + 1})`;
+
+                await loadPageImage(index);
+            } catch (err) {
+                console.error(`P.${index + 1} 載入失敗:`, err);
+            } finally {
+                activeWorkers--;
+                completedCount++;
+                const percent = Math.round((completedCount / totalPages) * 100);
+                progressFill.style.width = percent + '%';
+                progressText.textContent = `正在預載圖片中: ${completedCount} / ${totalPages} (${percent}%)`;
+            }
+        }
+
+        // 所有圖片下載緩存完畢
+        if (completedCount === totalPages) {
+            progressFill.style.width = '100%';
+            progressText.textContent = `🎉 所有圖片預載快取完成！`;
+            btnDownloadZip.innerHTML = '📦 瞬間打包下載 (已就緒)';
+            setTimeout(() => {
+                progressBar.style.display = 'none';
+            }, 3000);
+        }
+    };
+
+    // 啟動併發工作線程
+    const workers = Array.from({ length: Math.min(maxConcurrency, totalPages) }, () => runWorker());
+    await Promise.all(workers);
+}
+
+// 載入單一頁面的真實圖片連結 (Promise 化以配合併發佇列)
+function loadPageImage(index) {
+    return new Promise((resolve, reject) => {
+        const wrapper = document.getElementById(`page-wrapper-${index}`);
+        const overlay = document.getElementById(`overlay-${index}`);
+        
+        if (loadedImagesMap.has(index)) {
+            resolve();
+            return;
+        }
+        
+        loadedImagesMap.set(index, 'loading');
+        const pageObj = mangaData.pages[index];
+        if (!pageObj || !pageObj.url) {
+            showErrorPage(index, '無效的分頁網址');
+            reject(new Error('無效的分頁網址'));
+            return;
+        }
+
         chrome.runtime.sendMessage({ action: 'FETCH_HTML', url: pageObj.url }, (response) => {
             if (chrome.runtime.lastError || !response || !response.success || !response.html) {
-                const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : '背景請求失敗';
+                const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : '背景網頁抓取失敗';
                 showErrorPage(index, errMsg);
+                reject(new Error(errMsg));
                 return;
             }
 
@@ -167,21 +217,21 @@ async function loadPageImage(index) {
                     overlay.classList.add('hidden');
                     wrapper.style.minHeight = ''; // 清除固定高度
                     loadedImagesMap.set(index, imgUrl);
+                    resolve();
                 };
 
                 img.onerror = () => {
                     showErrorPage(index, '圖片檔案載入失敗');
+                    reject(new Error('圖片檔案載入失敗'));
                 };
 
-                // 將圖片插入到 overlay 之後
                 wrapper.insertBefore(img, wrapper.querySelector('.page-actions'));
             } else {
-                showErrorPage(index, '無法解析頁面中的圖片連結，請確認網站結構是否變更');
+                showErrorPage(index, '無法解析圖片連結');
+                reject(new Error('無法解析圖片連結'));
             }
         });
-    } catch (err) {
-        showErrorPage(index, err.message);
-    }
+    });
 }
 
 // 從分頁 HTML 提取真實圖片路徑
@@ -214,7 +264,7 @@ function showErrorPage(index, errorMsg) {
 }
 
 // 重試載入
-window.retryLoadPage = (index) => {
+window.retryLoadPage = async (index) => {
     const overlay = document.getElementById(`overlay-${index}`);
     if (overlay) {
         overlay.innerHTML = `
@@ -222,7 +272,11 @@ window.retryLoadPage = (index) => {
             <p>正在重試第 ${index + 1} 頁...</p>
         `;
     }
-    loadPageImage(index);
+    try {
+        await loadPageImage(index);
+    } catch (e) {
+        console.error('重試失敗:', e);
+    }
 };
 
 // 翻譯單頁
