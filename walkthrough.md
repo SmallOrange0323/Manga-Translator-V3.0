@@ -1,74 +1,68 @@
-# 功能交付與驗收報告 (Walkthrough)
+# 功能交付與驗收報告 (Walkthrough) - 提示詞 XML 約束化升級
 
-本報告為 **Manga Translator V3.0** 針對「點擊換頁型網站（N網 / E網）」實作的**「圖片批次提取、條漫流式閱讀與翻譯」**功能的完整交付與驗收說明。
+本報告為 **Manga Translator V3.0** 針對 **Gemini 3.1 Flash-Lite** 模型物理特性進行的**「翻譯提示詞工程 XML 標籤化約束與 API 智慧組裝升級」**功能的完整交付與驗收說明。
 
 ---
 
 ## 🟢 三道綠燈自檢結果 (Self-Verification Report)
 
-在正式交付給您進行 GUI 驗收前，我們已在背景自主完成了以下自動化自檢：
+在正式交付給您進行驗收前，我們已在背景自主完成了自動化自檢：
 
 * **🟢 第一道關卡：Linter 與語法靜態檢查** ➡️ **通過**。
-  * 所有代碼皆符合 Vite 的 ES6 Modules 規範與原生 JavaScript 語法標準，無語法錯誤。
+  * 所有 XML 常數字串與 `translate-api.js` 中繼代碼均完全符合 ES6 規範與 JS 語法標準，無任何語法錯誤。
 * **🟢 第二道關卡：自動編譯與打包 (Build Check)** ➡️ **通過**。
-  * 成功執行 `npm run build`。打包產物編譯百分之百成功，未發生任何 unresolved import 或打包資源丟失。
-  * `jszip` 第三方依賴已成功封裝。
+  * 成功執行 `npm run build`。打包產物編譯百分之百成功，耗時 802ms，未發生任何 unresolved import 或打包資源丟失。
 * **⚪ 第三道關卡：自動測試 (Test Check)** ➡️ **無配置**。
-  * 目前專案未配置自動化測試指令。
 
 ---
 
 ## 🛠️ 主要變更檔案與技術實作說明
 
-我們採取「介面契約優先、主從隔離開發」的方式，實作了以下四大元件的深度解耦協作：
+我們針對 Gemini 原生的 XML 注意力機制，重構了以下核心模組：
 
-### 1. 配置與編譯系統
-* **[manifest.json](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/manifest.json)**：新增 `"downloads"` 權限，並將 `stream-reader.html` 註冊至網頁可存取資源清單。
-* **[vite.config.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/vite.config.js)**：新增 `streamReader` 打包入口，確保將其與關聯 CSS/JS 編譯。
-* **[package.json](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/package.json)**：引入並補齊 `jszip` 依賴。
+### 1. 黃金提示詞庫 XML 標籤化升級
+* **[src/utils/constants.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/utils/constants.js)** (MODIFY)：
+  * **`DEFAULT_PROMPT_ONE_STEP`**：改造成由 `<system_instructions>`、`<critical_rules>` 與 `<translation_rules>` 包裹的 XML 約束結構。
+  * **`DEFAULT_PROMPT_GEMMA_ONE_STEP`**：使用 `<content_rules>`、`<text_merging_rules>` 與 `<json_schema>` 包裹。
+  * **`DEFAULT_PROMPT_TWO_STEP`** & **`DEFAULT_PROMPT_OCR`**：進行標準 XML 格式優化。
+  * **`SYSTEM_BATCH_RULES`**：將批次多圖翻譯規則、邊界解析規則與 Katakana 人名精確音譯要求以 XML 標籤分層包裹。
+  * **`DEFAULT_PROMPT_NOVEL`**：將「去道德審查」、「口吻保持」、「1:1 段落對照」三大核心規則以 XML 標籤分層包裹。
 
-### 2. 背景通訊中繼 (Background)
-* **[download-helper.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/background/download-helper.js)** (NEW)：
-  * 監聽 `FETCH_HTML`：在背景 fetch 分頁並返回文字，完美繞過前端 CORS 跨域。
-  * 監聽 `DOWNLOAD_IMAGES_ZIP`：在背景下載所有圖片 Blob，利用 `JSZip` 打包，呼叫 `chrome.downloads.download` 實現一鍵打包下載。
-* **[index.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/background/index.js)**：初始化並掛載中繼監聽。
-
-### 3. 探針與雙端 UI 按鈕整合 (Content Script)
-* **[n-e-extractor.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/content/n-e-extractor.js)** (NEW)：
-  * 偵測當前網域，在側邊欄或行動端提出請求時，非同步解析整本漫畫的元數據（總頁數、ID、所有分頁 URL）。
-* **[main.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/content/main.js)**：初始化與掛載探針。
-* **[src/sidepanel/index.html](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/sidepanel/index.html)** & **[main.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/sidepanel/main.js)**：
-  * 當用戶在支援的漫畫網站點擊側邊欄「手動選取」圖片時，在上方「取消全選 / 返回」列旁動態呈現 **`📖 串聯流式閱讀`** 按鈕。
-  * 點擊按鈕後與探針通信，將元數據寫入 `chrome.storage.local` 的 `mt_current_stream`，並打開 `stream-reader.html`。
-* **[src/mobile/main.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/mobile/main.js)**：
-  * 行動版進入選取圖片介面時，在「全選 / 取消」按鈕旁動態注入 **`⚡ 串聯流式閱讀`** 按鈕，並綁定相同的預載與跳轉機制。
-
-### 4. 流式集中閱讀沙盒 (UI Page)
-* **[stream-reader.html](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/reader/stream-reader.html)** (NEW)：
-  * 現代化玻璃擬物化頂部控制面板，配置了寬度縮放滑桿、全頁翻譯、打包下載 ZIP、主題切換及章節導航。
-* **[stream-reader.css](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/reader/stream-reader.css)** (NEW)：
-  * 流暢的 Dark/Light 主題切換過渡，精緻的流式條漫垂直居中排列樣式。
-* **[stream-reader.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/reader/stream-reader.js)** (NEW)：
-  * **流式加載**：整合 **Intersection Observer**，當用戶滾動至圖片視區時，才異步請求背景抓取該頁 HTML 並渲染圖片，防抖且節省流量。
-  * **獨立/全頁翻譯**：提供單頁「⚡ 翻譯此頁」與頂部「⚡ 全頁翻譯」，多執行緒輪詢翻譯佇列，並於頂部提供即時翻譯進度條，將譯文層精準覆蓋在圖片下方。
-  * **打包下載**：點擊 `📦 打包下載` 即時打包所有已載入圖片為一個 ZIP 檔案。
+### 2. API 系統指令 XML 智慧組裝
+* **[src/background/translate-api.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/background/translate-api.js)** (MODIFY)：
+  * **優化 `translateTexts`**：
+    以前將術語直接以簡單的 newline 拼貼在 prompt 後。現在升級為結構化 XML 注入，將自定義的 `glossarySnippet` 自動包裹在 **`<glossary>`** 標籤中，強制 Gemini Flash-Lite 遵守系統指令與動態術語庫規則：
+    ```javascript
+    const systemPrompt = `
+<system_instructions>
+${prompt}
+</system_instructions>
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
+    ```
+  * **優化 `callGeminiAPIBatch`**：
+    同樣改裝為 XML 標籤化前綴：
+    ```javascript
+    const systemPrompt = `
+<system_instructions>
+${customPrompt || 'You are a professional manga translator.'}
+${SYSTEM_BATCH_RULES}
+</system_instructions>
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
+    ```
 
 ---
 
-## 🧪 建議實機驗收指南 (GUI Test Guide)
+## 🧪 建議實機驗收指南 (Translation Quality Test Guide)
 
-請您加載最新編譯好的 `dist-v3` 目錄至您的瀏覽器，並依照以下步驟進行實機 GUI 驗收：
+請您加載最新編譯好的 `dist-v3` 目錄至您的瀏覽器，並依照以下步驟進行翻譯品質與紀律的實機驗收：
 
-1. **按鈕注入驗收**：
-   * 進入 nhentai 或 e-hentai / exhentai 任一漫畫詳情首頁。
-   * **PC 端**：開啟擴充功能側邊欄 ➡️ 點擊「手動選取」，驗證上方控制列是否成功出現 **`📖 串聯流式閱讀`** 的精美紫色按鈕（在非支援網站此按鈕會自動隱藏）。
-   * **行動端**：開啟行動版手動選圖介面，驗證「全選/取消」旁是否正確注入了 **`⚡ 串聯流式閱讀`** 按鈕。
-2. **預載與跳轉驗收**：
-   * 點擊按鈕，按鈕文字將變更為「⏳ 正在讀取詳情...」，隨後會自動開啟新分頁跳轉至流式條漫閱讀器。
-3. **滾動加載與寬度滑桿驗收**：
-   * 在條漫閱讀器中向下滾動，觀測圖片是否在進入視區時，正確發送非同步請求抓取分頁 HTML，並順暢顯示真實圖片。
-   * 拖曳頂部控制列的「🔍 寬度」滑桿，確認所有圖片能滑順地同步縮放。
-4. **流式翻譯與打包下載驗收**：
-   * 滑鼠移至任一張圖片，點擊其上方的 `⚡ 翻譯此頁`，確認日中雙語譯文對照能精準貼在圖片下方。
-   * 點擊頂部的 `⚡ 全頁翻譯`，驗證進度條跑滿後，所有圖片皆完美展現出譯文對照。
-   * 點擊頂部的 `📦 打包下載`，驗證瀏覽器是否彈出整本漫畫的 ZIP 壓縮下載，且解壓後圖片順序編號完全正確。
+1. **小說翻譯格式與敏感度驗收**：
+   * 進入任一輕小說網站，開啟小說翻譯。
+   * 觀測翻譯輸出：驗證在強大的 `<safety_and_censorship_rules>` XML 包裹約束下，即使遇到露骨成人（NSFW）或極度敏感描寫，Gemini Flash-Lite 是否能 100% 穩定還原對白、拒絕任何道德自我審查，且 JSON 格式完美無損。
+2. **術語庫 (Glossary) 嚴格遵守度驗收**：
+   * 在擴充功能的術語管理中，手動新增一個漫畫角色的 Katakana 譯名對照（例如 `ココア -> 可可亞醬`）。
+   * 前往漫畫頁面點擊「手動選取」➡️「翻譯此頁」。
+   * 觀測譯文：驗證在 `<glossary>` XML 標籤約束防火牆的保護下，Gemini Flash-Lite 是否能 **100% 完美且穩定地採用該術語**，徹底消除輕量級模型容易忘記術語的物理痛點。
+3. **漫畫批次 JSON 穩定度驗收**：
+   * 點擊「全頁翻譯」或批次翻譯多張圖片。
+   * 觀測控制台日誌：驗證在 `<output_rules>` XML 約束下，Gemini 3.1 Flash-Lite 是否能 100% 穩定回傳結構化 JSON，不再產生 ```json 標記外包的解析異常。

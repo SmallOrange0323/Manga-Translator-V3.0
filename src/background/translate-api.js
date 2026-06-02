@@ -30,8 +30,12 @@ export async function translateTexts(texts, options = {}) {
 
     if (!apiKey) throw new Error('API Key is missing and pool is empty');
 
-    // 將術語片段植入系統指令
-    const systemPrompt = glossarySnippet ? `${prompt}\n\n${glossarySnippet}` : prompt;
+    // 將術語片段植入系統指令 (升級為 XML 標籤包裹結構，針對 Gemini 3.1 Flash-Lite 優化)
+    const systemPrompt = `
+<system_instructions>
+${prompt}
+</system_instructions>
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
 
     // 建立 User Parts (僅包含待翻譯文字)
     const userParts = [];
@@ -302,10 +306,13 @@ export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnip
     const resolvedKey = apiKey || state.getNextApiKey();
     if (!resolvedKey) throw new Error('API Key is missing');
 
-    // 組合系統指令 (System Instruction) - 這是觸發 Context Caching 的關鍵穩定前綴
-    const systemPrompt = glossarySnippet 
-        ? `${customPrompt || 'You are a professional manga translator.'}\n\n${glossarySnippet}\n\n${SYSTEM_BATCH_RULES}`
-        : `${customPrompt || 'You are a professional manga translator.'}\n\n${SYSTEM_BATCH_RULES}`;
+    // 組合系統指令 (System Instruction) - 升級為 XML 約束結構並包裹術語庫，觸發 Gemini Context Caching
+    const systemPrompt = `
+<system_instructions>
+${customPrompt || 'You are a professional manga translator.'}
+${SYSTEM_BATCH_RULES}
+</system_instructions>
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
 
     // 建立 User Parts
     const userParts = [];

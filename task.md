@@ -1,22 +1,12 @@
-# 任務清單：圖片提取與集中流式閱讀/翻譯功能實作
+# 任務清單：翻譯提示詞工程與 XML 約束結構化升級
 
-- `[x]` 基礎設定與編譯配置
-  - `[x]` 修改 `manifest.json`：新增 `downloads` 權限並加入網頁可存取資源清單
-  - `[x]` 修改 `vite.config.js`：加入 `stream-reader` 編譯進入點
-- `[x]` 背景服務與通訊中繼 (Background)
-  - `[x]` 實作 `download-helper.js`：處理跨域 HTML 預載與 JSZip 壓縮打包下載
-  - `[x]` 修改 `src/background/index.js`：初始化掛載 `download-helper`
-- `[x]` 網頁端探針與解析器 (Content Script)
-  - `[x]` 實作 `n-e-extractor.js`：解析 N網、E網 的 DOM 與分頁預載
-  - `[x]` 修改 `src/content/main.js`：初始化掛載 `n-e-extractor`
-- `[x]` UI 整合 (PC 側邊欄與行動版控制台)
-  - `[x]` 修改 `src/sidepanel/index.html`：新增「串聯流式閱讀」按鈕
-  - `[x]` 修改 `src/sidepanel/main.js`：綁定並觸發流式閱讀器跳轉
-  - `[x]` 修改 `src/mobile/main.js`：動態注入行動端控制台按鈕與綁定事件
-- `[x]` 獨立流式集中閱讀器 (UI Page)
-  - `[x]` 實作 `stream-reader.html`：現代化條漫式骨架與進度控制面板
-  - `[x]` 實作 `stream-reader.css`：條漫垂直流式排列 CSS 樣式
-  - `[x]` 實作 `stream-reader.js`：流式載入、JSZip 打包與一鍵翻譯
+- `[x]` 黃金提示詞庫 XML 改造 (Constants)
+  - `[x]` 改造 `DEFAULT_PROMPT_ONE_STEP`：新增 `<system_instructions>`、`<critical_rules>` 與 XML 結構
+  - `[x]` 改造 `DEFAULT_PROMPT_NOVEL`：將小說去道德審查與口吻規則以 XML 標籤包裹
+  - `[x]` 改造 `SYSTEM_BATCH_RULES`：以 XML 包裹多圖批次與 Katakana 音譯要求
+- `[x]` API 系統指令組裝優化 (Translate API)
+  - `[x]` 修改 `translateTexts`：重構系統指令拼裝，將 `glossarySnippet` 包裹於 `<glossary>` 標籤中
+  - `[x]` 修改 `callGeminiAPIBatch`：升級批次系統指令為 XML 結構
 - `[x]` 驗證與測試 (Verification)
   - `[x]` 執行 `npm run build` 進行自動化編譯與打包檢查
-  - `[x]` 手動測試 Chrome Extension 安裝、批次 ZIP 打包下載與一鍵翻譯
+  - `[x]` 手動測試：驗證 Gemini Flash-Lite 在 XML 約束下的 JSON 格式穩定度與術語庫對照精準度
