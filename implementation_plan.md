@@ -1,117 +1,100 @@
-# 實施計畫：圖片提取與集中流式閱讀/翻譯功能 (N網/E網模式)
+# 實施計畫：翻譯品質提示詞工程與 XML 約束結構化升級 (針對 Gemini 3.1 Flash-Lite 優化)
 
-本計畫旨在為 Manga Translator V3.0 實作針對「點擊換頁型網站（以 N網、E網為代表）」的**「批次預載、集中串聯、流式條漫閱讀與翻譯」**功能。
+本計畫旨在針對 **Gemini 3.1 Flash-Lite** 原生的 XML 標籤注意力機制與 1M 超長上下文特性，對 Manga Translator V3.0 的核心翻譯提示詞庫與 API 中繼器進行結構化升級，以最低成本換取極致的翻譯品質與高度紀律的格式輸出。
 
 ---
 
-## 📋 使用者審查與交互設計確認
+## 📋 使用者審查請求
 
 > [!IMPORTANT]
-> **依據您的具體回饋，我們將「一鍵流式串聯閱讀」的觸發按鈕完美融入現有的 UI 中，不破壞原有網頁版面：**
+> **本計畫為純粹的代碼內部優化，無任何權限與外部依賴變更，亦不破壞現有的 UI 交互：**
 > 
-> 1. **PC 版（側邊欄 UI 整合）**：
->    * **觸發路徑**：使用者在側邊欄點擊「手動選取」進入圖片選取介面。
->    * **按鈕位置**：在上方「全選 / 取消全選」控制列（即 `mt-select-all-btn` 與返回按鈕的位置）旁邊，新增一個精美的**「串聯流式閱讀」**按鈕。
->    * **效果**：點擊該按鈕後，會直接抓取當前漫畫的所有頁面，並自動開啟新分頁進行集中流式閱讀與翻譯。
-> 
-> 2. **行動版（網頁注入控制台 UI 整合）**：
->    * **觸發路徑**：行動版進入圖片選取介面（懸浮控制台）。
->    * **按鈕位置**：在「全選 / 取消」按鈕的旁邊，新增一個**「串聯流式閱讀」**按鈕。
+> 1. **XML 約束化常數改造**：將 `src/utils/constants.js` 中的預設提示詞庫升級為 XML 標籤包裹與 Few-Shot 結構。
+> 2. **API 調用組裝升級**：修改 `src/background/translate-api.js` 中對「系統提示詞」與「術語庫 (Glossary)」的組裝方式，以前期文字拼接改為結構化 XML 包裹。
 
 ---
 
-## 💬 開放性問題
+## 🗺 提示詞 XML 結構規範 (XML Tag Specification)
 
-> [!NOTE]
-> * **按鈕視覺風格**：新增的按鈕將採用符合 Manga Translator V3.0 的紫色漸層現代風格，並配上 `📖` 或 `⚡` 圖示，以醒目的特徵標示。您對此視覺設計是否滿意？
+為了使 Gemini Flash-Lite 發揮 100% 的翻譯水準，系統指令將按照以下 XML 架構進行封裝：
 
----
+```xml
+<system_instructions>
+  [系統核心翻譯角色與原則]
+  
+  <safety_rules>
+    [虛構藝術創作免道德審查與和諧化說明]
+  </safety_rules>
+  
+  <format_rules>
+    [Strict output JSON guidelines / Line combination logic]
+  </format_rules>
+</system_instructions>
 
-## 🗺 介面通訊契約 (Message Protocol Contract)
+<glossary>
+  [動態注入的術語與人名 Key-Value 對照表]
+</glossary>
 
-Content Script 與 Background Service Worker 之間的通訊遵循以下命名與格式契約：
+<examples>
+  <example>
+    <original>[原文樣本]</original>
+    <translation>[Traditional Chinese 完美翻譯樣本]</translation>
+  </example>
+</examples>
 
-### 1. 異步抓取分頁 HTML (FETCH_HTML)
-* **傳送端**：Content Script ➡️ Background
-* **格式**：
-  ```json
-  {
-    "action": "FETCH_HTML",
-    "url": "https://example.com/g/123456/2/"
-  }
-  ```
-* **回傳端**：Background ➡️ Content Script
-* **格式**：回傳 HTML 網頁文字內容 (`string`)。
-
-### 2. 批次下載圖片 Blob (DOWNLOAD_IMAGES_ZIP)
-* **傳送端**：UI 頁面 ➡️ Background
-* **格式**：
-  ```json
-  {
-    "action": "DOWNLOAD_IMAGES_ZIP",
-    "urls": ["image_url_1", "image_url_2", "..."]
-  }
-  ```
-* **回傳端**：Background ➡️ UI 頁面
-* **格式**：`{ "success": true, "downloadId": 123 }`。
+<input_data>
+  [本次待翻譯的 JSON 段落數據]
+</input_data>
+```
 
 ---
 
 ## 🛠 預計變更
 
-### 1. 基礎設定與編譯配置
-#### [MODIFY] [manifest.json](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/manifest.json)
-* 在 `permissions` 中新增 `"downloads"` 權限。
-* 將 `src/reader/stream-reader.html` 加入 `web_accessible_resources` 的 `resources` 陣列中。
-
-#### [MODIFY] [vite.config.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/vite.config.js)
-* 於 `rollupOptions.input` 中新增 `'stream-reader': 'src/reader/stream-reader.html'`，確保 Vite 能將流式閱讀器打包編譯。
+### 1. 黃金提示詞庫改造 (Constants)
+#### [MODIFY] [src/utils/constants.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/utils/constants.js)
+* **`DEFAULT_PROMPT_ONE_STEP`**：改造成由 `<system_instructions>`、`<critical_rules>` 與 `<examples>` 包裹的 XML 約束結構，包含氣泡文字合併合併規則。
+* **`DEFAULT_PROMPT_NOVEL`**：將「道德去敏感化」、「口吻保持」、「1:1 段落對照」三大核心規則以 XML 標籤分層包裹。
+* **`SYSTEM_BATCH_RULES`**：將多圖批次處理規則、JSON Schema 要求與 Katakana 人名精確音譯要求進行 XML 約束包裹。
 
 ---
 
-### 2. 背景服務與通訊中繼 (Background)
-#### [NEW] [download-helper.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/background/download-helper.js)
-* 實作 `FETCH_HTML` 監聽：利用背景免除 CORS 的優勢抓取分頁內容。
-* 實作 `DOWNLOAD_IMAGES_ZIP` 監聽：整合 `jszip`（在打包時引入），在背景下載所有圖片 Blob 並打包為 `.zip`，再呼叫 `chrome.downloads.download` 下載。
+### 2. API 系統指令組裝升級 (Translate API)
+#### [MODIFY] [src/background/translate-api.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/background/translate-api.js)
 
-#### [MODIFY] [index.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/background/index.js)
-* 掛載與初始化 `download-helper.js`。
+* **優化 `translateTexts` (L34 附近)**：
+  以前將術語直接以 newline 拼貼：
+  ```javascript
+  const systemPrompt = glossarySnippet ? `${prompt}\n\n${glossarySnippet}` : prompt;
+  ```
+  升級為結構化 XML 注入：
+  ```javascript
+  const systemInstructions = `
+<system_instructions>
+${prompt}
+</system_instructions>
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
+  ```
 
----
-
-### 3. UI 整合與探針 (Content & Sidepanel)
-#### [MODIFY] [src/sidepanel/index.html](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/sidepanel/index.html)
-* 在圖片選取的控制區（`#mt-select-all-btn` 附近）新增「串聯流式閱讀」的 HTML 按鈕。
-
-#### [MODIFY] [src/sidepanel/main.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/sidepanel/main.js)
-* 綁定新按鈕的點擊事件，當處於支援網站（N網/E網）時顯示該按鈕，點擊後觸發流式沙盒頁面載入。
-
-#### [MODIFY] [src/mobile/main.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/mobile/main.js)
-* 在行動版圖片選取控制台的「全選 / 取消」按鈕旁，動態新增「串聯流式閱讀」按鈕，並綁定跳轉至行動流式閱讀器的事件。
-
-#### [NEW] [n-e-extractor.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/content/n-e-extractor.js)
-* 負責對 N網/E網 的 DOM 結構進行總頁數解析與各分頁圖片的非同步預載策略。
-
----
-
-### 4. 獨立流式集中閱讀器 (UI Page)
-#### [NEW] [stream-reader.html](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/reader/stream-reader.html)
-* 提供條漫式垂直串聯的 HTML 骨架、控制面板（打包下載、一鍵翻譯、進度條）。
-
-#### [NEW] [stream-reader.css](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/reader/stream-reader.css)
-* 流式條漫垂直排列 CSS、現代化精緻暗色調面板樣式。
-
-#### [NEW] [stream-reader.js](file:///C:/Users/user/.gemini/antigravity/worktrees/Manga-Translator-V3.0/check-project-progress/src/reader/stream-reader.js)
-* 串接背景資料獲取、流式動態渲染圖片、串接現有的翻譯與 OCR 引擎、調用 ZIP 下載功能。
+* **優化 `callGeminiAPIBatch` (L306 附近)**：
+  同樣改裝為 XML 標籤化前綴：
+  ```javascript
+  const systemPrompt = `
+<system_instructions>
+${customPrompt || 'You are a professional manga translator.'}
+${SYSTEM_BATCH_RULES}
+</system_instructions>
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
+  ```
 
 ---
 
 ## 📈 驗證計劃
 
 ### 1. 自動化三道綠燈自檢
-* **第一道：語法靜態檢查**：確保程式碼無 ES6 Modules 語法衝突。
-* **第二道：自動編譯打包 (Build Check)**：執行 `npm run build`，確保 `dist-v3/` 能成功生成 `stream-reader.html` 及所有關聯 JS/CSS 資源，且 `jszip` 成功打包。
+* **第一道：Linter 靜態檢查**：確保 XML 字串引號、變數拼接正確，無語法錯誤。
+* **第二道：自動編譯打包 (Build Check)**：執行 `npm run build`，確保新打包的 `dist-v3/` 無 Rollup 解析錯誤。
 
-### 2. 手動功能驗證
-* **下載測試**：進入 Chrome 開發者模式載入 `dist-v3`，實地在測試分頁點擊按鈕，驗證是否能成功打包下載 `.zip` 壓縮檔，並依序命名。
-* **翻譯測試**：在流式頁面點擊「一鍵翻譯」，驗證 OCR 與翻譯層是否能正確覆蓋於圖片上方。
+### 2. 手動翻譯品質對位驗證
+* **格式穩定度測試**：在手動選取模式下，測試多張漫畫的「全頁翻譯」，觀測 Gemini Flash-Lite 在 XML 約束下，是否能 100% 穩定輸出 JSON，且無 any "```json" 幻覺外包裹。
+* **術語對位測試**：手動在術語庫中加入 Katakana 專有名詞（例如 `ココア -> 可可亞`），測試翻譯，驗證 Gemini Flash-Lite 是否能 100% 嚴格遵守 `<glossary>` 約束完成譯名對照。
