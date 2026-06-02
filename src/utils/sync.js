@@ -117,10 +117,21 @@ async function findSyncFile(token) {
   });
 
   if (!res.ok) {
+    let errorDetails = '';
+    try {
+      const errJson = await res.json();
+      errorDetails = errJson.error?.message || '';
+    } catch (e) {}
+
     if (res.status === 401) {
       await removeCachedAuthToken(token);
     }
-    throw new Error(`搜尋同步檔案失敗: ${res.statusText}`);
+    
+    const finalMsg = errorDetails 
+      ? `HTTP ${res.status} - ${errorDetails}` 
+      : `HTTP ${res.status} ${res.statusText}`;
+      
+    throw new Error(`搜尋同步檔案失敗: ${finalMsg}`);
   }
 
   const data = await res.json();
@@ -144,7 +155,13 @@ async function downloadSyncFile(token, fileId) {
   });
 
   if (!res.ok) {
-    throw new Error(`下載同步檔案失敗: ${res.statusText}`);
+    let errorDetails = '';
+    try {
+      const errJson = await res.json();
+      errorDetails = errJson.error?.message || '';
+    } catch (e) {}
+    const finalMsg = errorDetails ? `HTTP ${res.status} - ${errorDetails}` : `HTTP ${res.status} ${res.statusText}`;
+    throw new Error(`下載同步檔案失敗: ${finalMsg}`);
   }
 
   return await res.json();
@@ -183,7 +200,13 @@ async function createSyncFile(token, contentData) {
   });
 
   if (!res.ok) {
-    throw new Error(`新建雲端同步檔案失敗: ${res.statusText}`);
+    let errorDetails = '';
+    try {
+      const errJson = await res.json();
+      errorDetails = errJson.error?.message || '';
+    } catch (e) {}
+    const finalMsg = errorDetails ? `HTTP ${res.status} - ${errorDetails}` : `HTTP ${res.status} ${res.statusText}`;
+    throw new Error(`新建雲端同步檔案失敗: ${finalMsg}`);
   }
 
   const result = await res.json();
@@ -207,7 +230,13 @@ async function updateSyncFile(token, fileId, contentData) {
   });
 
   if (!res.ok) {
-    throw new Error(`更新雲端同步檔案失敗: ${res.statusText}`);
+    let errorDetails = '';
+    try {
+      const errJson = await res.json();
+      errorDetails = errJson.error?.message || '';
+    } catch (e) {}
+    const finalMsg = errorDetails ? `HTTP ${res.status} - ${errorDetails}` : `HTTP ${res.status} ${res.statusText}`;
+    throw new Error(`更新雲端同步檔案失敗: ${finalMsg}`);
   }
 
   return await res.json();
