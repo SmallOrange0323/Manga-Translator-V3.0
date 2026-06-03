@@ -167,11 +167,89 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // 綁定「批次重翻」按鈕
+    const retranslateAllBtn = document.getElementById('retranslate-all-btn');
+    if (retranslateAllBtn) {
+        retranslateAllBtn.addEventListener('click', () => {
+            const images = translatedData
+                .map(item => item.retryUrl || item.image)
+                .filter(url => url);
+
+            if (images.length === 0) {
+                alert('目前沒有已載入的圖片可以重新翻譯！');
+                return;
+            }
+
+            if (!confirm(`確定要重新翻譯整批漫畫（共 ${images.length} 張）嗎？這將會清除當前所有翻譯結果並重頭開始。`)) {
+                return;
+            }
+
+            // 隱藏可能顯示的重試失敗按鈕，並開啟翻譯遮罩
+            const retryContainer = document.getElementById('retry-all-container');
+            if (retryContainer) retryContainer.style.display = 'none';
+            const overlay = document.getElementById('loading-overlay');
+            if (overlay) overlay.classList.remove('hidden');
+            document.getElementById('progress-text').innerText = `正在準備重新翻譯 ${images.length} 張圖片...`;
+
+            chrome.runtime.sendMessage({
+                action: 'RETRANSLATE_ALL_BATCH',
+                images: images,
+                sourceTabId: sourceTabId
+            }, (response) => {
+                if (response?.status !== 'retrying') {
+                    alert('重新翻譯請求失敗：' + (response?.error || '未知錯誤'));
+                    if (overlay) overlay.classList.add('hidden');
+                }
+            });
+        });
+    }
+
     // 通知背景結果分頁已載入完成
     chrome.runtime.sendMessage({ action: "resultPageReady" }).catch(() => {});
 
     // 初始化語彙庫 Modal
     setupGlossaryModal();
+
+    // ── 實作鍵盤快捷鍵校對與卡片切換功能 ──
+    const style = document.createElement('style');
+    style.id = 'mt-result-focus-styles';
+    style.textContent = `
+        .result-card.is-focused {
+            border: 2px solid #4a9eff !important;
+            box-shadow: 0 0 15px rgba(74, 158, 255, 0.4) !important;
+            transform: translateY(-2px) scale(1.005);
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+    `;
+    document.head.appendChild(style);
+
+    let currentFocusedCardIndex = -1;
+    document.addEventListener('keydown', (e) => {
+        // 如果使用者正在輸入文字或可編輯狀態中，不進行卡片切換
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+            return;
+        }
+
+        const cards = container.querySelectorAll('.result-card');
+        if (cards.length === 0) return;
+
+        if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+            e.preventDefault();
+            currentFocusedCardIndex = Math.min(currentFocusedCardIndex + 1, cards.length - 1);
+            focusCard(cards[currentFocusedCardIndex]);
+        } else if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+            e.preventDefault();
+            currentFocusedCardIndex = Math.max(currentFocusedCardIndex - 1, 0);
+            focusCard(cards[currentFocusedCardIndex]);
+        }
+    });
+
+    function focusCard(cardEl) {
+        if (!cardEl) return;
+        container.querySelectorAll('.result-card').forEach(el => el.classList.remove('is-focused'));
+        cardEl.classList.add('is-focused');
+        cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 });
 
 function setupGlossaryModal() {
@@ -721,6 +799,29 @@ function renderDialogueItems(container, results, item) {
         origText.setAttribute('contenteditable', 'true');
         origText.setAttribute('spellcheck', 'false');
         origText.textContent = res.original || '無內容';
+        
+        // 實作 Ctrl + Enter 自動跳轉並聚焦下一個對話文字框
+        origText.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                e.preventDefault();
+                const allOrigs = [...container.querySelectorAll('.original-text')];
+                const currentIdx = allOrigs.indexOf(origText);
+                if (currentIdx !== -1 && currentIdx + 1 < allOrigs.length) {
+                    const nextOrig = allOrigs[currentIdx + 1];
+                    nextOrig.focus();
+                    
+                    // 選取該對話框所有文字，方便使用者打字替換
+                    const range = document.createRange();
+                    range.selectNodeContents(nextOrig);
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                } else {
+                    origText.blur();
+                }
+            }
+        });
+
         contentDiv.appendChild(transText);
         contentDiv.appendChild(origText);
         const btnGroup = document.createElement('div');

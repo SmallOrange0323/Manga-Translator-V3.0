@@ -80,7 +80,8 @@ async function initGeneralSettings() {
         ['useFallbackModelOnBatchRetry', false],
         ['requestDelay', 4000],
         ['imageMaxDimension', 1024],
-        ['ocrModelName', 'gemma-4-26b-a4b-it']
+        ['ocrModelName', 'gemma-4-26b-a4b-it'],
+        ['enableTaiwanLocalization', true]
     ];
 
     for (const [id, def] of fields) {
@@ -225,6 +226,9 @@ function setupEventHandlers() {
 
             const fallbackRetry = document.getElementById('useFallbackModelOnBatchRetry');
             if(fallbackRetry) await state.set('useFallbackModelOnBatchRetry', fallbackRetry.checked);
+
+            const twLocalization = document.getElementById('enableTaiwanLocalization');
+            if(twLocalization) await state.set('enableTaiwanLocalization', twLocalization.checked);
 
             const googleClientIdEl = document.getElementById('googleClientId');
             if (googleClientIdEl) {

@@ -899,6 +899,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
   }
 
+  // ── 批次重翻整個作品/整批 ──
+  if (message.action === 'RETRANSLATE_ALL_BATCH') {
+      const { images, sourceTabId: retrySourceTabId } = message;
+      const retryResultTabId = message.resultTabId || sender.tab?.id;
+      if (!images || images.length === 0 || !retryResultTabId) {
+          sendResponse({ status: 'error', error: '缺少圖片清單或結果分頁 ID' });
+          return false;
+      }
+
+      // 先停止當前可能正在運作的任何任務
+      state.set('isStopping', true);
+
+      // 延遲一點點時間（例如 300ms），讓前一次的 loop 退出
+      setTimeout(async () => {
+          // 重置停止與暫停旗標
+          await state.set('isStopping', false);
+          await state.set('isBatchPaused', false);
+
+          log.info('Background', `[重翻批次] 收到 ${images.length} 張圖片，開始重新翻譯... (resultTabId: ${retryResultTabId})`);
+          // 直接以現有 resultTabId 啟動批次翻譯，isRetry = false，這會清空結果頁面並重頭開始
+          processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, false);
+      }, 300);
+
+      sendResponse({ status: 'retrying' });
+      return false;
+  }
+
   return false;
 });
 
