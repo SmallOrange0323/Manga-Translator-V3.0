@@ -16,14 +16,19 @@ const SYNC_STATUS_KEY = 'googleSyncStatus';
 function runWebAuthFlow(interactive = true) {
   return new Promise(async (resolve, reject) => {
     try {
-      // 優先載入使用者在設定頁面中貼入的自訂 Web 用戶端 ID
+      // 優先載入使用者貼入的 Client ID，否則使用預設 Web 應用程式 Client ID
       const savedClientId = await state.get('googleClientId', '');
-      const clientId = savedClientId || '892014744898-ea2t1djhd9sqs350hb244pifstrlre4q.apps.googleusercontent.com';
+      const clientId = savedClientId || '892014744898-61cck565ped868ht31jjqc8apsvpm6gf.apps.googleusercontent.com';
+      const userEmail = await state.get('googleAccountEmail', '');
       const redirectUri = chrome.identity.getRedirectURL();
       const scope = encodeURIComponent('https://www.googleapis.com/auth/drive.appdata');
-      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&response_type=token&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}`;
+      
+      let authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&response_type=token&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&prompt=select_account`;
+      if (userEmail) {
+        authUrl += `&login_hint=${encodeURIComponent(userEmail)}`;
+      }
 
-      log.info('GoogleSync', '發起跨瀏覽器 WebAuthFlow 授權...', redirectUri);
+      log.info('GoogleSync', '發起 WebAuthFlow 授權...', authUrl);
 
       chrome.identity.launchWebAuthFlow({
         url: authUrl,
@@ -31,8 +36,13 @@ function runWebAuthFlow(interactive = true) {
       }, (redirectUrl) => {
         const err = chrome.runtime.lastError;
         if (err) {
-          log.error('GoogleSync', 'WebAuthFlow 失敗:', err.message);
-          reject(new Error(err.message));
+          const errMsg = err.message || '';
+          log.warn('GoogleSync', 'WebAuthFlow 視窗建立失敗，嘗試行動端新分頁降級授權:', errMsg);
+          if (errMsg.includes('browser window') || errMsg.includes("Couldn't create") || interactive) {
+            runMobileTabAuth(authUrl, redirectUri).then(resolve).catch(reject);
+            return;
+          }
+          reject(new Error(errMsg));
           return;
         }
 
@@ -61,6 +71,40 @@ function runWebAuthFlow(interactive = true) {
 }
 
 /**
+ * 行動端 (Edge Android) 專用新分頁 OAuth 降級授權
+ */
+function runMobileTabAuth(authUrl, redirectUri) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.create({ url: authUrl, active: true }, (tab) => {
+        if (!tab || !tab.id) {
+          return reject(new Error('無法開啟行動端授權分頁'));
+        }
+        const tabId = tab.id;
+
+        function onTabUpdated(updatedTabId, changeInfo) {
+          if (updatedTabId === tabId && changeInfo.url) {
+            if (changeInfo.url.startsWith(redirectUri) || changeInfo.url.includes('access_token=')) {
+              const matches = changeInfo.url.match(/access_token=([^&]+)/);
+              if (matches && matches[1]) {
+                chrome.tabs.onUpdated.removeListener(onTabUpdated);
+                chrome.tabs.remove(tabId).catch(() => {});
+                log.info('GoogleSync', '行動端分頁授權成功取得 Token');
+                resolve(matches[1]);
+              }
+            }
+          }
+        }
+
+        chrome.tabs.onUpdated.addListener(onTabUpdated);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+/**
  * 取得 Google 授權 Token
  * @param {boolean} interactive 是否顯示互動視窗進行授權
  */
@@ -71,9 +115,10 @@ export function getAuthToken(interactive = true) {
       const err = chrome.runtime.lastError;
       if (err) {
         const errMsg = err.message || '';
-        // 當發現是 Edge 或 API 不受支援時，自動無縫降級至 Web 授權流
-        if (errMsg.includes('not supported') || errMsg.includes('Edge') || errMsg.includes('disabled')) {
-          log.info('GoogleSync', '偵測到 getAuthToken 不受支援，正在為 Edge 瀏覽器降級使用 WebAuthFlow...');
+        // 當 Chrome 內建 getAuthToken 失敗 (如 Edge 不受支援、新瀏覽器 bad client id、OAuth2 失敗等)，自動無縫降級至 Web 授權流
+        const lowerMsg = errMsg.toLowerCase();
+        if (lowerMsg.includes('not supported') || lowerMsg.includes('edge') || lowerMsg.includes('disabled') || lowerMsg.includes('bad client id') || lowerMsg.includes('oauth2')) {
+          log.info('GoogleSync', `偵測到 getAuthToken 異常 (${errMsg})，正在自動降級使用 WebAuthFlow 授權...`);
           runWebAuthFlow(interactive).then(resolve).catch(reject);
         } else {
           log.error('GoogleSync', '取得 Token 失敗:', errMsg);
@@ -288,7 +333,7 @@ export async function performBiDirectionalSync(token) {
   // 萃取設定檔
   const settingKeys = [
     'apiKey', 'translationMode', 'modelName', 'fallbackModelName', 
-    'useFallbackModelOnBatchRetry', 'ocrBatchSize', 'requestDelay', 
+    'useFallbackModelOnBatchRetry', 'enableTaiwanLocalization', 'googleAccountEmail', 'ocrBatchSize', 'requestDelay', 
     'imageMaxDimension', 'ocrModelName', 'customPrompt', 'customPromptOcr',
     'novelModelName', 'novelBatchSize', 'novelPrompt'
   ];
@@ -395,6 +440,7 @@ export async function performBiDirectionalSync(token) {
   updatePayload[SYNC_STATUS_KEY] = '已與雲端同步';
   
   await chrome.storage.local.set(updatePayload);
+  await state.refreshCache();
 
   // 寫入雲端檔案
   const syncPayload = {

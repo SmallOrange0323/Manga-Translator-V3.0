@@ -34,7 +34,7 @@ async function processNovelQueue() {
             }
 
             // 讀取設定
-            const modelName = await state.get('novelModelName', 'gemini-1.5-flash');
+            const modelName = await state.get('novelModelName', 'gemini-3.5-flash-lite');
             const novelPrompt = await state.get('novelPrompt', 'Translate to Traditional Chinese.');
             const requestDelay = await state.get('requestDelay', 3000);
 

@@ -264,9 +264,9 @@
         <!-- Settings Tab -->
         <div id="settings-tab" class="tab-content active">
             <div class="settings-form">
-                <!-- Google 雲端同步設定面板 -->
+                <!-- Google 雲端同步設定面板 (極簡版) -->
                 <div class="sync-panel" style="margin-bottom: 25px; padding: 20px; border-radius: 8px; background: linear-gradient(135deg, #e3f2fd 0%, #e8f5e9 100%); border: 1px solid #bbdefb; box-shadow: 0 4px 15px rgba(0,0,0,0.05); transition: all 0.3s ease;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px;">
                         <h3 style="margin: 0; color: #1565c0; font-size: 16px; display: flex; align-items: center; gap: 8px;">
                             <span>☁️ Google 雲端同步設定</span>
                         </h3>
@@ -276,18 +276,14 @@
                         </label>
                     </div>
                     
-                    <!-- GCP Web Client ID 自訂輸入框（解決 Edge/Chrome 跨端 WebAuthFlow 相容性） -->
-                    <div id="googleClientIdContainer" style="margin-bottom: 15px; background: rgba(255,255,255,0.6); padding: 12px; border-radius: 6px; border: 1px solid #bbdefb;">
-                        <label for="googleClientId" style="font-size: 12px; font-weight: bold; color: #1565c0; margin-bottom: 6px; display: block;">GCP Web Client ID (Edge / 跨端授權專用):</label>
-                        <input type="text" id="googleClientId" placeholder="格式為: xxxxxxxx.apps.googleusercontent.com" style="width: 100%; padding: 8px; font-size: 12px; border: 1px solid #bbdefb; border-radius: 4px; box-sizing: border-box; outline: none; margin-bottom: 6px;">
-                        <small style="color: #555; font-size: 11px; display: block; line-height: 1.4;">
-                            ⚠️ <strong>重要 (Edge 使用者)</strong>：請至 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color: #1565c0; font-weight: bold;">Google Cloud 憑證頁面</a> 建立一個類型為<strong>「Web 應用程式 (Web Application)」</strong>的憑證，並將下方的已授權重新導向 URI 填入 GCP 中：<br>
-                            <code id="googleRedirectUri" style="background: #fff; padding: 3px 6px; border-radius: 3px; border: 1px solid #bbdefb; font-family: monospace; font-size: 10px; word-break: break-all; display: inline-block; margin-top: 4px; font-weight: bold; color: #333;">載入中...</code>
-                        </small>
+                    <!-- 極簡 Gmail 帳號綁定輸入框 -->
+                    <div style="margin-bottom: 15px; background: rgba(255,255,255,0.7); padding: 12px; border-radius: 6px; border: 1px solid #bbdefb;">
+                        <label for="googleAccountEmail" style="font-size: 12px; font-weight: bold; color: #1565c0; margin-bottom: 6px; display: block;">Google 帳號 (Gmail):</label>
+                        <input type="email" id="googleAccountEmail" placeholder="例如: yourname@gmail.com" style="width: 100%; padding: 8px 12px; font-size: 13px; border: 1px solid #bbdefb; border-radius: 4px; box-sizing: border-box; outline: none;">
                     </div>
                     
                     <p style="margin: 0 0 15px 0; font-size: 12px; color: #555; line-height: 1.5;">
-                        開啟後將自動將您的多金鑰池設定與詞彙術語庫備份至 Google 雲端帳戶的專屬沙盒中，實現跨瀏覽器與裝置間的無縫雙向同步。
+                        開啟後將自動將您的設定與術語庫同步備份至 Gmail 雲端沙盒，實現跨裝置雙向同步。
                     </p>
 
                     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
@@ -318,14 +314,20 @@
 
                 <label for="modelName">主要翻譯模型:</label>
                 <select id="modelName">
+                    <option value="gemini-3.1-flash-lite" selected>Gemini 3.1 Flash-Lite (極速/大批次預設)</option>
+                    <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (高品質/極佳對齊)</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                     <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
                     <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
                 </select>
 
                 <div id="fallbackModelContainer">
-                    <label for="fallbackModelName">備援模型 (主要模型失敗時自動切換):</label>
+                    <label for="fallbackModelName">備援模型 (主要模型失敗或重試時自動切換):</label>
                     <select id="fallbackModelName">
-                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                        <option value="gemini-3.5-flash-lite" selected>Gemini 3.5 Flash-Lite (強推論/救援預設)</option>
+                        <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite</option>
+                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                         <option value="gemma-2-27b-it">Gemma 2 27B IT</option>
                     </select>
 
@@ -378,6 +380,10 @@
             <div class="settings-form">
                 <label for="novelModelName">小說專用模型:</label>
                 <select id="novelModelName">
+                    <option value="gemini-3.5-flash-lite" selected>Gemini 3.5 Flash-Lite (流暢敘事/推薦預設)</option>
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite (極速處理)</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                     <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
                     <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
                 </select>

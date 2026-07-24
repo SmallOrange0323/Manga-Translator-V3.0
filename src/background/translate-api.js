@@ -108,7 +108,7 @@ export async function translateTexts(texts, options = {}) {
     // Bug #3 修復：確保 state 初始化完成，避免 SW 冷啟動時 API Key 池為空
     if (!state.isInitialized) await state.init();
     const {
-        model = 'gemini-1.5-flash',
+        model = 'gemini-3.1-flash-lite',
         fallbackModel = null,
         prompt = 'Translate the following texts to Traditional Chinese. Return only JSON.',
         schema = null,
@@ -263,7 +263,7 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
  * 從翻譯結果中非同步萃取術語 (強化版：支援分片處理與重試)
  */
 export async function extractTermsFromTranslation(pairs, options = {}) {
-    const { model = 'gemini-1.5-flash' } = options;
+    const { model = 'gemini-3.1-flash-lite' } = options;
     const apiKey = state.getNextApiKey();
     if (!apiKey || pairs.length === 0) return [];
 
@@ -399,7 +399,7 @@ ${inputText}`;
  */
 export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null) {
     const n = base64Array.length;
-    const model = await state.get('modelName', 'gemini-1.5-flash');
+    const model = await state.get('modelName', 'gemini-3.1-flash-lite');
 
     // 若未指定 Key，從 Key 池自動選取
     const resolvedKey = apiKey || state.getNextApiKey();

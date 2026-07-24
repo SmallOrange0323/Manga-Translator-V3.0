@@ -44,6 +44,16 @@ class StateManager {
   }
 
   /**
+   * 刷新記憶體快取：當直接使用 chrome.storage.local.set 更新資料時使用
+   */
+  async refreshCache() {
+    const data = await chrome.storage.local.get(null);
+    this.cache = data || {};
+    this.refreshApiKeyPool();
+    log.state('ALL', 'Refreshed Cache', this.cache);
+  }
+
+  /**
    * 讀取狀態
    * @param {string} key 
    * @param {any} defaultValue 

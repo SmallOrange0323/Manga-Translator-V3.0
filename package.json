@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "pack": "node build-zip.js"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.23",

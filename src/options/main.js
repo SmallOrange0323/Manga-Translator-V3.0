@@ -75,8 +75,8 @@ async function initGeneralSettings() {
     const fields = [
         ['translationMode', 'one-step'],
         ['ocrBatchSize', 5],
-        ['modelName', 'gemini-1.5-flash'],
-        ['fallbackModelName', ''],
+        ['modelName', 'gemini-3.1-flash-lite'],
+        ['fallbackModelName', 'gemini-3.5-flash-lite'],
         ['useFallbackModelOnBatchRetry', false],
         ['requestDelay', 4000],
         ['imageMaxDimension', 1024],
@@ -131,19 +131,28 @@ async function initApiKeyManager() {
         input.className = 'api-key-input';
         input.placeholder = index === 0 ? '主要金鑰 (Key 1)' : `備用金鑰 (Key ${index + 1})`;
         input.value = value;
+        input.addEventListener('change', () => saveCurrentApiKeys());
 
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
         removeBtn.className = 'remove-key-btn';
         removeBtn.textContent = '✕ 刪除';
-        removeBtn.onclick = () => {
+        removeBtn.onclick = async () => {
             row.remove();
             reindexKeys();
+            await saveCurrentApiKeys();
         };
 
         row.appendChild(input);
         row.appendChild(removeBtn);
         return row;
+    }
+
+    async function saveCurrentApiKeys() {
+        const inputs = apiKeysContainer.querySelectorAll('.api-key-input');
+        const keys = Array.from(inputs).map(i => i.value.trim()).filter(k => k).join('\n');
+        await state.set('apiKey', keys);
+        await state.set('settingsLastModified', Date.now());
     }
 
     function reindexKeys() {
@@ -153,10 +162,11 @@ async function initApiKeyManager() {
         });
     }
 
-    addKeyBtn.onclick = () => {
+    addKeyBtn.onclick = async () => {
         const count = apiKeysContainer.querySelectorAll('.api-key-row').length;
         if (count >= MAX_KEYS) return alert(`最多支援 ${MAX_KEYS} 組金鑰`);
         apiKeysContainer.appendChild(createKeyRow('', count));
+        await saveCurrentApiKeys();
     };
 
     // 關鍵修正：從 state 獲取值
@@ -179,7 +189,7 @@ async function initApiKeyManager() {
 async function initNovelSettings() {
     const novelModelNameEl = document.getElementById('novelModelName');
     if (novelModelNameEl) {
-        const val = await state.get('novelModelName', 'gemini-1.5-flash');
+        const val = await state.get('novelModelName', 'gemini-3.5-flash-lite');
         if (val) {
             // 自癒邏輯
             if (!Array.from(novelModelNameEl.options).some(o => o.value === val)) {
@@ -230,9 +240,9 @@ function setupEventHandlers() {
             const twLocalization = document.getElementById('enableTaiwanLocalization');
             if(twLocalization) await state.set('enableTaiwanLocalization', twLocalization.checked);
 
-            const googleClientIdEl = document.getElementById('googleClientId');
-            if (googleClientIdEl) {
-                await state.set('googleClientId', googleClientIdEl.value.trim());
+            const googleEmailEl = document.getElementById('googleAccountEmail');
+            if (googleEmailEl) {
+                await state.set('googleAccountEmail', googleEmailEl.value.trim());
             }
 
             await state.set('settingsLastModified', Date.now());
@@ -333,22 +343,16 @@ async function initGoogleSyncSettings() {
     const syncNowBtn = document.getElementById('googleSyncNowBtn');
     const syncSpinner = document.getElementById('googleSyncSpinner');
     const syncBtnText = document.getElementById('googleSyncBtnText');
-    const redirectUriEl = document.getElementById('googleRedirectUri');
-    const clientIdEl = document.getElementById('googleClientId');
+    const emailEl = document.getElementById('googleAccountEmail');
 
     if (!syncEnabledEl || !syncStatusEl || !syncLastTimeEl || !syncNowBtn) return;
 
-    // 動態填入 Redirect URI 以方便使用者在 GCP 設定中複製
-    if (redirectUriEl) {
-        redirectUriEl.textContent = chrome.identity.getRedirectURL();
-    }
-
-    // 載入自訂 Google Client ID
-    if (clientIdEl) {
-        const savedClientId = await state.get('googleClientId', '');
-        clientIdEl.value = savedClientId;
-        clientIdEl.addEventListener('change', async () => {
-            await state.set('googleClientId', clientIdEl.value.trim());
+    // 載入綁定之 Gmail 帳號
+    if (emailEl) {
+        const savedEmail = await state.get('googleAccountEmail', '');
+        emailEl.value = savedEmail;
+        emailEl.addEventListener('change', async () => {
+            await state.set('googleAccountEmail', emailEl.value.trim());
         });
     }
 
@@ -360,7 +364,7 @@ async function initGoogleSyncSettings() {
     syncEnabledEl.checked = isEnabled;
     syncStatusEl.textContent = lastStatus;
     syncLastTimeEl.textContent = lastTime;
-    syncNowBtn.disabled = !isEnabled;
+    syncNowBtn.disabled = false;
 
     // 2. 監聽開關狀態切換
     syncEnabledEl.addEventListener('change', async () => {
@@ -368,7 +372,6 @@ async function initGoogleSyncSettings() {
         if (checked) {
             // 啟用同步：進行首次授權與同步
             syncStatusEl.textContent = '正在取得 Google 授權...';
-            syncNowBtn.disabled = true;
             
             try {
                 const token = await getAuthToken(true);
@@ -386,7 +389,6 @@ async function initGoogleSyncSettings() {
 
                 syncStatusEl.textContent = '已與雲端同步';
                 syncLastTimeEl.textContent = lastSyncStr;
-                syncNowBtn.disabled = false;
                 
                 alert('🎉 Google 雲端同步已成功啟用並完成首次資料合併！');
                 
@@ -410,14 +412,12 @@ async function initGoogleSyncSettings() {
             await state.set('enableCloudSync', false);
             await state.set('googleSyncStatus', '未啟用');
             syncStatusEl.textContent = '未啟用';
-            syncNowBtn.disabled = true;
             alert('ℹ️ Google 雲端同步已關閉。');
         }
     });
 
     // 3. 監聽立即手動同步按鈕
     syncNowBtn.addEventListener('click', async () => {
-        syncNowBtn.disabled = true;
         if (syncSpinner) syncSpinner.style.display = 'inline-block';
         if (syncBtnText) syncBtnText.textContent = ' 同步中...';
         syncStatusEl.textContent = '雙向同步中...';
@@ -433,6 +433,9 @@ async function initGoogleSyncSettings() {
 
             const lastSyncStr = await performBiDirectionalSync(token);
             
+            // 自動確保開關開啟
+            syncEnabledEl.checked = true;
+            await state.set('enableCloudSync', true);
             await state.set('googleSyncStatus', '已與雲端同步');
             await state.set('googleSyncLastTime', lastSyncStr);
 
@@ -456,7 +459,6 @@ async function initGoogleSyncSettings() {
         } finally {
             if (syncSpinner) syncSpinner.style.display = 'none';
             if (syncBtnText) syncBtnText.textContent = '🔄 立即手動同步';
-            syncNowBtn.disabled = false;
         }
     });
 }

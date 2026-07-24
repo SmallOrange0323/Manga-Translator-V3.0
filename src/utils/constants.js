@@ -108,9 +108,8 @@ export const DEFAULT_PROMPT_ONE_STEP = `<system_instructions>
   <critical_rules>
     1. STORY TEXT ONLY: Extract speech bubbles, narrations, character thoughts (OS), and in-world text (like signs).
     2. IGNORE METADATA: STRICTLY IGNORE any non-story elements outside the panels (e.g., magazine names, release dates, page numbers, manga titles, author notes, publisher info).
-    3. COMBINE LINES: Japanese text is often split into multiple vertical lines within a single bubble. You MUST concatenate all words belonging to the same dialog/paragraph into ONE continuous sentence. DO NOT break a single dialogue into multiple short lines.
-    4. FORMAT: Each distinct dialogue/paragraph must be EXACTLY ONE line of text. Separate different dialogues using a newline (\n).
-    5. LINE BREAKING FOR LAYOUT: Speech bubbles in manga are often vertically narrow. To prevent Traditional Chinese translated text from overflowing or looking too squeezed, you MUST actively insert a newline character (\\n) in the translation string at a natural semantic boundary (e.g. after a punctuation, helper verb, or noun phrase) if the translated sentence exceeds 12-15 Chinese characters. Keep it visually balanced (like 2-3 lines).
+    3. COMBINE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga is often split into multiple vertical lines due to narrow speech bubbles. You MUST concatenate all split lines belonging to the same bubble into ONE seamless, complete Traditional Chinese sentence. STRICTLY FORBID outputting any newline characters (\\n) inside a single speech bubble's translation!
+    4. FORMAT: Each distinct dialogue/speech bubble must be EXACTLY ONE continuous line of text.
   </critical_rules>
   
   <translation_rules>
@@ -185,9 +184,7 @@ export const SYSTEM_BATCH_RULES = `
     - IGNORE page numbers, magazine info, author notes, margins.
     - Follow manga reading order (right-to-left, top-to-bottom).
     - STRICT SENTENCE INTEGRITY: Each distinct speech bubble or narration block MUST be a SINGLE item in the "results" array.
-    - MERGE MULTIPLE LINES: DO NOT split lines. Merge them into a single string.
-    - ACCURATE TRANSLATION FOR KATAKANA NAMES: You must perform highly precise phonetic translations for Katakana names (e.g. people, places). DO NOT group or translate different Katakana names into the same Chinese name due to visual similarity (e.g. "ミュディ" and "アミュディ" are distinct characters and MUST NOT both be translated to "謬蒂").
-    - LINE BREAKING FOR LAYOUT: If a translated Chinese sentence exceeds 12-15 characters, you MUST actively insert a newline character (\\n) at a natural semantic boundary in the "translation" string, ensuring it fits vertically narrow speech bubbles and remains visually balanced (2-3 lines).
+    - MERGE MULTIPLE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga speech bubbles is often split into multiple vertical lines due to panel width. You MUST concatenate all split lines into ONE single, seamless, complete Traditional Chinese sentence. STRICTLY FORBID inserting any newline characters (\\n) in the translation!
   </extraction_rules>
 
   <output_rules>

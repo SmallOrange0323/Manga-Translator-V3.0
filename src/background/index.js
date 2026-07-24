@@ -96,8 +96,8 @@ async function processNovelQueue() {
             }
 
             // 讀取小說專用設定
-            const modelName = await state.get('novelModelName', 'gemini-1.5-flash');
-            const fallbackModelName = await state.get('fallbackModelName', 'gemini-1.5-flash');
+            const modelName = await state.get('novelModelName', 'gemini-3.5-flash-lite');
+            const fallbackModelName = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
             const novelPrompt = await state.get('novelPrompt', '');
             const requestDelay = await state.get('requestDelay', 3000);
 
@@ -293,8 +293,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { texts } = message;
       (async () => {
           try {
-              const model = await state.get('novelModelName', 'gemini-1.5-flash');
-              const fallbackModel = await state.get('fallbackModelName', 'gemini-1.5-flash');
+              const model = await state.get('novelModelName', 'gemini-3.5-flash-lite');
+              const fallbackModel = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
               
               let glossarySnippet = '';
               const tabId = sender.tab?.id;
@@ -643,8 +643,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   base64 = await resizeImageBlobToBase64(blob, maxDim);
               }
               if (!base64) throw new Error('無法取得圖片 Base64');
-              const modelName = await state.get('modelName', 'gemini-1.5-flash');
-              const fallbackModelName = await state.get('fallbackModelName', 'gemini-1.5-flash');
+              const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
+              const fallbackModelName = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
               let finalPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
               
               // 救援行動強制使用備援模型
@@ -700,8 +700,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { text, mangaKey } = message;
       (async () => {
           try {
-              const modelName = await state.get('modelName', 'gemini-1.5-flash');
-              const fallbackModelName = await state.get('fallbackModelName', 'gemini-1.5-flash');
+              const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
+              const fallbackModelName = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
               let prompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_TWO_STEP);
               
               // 救援行動強制使用備援模型
@@ -755,7 +755,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { text, mangaKey } = message;
       (async () => {
           try {
-              const model = await state.get('novelModelName', 'gemini-1.5-flash');
+              const model = await state.get('novelModelName', 'gemini-3.5-flash-lite');
               const prompt = await state.get('novelPrompt', Constants.DEFAULT_PROMPT_NOVEL);
               
               let glossarySnippet = '';
@@ -1029,7 +1029,7 @@ async function handleProcessScreenshot(rect, tabId) {
         const croppedBase64 = await cropImageBase64(capturedScreenshotForSelection, rect);
         
         // 2. 獲取翻譯設定與詞庫
-        const modelName = await state.get('modelName', 'gemini-1.5-flash');
+        const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
         const customPrompt = await state.get('customPrompt', 'Translate to Traditional Chinese.');
         const navCtx = await state.get('navigationContext', {});
         const mangaKey = navCtx[tabId];
@@ -1155,7 +1155,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
     });
 
     // 3. 讀取翻譯設定（在並行前統一讀取，避免重複 I/O）
-    const modelName = await state.get('modelName', 'gemini-1.5-flash');
+    const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
     const fallbackModelName = await state.get('fallbackModelName', null);
     const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
     let finalPrompt = customPrompt;
