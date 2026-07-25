@@ -55,6 +55,17 @@ async function loadMangaData() {
         }));
     }
 
+    // E網 特別處理：若抓到的 pages 長度小於總頁數 totalPages，根據 totalPages 自動補全骨架並啟動背景補全
+    if (mangaData.site === 'e-hentai' && mangaData.totalPages > mangaData.pages.length) {
+        const existingPages = mangaData.pages.map(p => p.url);
+        mangaData.pages = Array.from({ length: mangaData.totalPages }, (_, i) => ({
+            url: existingPages[i] || null
+        }));
+        
+        // 非同步背景抓取 E網 其餘 gallery 分頁以補齊所有 href URL
+        fetchAllEHentaiPages(mangaData);
+    }
+
     if (!mangaData.pages) mangaData.pages = [];
     totalPages = mangaData.pages.length;
     
@@ -76,6 +87,47 @@ async function loadMangaData() {
 
     // 初始化頁面容器
     initPageContainers();
+}
+
+// 非同步抓取 E網 後續所有 gallery 分頁 (?p=1, ?p=2...) 補全完整連結
+async function fetchAllEHentaiPages(manga) {
+    if (!manga.galleryPageUrls || manga.galleryPageUrls.length <= 1) return;
+    
+    // 從第 2 頁開始抓取 (?p=1)
+    for (let p = 1; p < manga.galleryPageUrls.length; p++) {
+        const pageGalleryUrl = manga.galleryPageUrls[p];
+        try {
+            const response = await new Promise(resolve => {
+                chrome.runtime.sendMessage({ action: 'FETCH_HTML', url: pageGalleryUrl }, resolve);
+            });
+
+            if (response && response.success && response.html) {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.html, 'text/html');
+                const anchors = doc.querySelectorAll('#gdt a');
+                
+                // 計算起始 offset (例如每頁 40 張，p=1 起始為 40)
+                const offset = p * Math.max(1, document.querySelectorAll('#gdt a').length || 40);
+                anchors.forEach((a, idx) => {
+                    const targetIdx = offset + idx;
+                    if (targetIdx < manga.pages.length && a.href) {
+                        manga.pages[targetIdx].url = a.href;
+                        // 若預載佇列此時正在等待該頁，動態觸發載入
+                        if (backgroundDownloadQueue.includes(targetIdx) || !loadedImagesMap.has(targetIdx)) {
+                            prioritizePageInQueue(targetIdx);
+                        }
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn(`[EHentai] 補全分頁 ?p=${p} 失敗:`, e);
+        }
+        // 平滑間隔 200ms
+        await new Promise(r => setTimeout(r, 200));
+    }
+    
+    // 分頁補全完畢後，觸發自癒預載佇列重新掃描
+    if (!isQueueRunning) startBackgroundDownloadQueue();
 }
 
 // 建立佔位容器並啟動 Intersection Observer 與背景下載佇列

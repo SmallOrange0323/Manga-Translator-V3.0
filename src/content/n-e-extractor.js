@@ -207,11 +207,22 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       totalPages = parseInt(pagesMatch[1], 10);
     }
 
-    // 收集第一頁的頁面網址
+    // 收集當前頁面 (通常為 p=0) 的縮圖網址
     const pageUrls = [];
-    document.querySelectorAll('#gdt a').forEach(a => {
+    const firstPageAnchors = document.querySelectorAll('#gdt a');
+    firstPageAnchors.forEach(a => {
       if (a.href) pageUrls.push(a.href);
     });
+
+    // 計算 E網 的全部 gallery 縮圖分頁網址 (?p=0, ?p=1, ?p=2 ...)
+    const thumbsPerPage = Math.max(1, firstPageAnchors.length);
+    const totalGalleryPages = Math.ceil(totalPages / thumbsPerPage);
+    const galleryPageUrls = [];
+    const baseUrl = `${window.location.origin}/g/${mangaId}/${token}/`;
+
+    for (let p = 0; p < totalGalleryPages; p++) {
+      galleryPageUrls.push(`${baseUrl}?p=${p}`);
+    }
 
     return {
       site: 'e-hentai',
@@ -221,6 +232,7 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       totalPages,
       pages: pageUrls.map(u => ({ url: u })),
       pageUrls,
+      galleryPageUrls, // 傳出所有 gallery 分頁網址以便完整補全
       galleryUrl: url
     };
   }
