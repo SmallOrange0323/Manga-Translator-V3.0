@@ -593,6 +593,31 @@ function refreshGlossaryStatus() {
     });
 }
 
+function getBatchImagesByIndex(batchIndex, gridEl) {
+    // 方案 1：直接從 DOM 元素提取 data-retry-url 或 img src
+    const cards = gridEl ? gridEl.querySelectorAll('.result-card') : [];
+    let images = Array.from(cards).map(card => {
+        return card.dataset.retryUrl || card.querySelector('img')?.src || '';
+    }).filter(url => url && !url.includes('data:image/svg'));
+
+    // 方案 2：若 DOM 無資料，由 translatedData 快取陣列依批次切片 (預設每批 10 張)
+    if (images.length === 0 && translatedData.length > 0) {
+        // 先嘗試用指定 batchIndex 過濾
+        const matched = translatedData.filter(item => item.batchIndex === batchIndex);
+        if (matched.length > 0) {
+            images = matched.map(item => item.retryUrl || item.image).filter(Boolean);
+        } else {
+            // 切片備援 (每批 10 張)
+            const sliceSize = 10;
+            const start = batchIndex * sliceSize;
+            const sliced = translatedData.slice(start, start + sliceSize);
+            images = sliced.map(item => item.retryUrl || item.image).filter(Boolean);
+        }
+    }
+
+    return images;
+}
+
 function updateBatchDropdownMenu() {
     const menu = document.getElementById('batch-dropdown-menu');
     if (!menu) return;
@@ -606,7 +631,10 @@ function updateBatchDropdownMenu() {
     menu.innerHTML = '';
     sections.forEach((sec) => {
         const bIdx = parseInt(sec.dataset.batch);
-        const cardCount = sec.querySelectorAll('.result-card').length;
+        const grid = sec.querySelector('.mt-batch-grid');
+        const images = getBatchImagesByIndex(bIdx, grid);
+        const countDisplay = images.length > 0 ? `${images.length} 張圖` : `點擊進行批次重翻`;
+
         const item = document.createElement('div');
         item.style.cssText = `
             padding: 10px 16px;
@@ -621,7 +649,7 @@ function updateBatchDropdownMenu() {
         `;
         item.innerHTML = `
             <span>📦 第 ${bIdx + 1} 批次</span>
-            <span style="font-size: 11px; color: #8d80f1; background: #f0edff; padding: 2px 8px; border-radius: 12px;">${cardCount} 張圖</span>
+            <span style="font-size: 11px; color: #8d80f1; background: #f0edff; padding: 2px 8px; border-radius: 12px;">${countDisplay}</span>
         `;
         item.onmouseover = () => item.style.background = '#f4f2ff';
         item.onmouseout = () => item.style.background = 'transparent';
@@ -706,11 +734,10 @@ function getOrCreateBatchSection(batchIndex) {
         
         // 綁定「⚡ 重翻第 N 批次」點擊事件
         header.querySelector('.btn-retranslate-single-batch').onclick = () => {
-            const batchCards = grid.querySelectorAll('.result-card');
-            const batchImages = Array.from(batchCards).map(card => card.dataset.retryUrl).filter(Boolean);
+            const batchImages = getBatchImagesByIndex(batchIndex, grid);
             
             if (batchImages.length === 0) {
-                alert(`批次 #${batchIndex + 1} 無有效圖片可重翻`);
+                alert(`批次 #${batchIndex + 1} 無有效圖片可重翻（可能尚未開始載入或圖片連結失效）`);
                 return;
             }
             
