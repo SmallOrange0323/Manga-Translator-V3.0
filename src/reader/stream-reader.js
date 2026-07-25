@@ -164,6 +164,8 @@ async function startBackgroundDownloadQueue() {
                 if (overlayText) overlayText.textContent = `正在下載中... (P. ${index + 1})`;
 
                 await loadPageImage(index);
+                // 平滑間隔：每下載完成一頁休眠 150ms，防止擊穿伺服器防爬蟲 Rate Limit
+                await new Promise(r => setTimeout(r, 150));
             } catch (err) {
                 console.error(`P.${index + 1} 載入失敗:`, err);
             } finally {
@@ -186,18 +188,19 @@ async function startBackgroundDownloadQueue() {
         }
     };
 
-    // 啟動併發工作線程
-    const workers = Array.from({ length: Math.min(maxConcurrency, totalPages) }, () => runWorker());
+    // 啟動併發工作線程 (限定最大並行數為 3，兼顧速度與連線穩定)
+    const safeConcurrency = Math.min(3, totalPages);
+    const workers = Array.from({ length: safeConcurrency }, () => runWorker());
     await Promise.all(workers);
 }
 
-// 載入單一頁面的真實圖片連結 (Promise 化以配合併發佇列)
-function loadPageImage(index) {
+// 載入單一頁面的真實圖片連結 (包含自動重試與平滑延遲機制)
+function loadPageImage(index, retryCount = 0) {
     return new Promise((resolve, reject) => {
         const wrapper = document.getElementById(`page-wrapper-${index}`);
         const overlay = document.getElementById(`overlay-${index}`);
         
-        if (loadedImagesMap.has(index)) {
+        if (loadedImagesMap.has(index) && loadedImagesMap.get(index) !== 'loading') {
             resolve();
             return;
         }
@@ -210,38 +213,69 @@ function loadPageImage(index) {
             return;
         }
 
-        chrome.runtime.sendMessage({ action: 'FETCH_HTML', url: pageObj.url }, (response) => {
-            if (chrome.runtime.lastError || !response || !response.success || !response.html) {
-                const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : '背景網頁抓取失敗';
-                showErrorPage(index, errMsg);
-                reject(new Error(errMsg));
-                return;
-            }
+        const fetchWithRetry = () => {
+            chrome.runtime.sendMessage({ action: 'FETCH_HTML', url: pageObj.url }, (response) => {
+                const err = chrome.runtime.lastError;
+                if (err || !response || !response.success || !response.html) {
+                    // 自動指數重試（最多 3 次）
+                    if (retryCount < 3) {
+                        const nextRetryDelay = (retryCount + 1) * 1200;
+                        if (overlay) {
+                            overlay.innerHTML = `
+                                <div class="spinner"></div>
+                                <p style="font-size:12px; opacity:0.8;">第 ${index + 1} 頁請求繁忙，${nextRetryDelay/1000}s 後自動重試 (${retryCount + 1}/3)...</p>
+                            `;
+                        }
+                        setTimeout(() => {
+                            loadPageImage(index, retryCount + 1).then(resolve).catch(reject);
+                        }, nextRetryDelay);
+                        return;
+                    }
 
-            const imgUrl = extractImgUrl(response.html, pageObj.url);
-            if (imgUrl) {
-                const img = document.createElement('img');
-                img.src = imgUrl;
-                img.loading = 'lazy';
-                
-                img.onload = () => {
-                    overlay.classList.add('hidden');
-                    wrapper.style.minHeight = ''; // 清除固定高度
-                    loadedImagesMap.set(index, imgUrl);
-                    resolve();
-                };
+                    const errMsg = err ? err.message : '連線逾時或網站限制';
+                    showErrorPage(index, errMsg);
+                    reject(new Error(errMsg));
+                    return;
+                }
 
-                img.onerror = () => {
-                    showErrorPage(index, '圖片檔案載入失敗');
-                    reject(new Error('圖片檔案載入失敗'));
-                };
+                const imgUrl = extractImgUrl(response.html, pageObj.url);
+                if (imgUrl) {
+                    const img = document.createElement('img');
+                    img.src = imgUrl;
+                    img.loading = 'lazy';
+                    
+                    img.onload = () => {
+                        if (overlay) overlay.classList.add('hidden');
+                        if (wrapper) wrapper.style.minHeight = '';
+                        loadedImagesMap.set(index, imgUrl);
+                        resolve();
+                    };
 
-                wrapper.insertBefore(img, wrapper.querySelector('.page-actions'));
-            } else {
-                showErrorPage(index, '無法解析圖片連結');
-                reject(new Error('無法解析圖片連結'));
-            }
-        });
+                    img.onerror = () => {
+                        if (retryCount < 2) {
+                            setTimeout(() => {
+                                loadPageImage(index, retryCount + 1).then(resolve).catch(reject);
+                            }, 1500);
+                        } else {
+                            showErrorPage(index, '圖片檔案載入失敗');
+                            reject(new Error('圖片檔案載入失敗'));
+                        }
+                    };
+
+                    // 確保不重複插入
+                    if (wrapper) {
+                        const existingImg = wrapper.querySelector('img');
+                        if (existingImg) existingImg.remove();
+                        wrapper.insertBefore(img, wrapper.querySelector('.page-actions'));
+                    }
+                } else {
+                    showErrorPage(index, '無法解析圖片連結');
+                    reject(new Error('無法解析圖片連結'));
+                }
+            });
+        };
+
+        fetchWithRetry();
     });
 }
 
@@ -302,17 +336,19 @@ function showErrorPage(index, errorMsg) {
 
 // 重試載入
 window.retryLoadPage = async (index) => {
+    loadedImagesMap.delete(index);
     const overlay = document.getElementById(`overlay-${index}`);
     if (overlay) {
+        overlay.classList.remove('hidden');
         overlay.innerHTML = `
             <div class="spinner"></div>
-            <p>正在重試第 ${index + 1} 頁...</p>
+            <p>正在重試載入第 ${index + 1} 頁...</p>
         `;
     }
     try {
-        await loadPageImage(index);
+        await loadPageImage(index, 0);
     } catch (e) {
-        console.error('重試失敗:', e);
+        console.error('手動重試失敗:', e);
     }
 };
 
