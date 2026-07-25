@@ -511,6 +511,36 @@ function isSafeUrl(url) {
     return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
 
+function sendNavigateMessageWithRetry(payload, btn, label) {
+    let responded = false;
+    btn.disabled = true;
+    btn.classList.add('is-navigating');
+    btn.innerHTML = `正在跳轉至 ${label}...`;
+
+    const doSend = () => {
+        chrome.runtime.sendMessage({ 
+            action: "navigateAndTranslate", 
+            ...payload
+        }, (response) => {
+            if (!chrome.runtime.lastError && response?.status === 'navigating') {
+                responded = true;
+            }
+        });
+    };
+
+    doSend();
+
+    // 600ms 容錯重試：防止 Service Worker 休眠冷啟動導致第一次訊息漏單
+    setTimeout(() => {
+        if (!responded) {
+            console.log('[Nav] 偵測到背景 SW 可能處於冷啟動，自動補發跳轉訊息...');
+            doSend();
+        }
+    }, 600);
+
+    setTimeout(resetNavButtons, 10000);
+}
+
 function updateNavUI(navLinks) {
     const { prev, next } = navLinks;
     const footer = document.getElementById('nav-footer');
@@ -525,17 +555,13 @@ function updateNavUI(navLinks) {
         if (safePrev && prevBtn) {
             prevBtn.style.display = 'inline-flex';
             prevBtn.onclick = () => {
-                prevBtn.disabled = true;
-                if(nextBtn) nextBtn.disabled = true;
-                prevBtn.classList.add('is-navigating');
-                prevBtn.innerHTML = `正在跳轉至上一話...`;
-                chrome.runtime.sendMessage({ 
-                    action: "navigateAndTranslate", 
+                if (nextBtn) nextBtn.disabled = true;
+                sendNavigateMessageWithRetry({
                     url: safePrev,
                     tabId: sourceTabId,
                     mangaKey: activeMangaKey,
                     mobile: urlParams.get('mobile') === '1'
-                });
+                }, prevBtn, '上一話');
             };
             prevBtn.title = safePrev;
         } else if (prevBtn) {
@@ -545,20 +571,13 @@ function updateNavUI(navLinks) {
         if (safeNext && nextBtn) {
             nextBtn.style.display = 'inline-flex';
             nextBtn.onclick = () => {
-                nextBtn.disabled = true;
-                if(prevBtn) prevBtn.disabled = true;
-                nextBtn.classList.add('is-navigating');
-                nextBtn.innerHTML = `正在跳轉至下一話...`;
-                
-                setTimeout(resetNavButtons, 10000);
-
-                chrome.runtime.sendMessage({ 
-                    action: "navigateAndTranslate", 
+                if (prevBtn) prevBtn.disabled = true;
+                sendNavigateMessageWithRetry({
                     url: safeNext,
                     tabId: sourceTabId,
                     mangaKey: activeMangaKey,
                     mobile: urlParams.get('mobile') === '1'
-                });
+                }, nextBtn, '下一話');
             };
             nextBtn.title = safeNext;
         } else if (nextBtn) {
