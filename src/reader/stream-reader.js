@@ -389,58 +389,50 @@ function renderDialogueResults(index, results) {
     wrapper.appendChild(resultsDiv);
 }
 
-// 翻譯所有頁面
+// 翻譯所有頁面：開啟獨立的 result.html 圖文對照翻譯分頁
 async function translateAllPages() {
-    if (isTranslatingAll) return;
-    isTranslatingAll = true;
     btnTransAll.disabled = true;
-    progressBar.style.display = 'block';
+    const oldText = btnTransAll.innerHTML;
+    btnTransAll.innerHTML = '⏳ 準備翻譯資料中...';
 
-    let successCount = 0;
-    let totalToTranslate = totalPages;
-
+    // 收集所有頁面的圖片 URL 清單
+    const imagesToTranslate = [];
     for (let i = 0; i < totalPages; i++) {
-        // 更新進度
-        const percent = Math.round((i / totalPages) * 100);
-        progressFill.style.width = percent + '%';
-        progressText.textContent = `全頁翻譯中: ${i + 1} / ${totalPages} (${percent}%)`;
-
-        // 確保圖片已載入
         let imgUrl = loadedImagesMap.get(i);
         if (!imgUrl || imgUrl === 'loading') {
-            // 嘗試載入或等待
-            loadPageImage(i);
-            await new Promise(resolve => setTimeout(resolve, 1500));
-            imgUrl = loadedImagesMap.get(i);
+            const pageObj = mangaData.pages[i];
+            if (pageObj && pageObj.url) imgUrl = pageObj.url;
         }
-
         if (imgUrl && imgUrl !== 'loading') {
-            try {
-                const response = await new Promise(resolve => {
-                    chrome.runtime.sendMessage({
-                        action: 'retranslateImage',
-                        url: imgUrl,
-                        mangaKey: activeMangaKey
-                    }, resolve);
-                });
-
-                if (response && response.results) {
-                    renderDialogueResults(i, response.results);
-                    successCount++;
-                }
-            } catch (e) {
-                console.error(`P.${i + 1} translate failed:`, e);
-            }
+            imagesToTranslate.push(imgUrl);
         }
     }
 
-    progressFill.style.width = '100%';
-    progressText.textContent = `翻譯完成！成功 ${successCount} / ${totalPages} 頁`;
-    setTimeout(() => {
-        progressBar.style.display = 'none';
-        isTranslatingAll = false;
+    if (imagesToTranslate.length === 0) {
+        alert('目前未找到有效的圖片可發送翻譯！請確認圖片加載進度。');
         btnTransAll.disabled = false;
-    }, 3000);
+        btnTransAll.innerHTML = oldText;
+        return;
+    }
+
+    // 發送給 Background 開啟全新的 result.html 進行經典圖文對照與批次翻譯！
+    chrome.runtime.sendMessage({
+        action: 'START_MANGA_BATCH_PC_MODE',
+        payload: {
+            images: imagesToTranslate,
+            navLinks: mangaData.navLinks || null,
+            mangaKey: activeMangaKey,
+            displayName: mangaData.title || activeMangaKey
+        }
+    }, (response) => {
+        btnTransAll.disabled = false;
+        btnTransAll.innerHTML = oldText;
+        if (chrome.runtime.lastError) {
+            alert('開啟翻譯分頁失敗: ' + chrome.runtime.lastError.message);
+        } else {
+            console.log('[StreamReader] 成功發送全本翻譯，已開啟 result.html！');
+        }
+    });
 }
 
 // 導航到其他章節
