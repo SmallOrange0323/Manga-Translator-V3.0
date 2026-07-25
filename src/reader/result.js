@@ -593,6 +593,70 @@ function refreshGlossaryStatus() {
     });
 }
 
+function updateBatchDropdownMenu() {
+    const menu = document.getElementById('batch-dropdown-menu');
+    if (!menu) return;
+
+    const sections = [...container.querySelectorAll('.mt-batch-section')];
+    if (sections.length === 0) {
+        menu.innerHTML = `<div style="padding: 10px 16px; font-size: 13px; color: #666;">目前尚無可重翻的批次</div>`;
+        return;
+    }
+
+    menu.innerHTML = '';
+    sections.forEach((sec) => {
+        const bIdx = parseInt(sec.dataset.batch);
+        const cardCount = sec.querySelectorAll('.result-card').length;
+        const item = document.createElement('div');
+        item.style.cssText = `
+            padding: 10px 16px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #212529;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.15s;
+        `;
+        item.innerHTML = `
+            <span>📦 第 ${bIdx + 1} 批次</span>
+            <span style="font-size: 11px; color: #8d80f1; background: #f0edff; padding: 2px 8px; border-radius: 12px;">${cardCount} 張圖</span>
+        `;
+        item.onmouseover = () => item.style.background = '#f4f2ff';
+        item.onmouseout = () => item.style.background = 'transparent';
+        item.onclick = () => {
+            menu.style.display = 'none';
+            sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const btn = sec.querySelector('.btn-retranslate-single-batch');
+            if (btn) btn.click();
+        };
+        menu.appendChild(item);
+    });
+}
+
+// 頂部下拉選單按鈕開關
+document.addEventListener('DOMContentLoaded', () => {
+    const dropBtn = document.getElementById('retranslate-batch-dropdown-btn');
+    const menu = document.getElementById('batch-dropdown-menu');
+    if (dropBtn && menu) {
+        dropBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isVisible = menu.style.display === 'block';
+            if (!isVisible) {
+                updateBatchDropdownMenu();
+                menu.style.display = 'block';
+            } else {
+                menu.style.display = 'none';
+            }
+        });
+
+        document.addEventListener('click', () => {
+            if (menu) menu.style.display = 'none';
+        });
+    }
+});
+
 function getOrCreateBatchSection(batchIndex) {
     if (batchIndex === undefined || batchIndex === null || isNaN(batchIndex)) batchIndex = 0;
     let section = container.querySelector(`.mt-batch-section[data-batch="${batchIndex}"]`);
@@ -601,11 +665,12 @@ function getOrCreateBatchSection(batchIndex) {
         section.className = 'mt-batch-section';
         section.dataset.batch = batchIndex;
         section.style.cssText = `
-            margin-bottom: 24px;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 12px;
-            background: rgba(0, 0, 0, 0.2);
-            padding: 16px;
+            margin-bottom: 28px;
+            border: 2px solid #8d80f1;
+            border-radius: 16px;
+            background: #ffffff;
+            padding: 20px;
+            box-shadow: 0 4px 16px rgba(141, 128, 241, 0.08);
         `;
         
         const header = document.createElement('div');
@@ -614,22 +679,27 @@ function getOrCreateBatchSection(batchIndex) {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding-bottom: 10px;
-            margin-bottom: 12px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 12px;
+            margin-bottom: 16px;
+            border-bottom: 2px dashed #e2e0ed;
         `;
         
         header.innerHTML = `
-            <div style="font-weight: bold; color: var(--accent-color, #4a9eff); font-size: 15px; display: flex; align-items: center; gap: 8px;">
+            <div style="font-weight: 900; color: #6a5ad3; font-size: 16px; display: flex; align-items: center; gap: 8px;">
                 <span>📦 批次 #${batchIndex + 1}</span>
             </div>
-            <button class="btn-export secondary btn-retranslate-single-batch" data-batch="${batchIndex}" style="padding: 4px 12px; font-size: 13px; cursor: pointer;">
+            <button class="btn-export accent btn-retranslate-single-batch" data-batch="${batchIndex}" style="padding: 6px 16px; font-size: 13px; cursor: pointer; border-radius: 8px;">
                 ⚡ 重翻第 ${batchIndex + 1} 批次
             </button>
         `;
         
         const grid = document.createElement('div');
         grid.className = 'mt-batch-grid';
+        grid.style.cssText = `
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        `;
         
         section.appendChild(header);
         section.appendChild(grid);
@@ -672,6 +742,8 @@ function getOrCreateBatchSection(batchIndex) {
         } else {
             container.appendChild(section);
         }
+
+        updateBatchDropdownMenu();
     }
     return section.querySelector('.mt-batch-grid');
 }

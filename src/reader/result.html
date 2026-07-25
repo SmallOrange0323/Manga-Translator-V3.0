@@ -24,9 +24,13 @@
             <button id="retranslate-all-btn" class="btn-export secondary" title="重新翻譯整本漫畫的所有頁面">
                 🔄 重新翻譯全漫畫
             </button>
-            <button id="retranslate-batch-btn" class="btn-export secondary" title="僅重新翻譯當前已載入或選取的圖片批次">
-                ⚡ 重翻當前批次
-            </button>
+            <div class="batch-dropdown-wrapper" style="position: relative; display: inline-block;">
+                <button id="retranslate-batch-dropdown-btn" class="btn-export secondary" title="選取特定的批次進行獨立重新翻譯">
+                    ⚡ 重翻指定批次 ▾
+                </button>
+                <div id="batch-dropdown-menu" class="batch-dropdown-menu" style="display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; background: #ffffff; border: 2px solid #8d80f1; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); z-index: 20000; min-width: 200px; padding: 6px 0;">
+                </div>
+            </div>
             <button id="export-html-btn" class="btn-export secondary">
                 儲存 HTML
             </button>
