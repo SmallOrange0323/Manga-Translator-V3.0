@@ -593,17 +593,103 @@ function refreshGlossaryStatus() {
     });
 }
 
+function getOrCreateBatchSection(batchIndex) {
+    if (batchIndex === undefined || batchIndex === null || isNaN(batchIndex)) batchIndex = 0;
+    let section = container.querySelector(`.mt-batch-section[data-batch="${batchIndex}"]`);
+    if (!section) {
+        section = document.createElement('div');
+        section.className = 'mt-batch-section';
+        section.dataset.batch = batchIndex;
+        section.style.cssText = `
+            margin-bottom: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 16px;
+        `;
+        
+        const header = document.createElement('div');
+        header.className = 'mt-batch-header';
+        header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            margin-bottom: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        `;
+        
+        header.innerHTML = `
+            <div style="font-weight: bold; color: var(--accent-color, #4a9eff); font-size: 15px; display: flex; align-items: center; gap: 8px;">
+                <span>📦 批次 #${batchIndex + 1}</span>
+            </div>
+            <button class="btn-export secondary btn-retranslate-single-batch" data-batch="${batchIndex}" style="padding: 4px 12px; font-size: 13px; cursor: pointer;">
+                ⚡ 重翻第 ${batchIndex + 1} 批次
+            </button>
+        `;
+        
+        const grid = document.createElement('div');
+        grid.className = 'mt-batch-grid';
+        
+        section.appendChild(header);
+        section.appendChild(grid);
+        
+        // 綁定「⚡ 重翻第 N 批次」點擊事件
+        header.querySelector('.btn-retranslate-single-batch').onclick = () => {
+            const batchCards = grid.querySelectorAll('.result-card');
+            const batchImages = Array.from(batchCards).map(card => card.dataset.retryUrl).filter(Boolean);
+            
+            if (batchImages.length === 0) {
+                alert(`批次 #${batchIndex + 1} 無有效圖片可重翻`);
+                return;
+            }
+            
+            if (!confirm(`確定要重新翻譯 批次 #${batchIndex + 1}（共 ${batchImages.length} 張圖片）嗎？`)) {
+                return;
+            }
+
+            const overlay = document.getElementById('loading-overlay');
+            if (overlay) overlay.classList.remove('hidden');
+            document.getElementById('progress-text').innerText = `正在重翻第 ${batchIndex + 1} 批次 (${batchImages.length} 張)...`;
+
+            chrome.runtime.sendMessage({
+                action: 'RETRY_FAILED_BATCH',
+                images: batchImages,
+                sourceTabId: sourceTabId
+            }, (response) => {
+                if (response?.status !== 'retrying') {
+                    alert('批次重翻失敗: ' + (response?.error || '未知錯誤'));
+                    if (overlay) overlay.classList.add('hidden');
+                }
+            });
+        };
+
+        // 按批次順序插入 container
+        const sections = [...container.querySelectorAll('.mt-batch-section')];
+        const nextSection = sections.find(sec => parseInt(sec.dataset.batch) > batchIndex);
+        if (nextSection) {
+            container.insertBefore(section, nextSection);
+        } else {
+            container.appendChild(section);
+        }
+    }
+    return section.querySelector('.mt-batch-grid');
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "appendResult") {
         const imgUrl = request.data?.image || '';
+        const batchIdx = request.data?.batchIndex !== undefined ? request.data.batchIndex : 0;
+        const targetGrid = getOrCreateBatchSection(batchIdx);
+
         // 【改動3】整批重試時：若卡片已存在（依 data-retry-url 定位），直接覆蓋
         const existingErrorCard = imgUrl
-            ? container.querySelector(`.result-card.is-error[data-retry-url="${CSS.escape(imgUrl)}"]`)
+            ? container.querySelector(`.result-card[data-retry-url="${CSS.escape(imgUrl)}"]`)
             : null;
 
         let realCard;
         if (existingErrorCard) {
-            // 覆蓋模式：原地替換失敗卡片
+            // 覆蓋模式：原地替換舊卡片
             const existingIndex = existingErrorCard.dataset.index;
             realCard = buildCard(request.data, parseInt(existingIndex) || 0);
             existingErrorCard.replaceWith(realCard);
@@ -616,7 +702,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 placeholder.replaceWith(realCard);
             } else {
                 realCard = buildCard(request.data, idx);
-                container.appendChild(realCard);
+                targetGrid.appendChild(realCard);
             }
         }
         // 行動端：綁定點擊事件

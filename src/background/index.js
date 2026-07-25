@@ -1499,11 +1499,17 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             const res = allPageResults[j];
             completedCount++;
 
+            const currentBatchIdx = Math.floor(i / batchSize);
             if (!res || res.error) {
                 broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${res?.error || '無回應'}`, 'error');
                 chrome.tabs.sendMessage(resultTabId, {
                     action: 'appendResult',
-                    data: { image: imgSrc, error: res?.error || '翻譯失敗或無回應' }
+                    data: { 
+                        image: imgSrc, 
+                        error: res?.error || '翻譯失敗或無回應',
+                        batchIndex: currentBatchIdx,
+                        pageIndex: completedCount
+                    }
                 });
             } else {
                 await incrementDailyUsage(modelName);
@@ -1513,7 +1519,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     data: { 
                         image: imgSrc, 
                         results: res.results, 
-                        usedModelName: res.usedModelName || modelName 
+                        usedModelName: res.usedModelName || modelName,
+                        batchIndex: currentBatchIdx,
+                        pageIndex: completedCount
                     }
                 });
             }
