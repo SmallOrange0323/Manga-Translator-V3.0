@@ -106,8 +106,9 @@ async function fetchAllEHentaiPages(manga) {
                 const doc = parser.parseFromString(response.html, 'text/html');
                 const anchors = doc.querySelectorAll('#gdt a');
                 
-                // 計算起始 offset (例如每頁 40 張，p=1 起始為 40)
-                const offset = p * Math.max(1, document.querySelectorAll('#gdt a').length || 40);
+                // 精確計算起始 offset (根據 E網 詳情頁真實的縮圖數量 20 或 40 計算，防止雙數區段錯位)
+                const perPage = manga.thumbsPerPage || anchors.length || 40;
+                const offset = p * perPage;
                 anchors.forEach((a, idx) => {
                     const targetIdx = offset + idx;
                     if (targetIdx < manga.pages.length && a.href) {

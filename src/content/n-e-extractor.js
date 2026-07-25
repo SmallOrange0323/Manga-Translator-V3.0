@@ -232,6 +232,7 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       totalPages,
       pages: pageUrls.map(u => ({ url: u })),
       pageUrls,
+      thumbsPerPage, // 記錄首頁真實縮圖數量 (20 或 40)
       galleryPageUrls, // 傳出所有 gallery 分頁網址以便完整補全
       galleryUrl: url
     };
