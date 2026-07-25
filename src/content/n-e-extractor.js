@@ -120,6 +120,55 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       totalPages = document.querySelectorAll('.thumb-container').length;
     }
 
+    // 嘗試解析 N網 媒體庫 ID (media_id) 以直接建構直連 CDN URL (免抓 HTML 分頁，0 請求阻擋)
+    let directImageUrls = [];
+    try {
+      let galleryData = null;
+      const scripts = Array.from(document.querySelectorAll('script'));
+      for (const script of scripts) {
+        const text = script.textContent || '';
+        if (text.includes('window._gallery =') || text.includes('JSON.parse(')) {
+          const match = text.match(/window\._gallery\s*=\s*({[\s\S]+?});/);
+          if (match) {
+            galleryData = JSON.parse(match[1]);
+            break;
+          }
+          const matchParse = text.match(/JSON\.parse\((['"])([\s\S]+?)\1\)/);
+          if (matchParse) {
+            try {
+              const unescaped = JSON.parse(`"${matchParse[2]}"`);
+              galleryData = JSON.parse(unescaped);
+              break;
+            } catch (e) {}
+          }
+        }
+      }
+
+      if (galleryData && galleryData.media_id && galleryData.images && galleryData.images.pages) {
+        const mediaId = galleryData.media_id;
+        const typeMap = { 'j': 'jpg', 'p': 'png', 'w': 'webp', 'g': 'gif' };
+        directImageUrls = galleryData.images.pages.map((p, idx) => {
+          const ext = typeMap[p.t] || 'jpg';
+          return `https://i3.nhentai.net/galleries/${mediaId}/${idx + 1}.${ext}`;
+        });
+      } else {
+        // 縮圖推導備援
+        const firstThumb = document.querySelector('.thumb-container img');
+        if (firstThumb) {
+          const thumbSrc = firstThumb.getAttribute('src') || firstThumb.dataset.src || '';
+          const m = thumbSrc.match(/\/galleries\/(\d+)\/1t?\./i);
+          if (m) {
+            const mediaId = m[1];
+            for (let i = 1; i <= totalPages; i++) {
+              directImageUrls.push(`https://i3.nhentai.net/galleries/${mediaId}/${i}.jpg`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[Extractor] N網 直連 CDN URL 解析失敗:', err);
+    }
+
     // 產生分頁頁面的 URL 清單 (例如：https://nhentai.net/g/12345/1/)
     const pageUrls = [];
     for (let i = 1; i <= totalPages; i++) {
@@ -131,7 +180,10 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       mangaId,
       title,
       totalPages,
-      pages: pageUrls.map(u => ({ url: u })),
+      pages: pageUrls.map((u, idx) => ({
+        url: u,
+        directUrl: directImageUrls[idx] || null
+      })),
       pageUrls,
       galleryUrl: url
     };

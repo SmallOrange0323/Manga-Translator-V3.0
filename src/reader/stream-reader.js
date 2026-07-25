@@ -287,9 +287,36 @@ function loadPageImage(index, retryCount = 0) {
         
         loadedImagesMap.set(index, 'loading');
         const pageObj = mangaData.pages[index];
-        if (!pageObj || !pageObj.url) {
+        if (!pageObj || (!pageObj.url && !pageObj.directUrl)) {
             showErrorPage(index, '無效的分頁網址');
             reject(new Error('無效的分頁網址'));
+            return;
+        }
+
+        // 【直連 CDN 特快車】若已包含直連圖片 URL (如 N網 解析出的 media_id)，免發送 FETCH_HTML，0 阻擋秒出圖！
+        if (pageObj.directUrl) {
+            const img = document.createElement('img');
+            img.src = pageObj.directUrl;
+            img.loading = 'lazy';
+            
+            img.onload = () => {
+                if (overlay) overlay.classList.add('hidden');
+                if (wrapper) wrapper.style.minHeight = '';
+                loadedImagesMap.set(index, pageObj.directUrl);
+                resolve();
+            };
+
+            img.onerror = () => {
+                // 若直連 URL 偶爾失敗 (如副檔名推導不對)，自動降級走 FETCH_HTML
+                pageObj.directUrl = null;
+                fetchWithRetry();
+            };
+
+            if (wrapper) {
+                const existingImg = wrapper.querySelector('img');
+                if (existingImg) existingImg.remove();
+                wrapper.insertBefore(img, wrapper.querySelector('.page-actions'));
+            }
             return;
         }
 
