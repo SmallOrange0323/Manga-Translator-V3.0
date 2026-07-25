@@ -65,18 +65,27 @@ function injectMobileStreamBtn() {
     
     btnStream.addEventListener('click', async () => {
         if (!sourceTabId) return;
+        btnStream.disabled = true;
         btnStream.textContent = '⏳ 讀取中...';
+
+        const unlockTimer = setTimeout(() => {
+            btnStream.disabled = false;
+            btnStream.textContent = '⚡ 串聯流式閱讀';
+        }, 5000);
+
         chrome.tabs.sendMessage(sourceTabId, { action: 'extractNEMetadata' }, async (response) => {
+            clearTimeout(unlockTimer);
+            btnStream.disabled = false;
+            btnStream.textContent = '⚡ 串聯流式閱讀';
+
             if (chrome.runtime.lastError || !response || !response.success || !response.metadata) {
                 alert('無法自來源網頁提取漫畫資訊，請確保來源網頁是在 N/E 網的漫畫詳情首頁！');
-                btnStream.textContent = '⚡ 串聯流式閱讀';
                 return;
             }
             
             await chrome.storage.local.set({ mt_current_stream: response.metadata });
             const readerUrl = chrome.runtime.getURL('src/reader/stream-reader.html');
             chrome.tabs.create({ url: readerUrl });
-            btnStream.textContent = '⚡ 串聯流式閱讀';
         });
     });
 
@@ -188,10 +197,22 @@ function updateStatus(msg, isError = false) {
  * 使用 PC_MODE 讓 background 自動開啟 result.html 顯示結果。
  * 舊的 MOBILE_MODE 會把結果送回 mobile 選圖頁，但該頁沒有接收器，結果永遠不顯示。
  */
+/**
+ * 開始翻譯
+ * 使用 PC_MODE 讓 background 自動開啟 result.html 顯示結果。
+ */
 async function startTranslation() {
     const selectedImages = Array.from(selectedIndices).map(i => foundImages[i]);
+    if (selectedImages.length === 0) return;
+
     updateStatus(`正在準備翻譯 ${selectedImages.length} 張圖片，即將開啟結果分頁...`);
     btnTranslate.disabled = true;
+
+    // 5 秒超時強制解鎖定時器：防止 Android WebView 凍結導致按鈕永久鎖死
+    const autoUnlockTimer = setTimeout(() => {
+        btnTranslate.disabled = false;
+        updateStatus('⚠️ 操作超時，按鈕已自動解鎖，請重試', true);
+    }, 5000);
 
     chrome.runtime.sendMessage({
         action: 'START_MANGA_BATCH_PC_MODE',
@@ -202,14 +223,34 @@ async function startTranslation() {
             mobile: true
         }
     }, (response) => {
+        clearTimeout(autoUnlockTimer);
+        btnTranslate.disabled = false;
+
         if (chrome.runtime.lastError) {
             updateStatus('❌ 發送失敗: ' + chrome.runtime.lastError.message, true);
-            btnTranslate.disabled = false;
             return;
         }
         updateStatus('✅ 翻譯指令已送出，正在開啟結果分頁...');
     });
 }
+
+// 行動端頁面解凍與重獲焦點自癒
+function setupMobileAutoRecovery() {
+    const recoverUI = () => {
+        btnTranslate.disabled = selectedIndices.size === 0;
+        const btnStream = document.getElementById('btn-stream-read');
+        if (btnStream && btnStream.textContent.includes('讀取中')) {
+            btnStream.textContent = '⚡ 串聯流式閱讀';
+        }
+    };
+
+    window.addEventListener('focus', recoverUI);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') recoverUI();
+    });
+}
+
+setupMobileAutoRecovery();
 
 // 啟動
 init();
