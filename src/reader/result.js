@@ -87,8 +87,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 
                 savedData.forEach((item, idx) => {
+                    const batchIdx = item.batchIndex !== undefined ? item.batchIndex : Math.floor(idx / 10);
+                    const targetGrid = getOrCreateBatchSection(batchIdx);
                     const card = buildCard(item, idx);
-                    container.appendChild(card);
+                    targetGrid.appendChild(card);
                     if (window._bindMobileCard) window._bindMobileCard(card);
                 });
                 
@@ -804,6 +806,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 targetGrid.appendChild(realCard);
             }
         }
+        // 關鍵保險：確保 realCard 必須屬於對應的 targetGrid 批次容器
+        if (realCard && realCard.parentElement !== targetGrid) {
+            targetGrid.appendChild(realCard);
+        }
+        updateBatchDropdownMenu();
+
         // 行動端：綁定點擊事件
         if (window._bindMobileCard) window._bindMobileCard(realCard);
         sendResponse({status: "success"});
@@ -858,7 +866,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 function createPlaceholders(total) {
+    const batchSize = 10;
     for (let i = 0; i < total; i++) {
+        const batchIdx = Math.floor(i / batchSize);
+        const targetGrid = getOrCreateBatchSection(batchIdx);
+
         const card = document.createElement('div');
         card.className = 'result-card skeleton-card';
         card.dataset.index = i;
@@ -888,7 +900,7 @@ function createPlaceholders(total) {
                 </div>
             </div>
         `;
-        container.appendChild(card);
+        targetGrid.appendChild(card);
     }
 }
 
