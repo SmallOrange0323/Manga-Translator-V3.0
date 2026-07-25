@@ -6,6 +6,14 @@ let currentTheme = 'umamusume';
 let sourceTabId = null;
 let activeMangaKey = null;
 
+// 譯文文字淨化工具：徹底清理 \n 與多餘換行，保證句子流暢連貫
+export function sanitizeTranslationText(text) {
+    if (!text) return '';
+    let clean = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+    clean = clean.replace(/([，。！？；：])\s+/g, '$1');
+    return clean;
+}
+
 // 解析 URL 取得來源分頁 ID
 const urlParams = new URLSearchParams(window.location.search);
 sourceTabId = parseInt(urlParams.get('tabId'));
@@ -180,7 +188,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (!confirm(`確定要重新翻譯整批漫畫（共 ${images.length} 張）嗎？這將會清除當前所有翻譯結果並重頭開始。`)) {
+            if (!confirm(`確定要重新翻譯整本漫畫（共 ${images.length} 頁）嗎？這將會清除當前所有翻譯結果並從第 1 頁重頭開始翻譯。`)) {
                 return;
             }
 
@@ -793,7 +801,7 @@ function renderDialogueItems(container, results, item) {
         contentDiv.className = 'dialogue-content';
         const transText = document.createElement('div');
         transText.className = 'translated-text';
-        transText.textContent = res.translation || '無翻譯';
+        transText.textContent = sanitizeTranslationText(res.translation) || '無翻譯';
         const origText = document.createElement('div');
         origText.className = 'original-text';
         origText.setAttribute('contenteditable', 'true');
@@ -867,7 +875,7 @@ function renderDialogueItems(container, results, item) {
                 mangaKey: activeMangaKey
             }, (response) => {
                 if (response && response.results && response.results.length > 0) { 
-                    transText.textContent = response.results[0].translation; 
+                    transText.textContent = sanitizeTranslationText(response.results[0].translation); 
                 }
                 else { 
                     alert("重譯失敗: " + (response?.error || 'Unknown')); 
@@ -934,7 +942,7 @@ function createSuccessActionGroup(item, dialoguesContainer) {
                 // 逐行填回，避免越界
                 transElements.forEach((el, i) => {
                     if (newResults[i]) {
-                        el.textContent = newResults[i].translation;
+                        el.textContent = sanitizeTranslationText(newResults[i].translation);
                     }
                 });
             } else {

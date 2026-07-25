@@ -238,14 +238,30 @@ function loadPageImage(index) {
 function extractImgUrl(htmlText, pageUrl) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlText, 'text/html');
+    let rawSrc = null;
+
     if (pageUrl.includes('nhentai.net')) {
-        const img = doc.querySelector('#image-container img');
-        return img ? img.src : null;
+        const img = doc.querySelector('#image-container img') || doc.querySelector('.image-container img');
+        if (img) {
+            rawSrc = img.getAttribute('src') || img.dataset.src || img.getAttribute('data-src');
+        }
     } else if (pageUrl.includes('e-hentai.org') || pageUrl.includes('exhentai.org')) {
-        const img = doc.getElementById('img');
-        return img ? img.src : null;
+        const img = doc.getElementById('img') || doc.querySelector('img#img') || doc.querySelector('#i3 img');
+        if (img) {
+            rawSrc = img.getAttribute('src') || img.dataset.src || img.getAttribute('data-src');
+        }
     }
-    return null;
+
+    if (!rawSrc) return null;
+
+    // 自動補全網址協定與相對路徑
+    if (rawSrc.startsWith('//')) {
+        return 'https:' + rawSrc;
+    } else if (rawSrc.startsWith('/')) {
+        const origin = new URL(pageUrl).origin;
+        return origin + rawSrc;
+    }
+    return rawSrc;
 }
 
 // 顯示載入錯誤介面
