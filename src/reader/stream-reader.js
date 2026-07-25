@@ -44,8 +44,19 @@ async function loadMangaData() {
     }
 
     mangaData = data.mt_current_stream;
-    activeMangaKey = mangaData.titleKey || mangaData.id;
-    totalPages = mangaData.pages ? mangaData.pages.length : 0;
+    activeMangaKey = mangaData.titleKey || mangaData.id || mangaData.mangaId || 'unknown';
+
+    // 強效資料自動備援：自動將 pageUrls 轉換為標準 pages 結構
+    if (!mangaData.pages && Array.isArray(mangaData.pageUrls)) {
+        mangaData.pages = mangaData.pageUrls.map(u => ({ url: typeof u === 'string' ? u : u.url }));
+    } else if (!mangaData.pages && mangaData.totalPages && mangaData.mangaId) {
+        mangaData.pages = Array.from({ length: mangaData.totalPages }, (_, i) => ({
+            url: `https://nhentai.net/g/${mangaData.mangaId}/${i + 1}/`
+        }));
+    }
+
+    if (!mangaData.pages) mangaData.pages = [];
+    totalPages = mangaData.pages.length;
     
     // 更新 UI 標題與頁數
     mangaTitleEl.textContent = mangaData.title || '未知漫畫';
@@ -245,10 +256,20 @@ function extractImgUrl(htmlText, pageUrl) {
         if (img) {
             rawSrc = img.getAttribute('src') || img.dataset.src || img.getAttribute('data-src');
         }
+        // 正則備援：直接從 HTML 文字匹配 nhentai 圖片 CDN URL
+        if (!rawSrc) {
+            const m = htmlText.match(/(?:https:)?\/\/(?:i\d*|t\d*)\.nhentai\.net\/galleries\/[^\s"'>]+/i);
+            if (m) rawSrc = m[0];
+        }
     } else if (pageUrl.includes('e-hentai.org') || pageUrl.includes('exhentai.org')) {
         const img = doc.getElementById('img') || doc.querySelector('img#img') || doc.querySelector('#i3 img');
         if (img) {
             rawSrc = img.getAttribute('src') || img.dataset.src || img.getAttribute('data-src');
+        }
+        // 正則備援：直接從 HTML 匹配 img#img 的 src
+        if (!rawSrc) {
+            const m = htmlText.match(/id="img"[^>]*src="([^"]+)"/i) || htmlText.match(/src="(https?:\/\/[^"]+\.(?:jpg|png|gif|webp)[^"]*)"/i);
+            if (m) rawSrc = m[1];
         }
     }
 

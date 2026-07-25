@@ -131,6 +131,7 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       mangaId,
       title,
       totalPages,
+      pages: pageUrls.map(u => ({ url: u })),
       pageUrls,
       galleryUrl: url
     };
@@ -165,7 +166,8 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
       token,
       title,
       totalPages,
-      pageUrls, // 之後在 stream-reader 中若長度小於 totalPages，可以抓取後續 gallery 頁面的 URLs
+      pages: pageUrls.map(u => ({ url: u })),
+      pageUrls,
       galleryUrl: url
     };
   }
