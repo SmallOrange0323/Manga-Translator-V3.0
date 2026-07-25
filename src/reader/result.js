@@ -754,6 +754,7 @@ function getOrCreateBatchSection(batchIndex) {
             chrome.runtime.sendMessage({
                 action: 'RETRY_FAILED_BATCH',
                 images: batchImages,
+                targetBatchIndex: batchIndex,
                 sourceTabId: sourceTabId
             }, (response) => {
                 if (response?.status !== 'retrying') {

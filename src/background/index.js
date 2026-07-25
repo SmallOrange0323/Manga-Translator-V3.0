@@ -881,9 +881,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true; // 非同步
   }
 
-  // ── 改動3：整批重試 — 一鍵重試所有失敗圖片（不開新分頁） ──
+  // ── 改動3：整批重試 / 指定批次重翻 — 一鍵重試圖片（不開新分頁） ──
   if (message.action === 'RETRY_FAILED_BATCH') {
-      const { images, sourceTabId: retrySourceTabId } = message;
+      const { images, sourceTabId: retrySourceTabId, targetBatchIndex } = message;
       // resultTabId 優先使用 message 帶來的值，若為 null 則以 sender（result 頁自身）作為回傳目標
       const retryResultTabId = message.resultTabId || sender.tab?.id;
       if (!images || images.length === 0 || !retryResultTabId) {
@@ -892,9 +892,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       // 重置停止旗標
       state.set('isStopping', false);
-      // 直接以現有 resultTabId 啟動批次翻譯（不建立新分頁），並標記為重試 (isRetry = true)
-      processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, true);
-      log.info('Background', `[重試批次] 收到 ${images.length} 張失敗圖片，開始重試翻譯... (resultTabId: ${retryResultTabId})`);
+      // 直接以現有 resultTabId 啟動批次翻譯（不建立新分頁），並標記為重試 (isRetry = true)，且帶上 targetBatchIndex
+      processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, true, targetBatchIndex);
+      log.info('Background', `[重試批次] 收到 ${images.length} 張圖片，重翻指定批次 #${targetBatchIndex !== undefined ? targetBatchIndex + 1 : '全'}... (resultTabId: ${retryResultTabId})`);
       sendResponse({ status: 'retrying' });
       return false;
   }
@@ -1125,7 +1125,7 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
 }
 
 // PC 模式的專屬翻譯處理器 (並行版本 - 使用 Semaphore 控制並發數)
-async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false) {
+async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
     // 輔助函式：廣播狀態給行動端來源分頁的日誌面板
     const broadcastStatus = (msg, type = 'info') => {
         if (!sourceTabId) return;
@@ -1499,7 +1499,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             const res = allPageResults[j];
             completedCount++;
 
-            const currentBatchIdx = Math.floor(i / batchSize);
+            const currentBatchIdx = (targetBatchIndex !== null && targetBatchIndex !== undefined) 
+                ? targetBatchIndex 
+                : Math.floor(i / batchSize);
             if (!res || res.error) {
                 broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${res?.error || '無回應'}`, 'error');
                 chrome.tabs.sendMessage(resultTabId, {
