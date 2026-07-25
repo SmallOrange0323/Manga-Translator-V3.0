@@ -147,74 +147,131 @@ function initPageContainers() {
     startBackgroundDownloadQueue();
 }
 
-// 全局預載佇列陣列
+// 全局預載佇列與心跳控制
 let backgroundDownloadQueue = [];
+let isQueueRunning = false;
+let heartbeatIntervalId = null;
 
 function prioritizePageInQueue(index) {
+    if (loadedImagesMap.has(index) && loadedImagesMap.get(index) !== 'loading') return;
+    
     const qIdx = backgroundDownloadQueue.indexOf(index);
     if (qIdx > 0) {
         backgroundDownloadQueue.splice(qIdx, 1);
         backgroundDownloadQueue.unshift(index); // 插隊到隊列最前面
-    } else if (qIdx === -1 && !loadedImagesMap.has(index)) {
+    } else if (qIdx === -1) {
         backgroundDownloadQueue.unshift(index);
     }
 }
 
-// 自動背景下載佇列主邏輯 (全自動按 1,2,3 順序預載全本)
+// 自動背景下載佇列主邏輯 (自癒式不死佇列 - 全自動按 1,2,3 順序預載全本)
 async function startBackgroundDownloadQueue() {
+    if (isQueueRunning) return;
+    isQueueRunning = true;
+    
     progressBar.style.display = 'block';
-    progressFill.style.width = '0%';
-    progressText.textContent = `正在全自動預載圖片中... (0 / ${totalPages})`;
-
-    backgroundDownloadQueue = Array.from({ length: totalPages }, (_, i) => i);
-    let activeWorkers = 0;
-    let completedCount = 0;
-
-    const runWorker = async () => {
-        while (backgroundDownloadQueue.length > 0) {
-            const index = backgroundDownloadQueue.shift();
-            
-            // 跳過已經載入好的
-            if (loadedImagesMap.has(index) && loadedImagesMap.get(index) !== 'loading') {
-                continue;
-            }
-
-            activeWorkers++;
-            
-            try {
-                // 更新該頁的 UI Loading 狀態為「正在下載...」
-                const overlayText = document.getElementById(`overlay-text-${index}`);
-                if (overlayText) overlayText.textContent = `正在下載中... (P. ${index + 1})`;
-
-                await loadPageImage(index);
-                // 平滑間隔：每下載完成一頁休眠 150ms，防止擊穿伺服器防爬蟲 Rate Limit
-                await new Promise(r => setTimeout(r, 150));
-            } catch (err) {
-                console.error(`P.${index + 1} 載入失敗:`, err);
-            } finally {
-                activeWorkers--;
-                completedCount++;
-                const percent = Math.round((completedCount / totalPages) * 100);
-                progressFill.style.width = percent + '%';
-                progressText.textContent = `正在預載圖片中: ${completedCount} / ${totalPages} (${percent}%)`;
+    
+    // 初始化尚未下載完成的頁面佇列
+    if (backgroundDownloadQueue.length === 0) {
+        for (let i = 0; i < totalPages; i++) {
+            if (!loadedImagesMap.has(i) || loadedImagesMap.get(i) === 'loading') {
+                backgroundDownloadQueue.push(i);
             }
         }
+    }
 
-        // 所有圖片下載緩存完畢
-        if (completedCount === totalPages) {
+    let activeWorkers = 0;
+    const maxConcurrency = 3;
+
+    const updateProgressUI = () => {
+        let successCount = 0;
+        loadedImagesMap.forEach(val => {
+            if (val && val !== 'loading') successCount++;
+        });
+
+        const percent = Math.round((successCount / totalPages) * 100);
+        progressFill.style.width = percent + '%';
+        progressText.textContent = `正在全自動預載圖片中: ${successCount} / ${totalPages} (${percent}%)`;
+
+        if (successCount === totalPages) {
             progressFill.style.width = '100%';
             progressText.textContent = `🎉 所有圖片預載快取完成！`;
             btnDownloadZip.innerHTML = '📦 瞬間打包下載 (已就緒)';
+            if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
             setTimeout(() => {
                 progressBar.style.display = 'none';
             }, 3000);
         }
     };
 
-    // 啟動併發工作線程 (限定最大並行數為 3，兼顧速度與連線穩定)
-    const safeConcurrency = Math.min(3, totalPages);
-    const workers = Array.from({ length: safeConcurrency }, () => runWorker());
-    await Promise.all(workers);
+    const runWorker = async () => {
+        while (backgroundDownloadQueue.length > 0) {
+            const index = backgroundDownloadQueue.shift();
+            
+            // 跳過已經成功載入好的
+            if (loadedImagesMap.has(index) && loadedImagesMap.get(index) !== 'loading') {
+                updateProgressUI();
+                continue;
+            }
+
+            activeWorkers++;
+            
+            try {
+                const overlayText = document.getElementById(`overlay-text-${index}`);
+                if (overlayText) overlayText.textContent = `正在預載中... (P. ${index + 1})`;
+
+                await loadPageImage(index);
+                // 順暢下載：平滑間隔 120ms
+                await new Promise(r => setTimeout(r, 120));
+            } catch (err) {
+                console.warn(`P.${index + 1} 預載暫時受阻，放回佇列末尾重試...`);
+                // 關鍵自癒邏輯：失敗圖片不拋棄，重新放入佇列末尾！
+                if (!loadedImagesMap.has(index) || loadedImagesMap.get(index) === 'loading') {
+                    backgroundDownloadQueue.push(index);
+                }
+                // 遇到繁忙時動態拉長休眠間隔 (1000ms)，給伺服器喘息
+                await new Promise(r => setTimeout(r, 1000));
+            } finally {
+                activeWorkers--;
+                updateProgressUI();
+            }
+        }
+        
+        isQueueRunning = false;
+    };
+
+    // 啟動 3 個 Worker
+    const safeConcurrency = Math.min(maxConcurrency, Math.max(1, backgroundDownloadQueue.length));
+    for (let i = 0; i < safeConcurrency; i++) {
+        runWorker();
+    }
+
+    // 心跳檢查與自動甦醒機制 (每 4 秒檢查一次是否有漏掉或中斷的頁面)
+    if (!heartbeatIntervalId) {
+        heartbeatIntervalId = setInterval(() => {
+            let successCount = 0;
+            const pendingIndices = [];
+            for (let i = 0; i < totalPages; i++) {
+                if (loadedImagesMap.has(i) && loadedImagesMap.get(i) !== 'loading') {
+                    successCount++;
+                } else {
+                    pendingIndices.push(i);
+                }
+            }
+
+            if (successCount < totalPages) {
+                if (!isQueueRunning || backgroundDownloadQueue.length === 0) {
+                    console.log(`[QueueHeartbeat] 偵測到有 ${pendingIndices.length} 頁尚未完成，自動喚醒佇列繼續下載...`);
+                    backgroundDownloadQueue = pendingIndices;
+                    isQueueRunning = false;
+                    startBackgroundDownloadQueue();
+                }
+            } else {
+                clearInterval(heartbeatIntervalId);
+                heartbeatIntervalId = null;
+            }
+        }, 4000);
+    }
 }
 
 // 載入單一頁面的真實圖片連結 (包含自動重試與平滑延遲機制)
