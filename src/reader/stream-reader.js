@@ -181,7 +181,7 @@ async function startBackgroundDownloadQueue() {
     }
 
     let activeWorkers = 0;
-    const maxConcurrency = 3;
+    const maxConcurrency = 5;
 
     const updateProgressUI = () => {
         let successCount = 0;
@@ -322,7 +322,7 @@ function loadPageImage(index, retryCount = 0) {
                 if (imgUrl) {
                     const img = document.createElement('img');
                     img.src = imgUrl;
-                    img.loading = 'lazy';
+                    img.loading = 'eager'; // 即刻發起網絡下載，全自動背景預載
                     
                     img.onload = () => {
                         if (overlay) overlay.classList.add('hidden');
@@ -359,7 +359,7 @@ function loadPageImage(index, retryCount = 0) {
         if (pageObj.directUrl) {
             const img = document.createElement('img');
             img.src = pageObj.directUrl;
-            img.loading = 'lazy';
+            img.loading = 'eager'; // 即刻發起網絡下載，全自動背景預載
             
             img.onload = () => {
                 if (overlay) overlay.classList.add('hidden');
