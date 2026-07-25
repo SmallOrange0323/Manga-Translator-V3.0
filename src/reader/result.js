@@ -212,6 +212,40 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // 綁定「重翻當前批次」按鈕
+    const retranslateBatchBtn = document.getElementById('retranslate-batch-btn');
+    if (retranslateBatchBtn) {
+        retranslateBatchBtn.addEventListener('click', () => {
+            const images = translatedData
+                .map(item => item.retryUrl || item.image)
+                .filter(url => url);
+
+            if (images.length === 0) {
+                alert('目前沒有已載入的批次圖片可以重翻！');
+                return;
+            }
+
+            if (!confirm(`確定要重新翻譯當前這批圖片（共 ${images.length} 張）嗎？`)) {
+                return;
+            }
+
+            const overlay = document.getElementById('loading-overlay');
+            if (overlay) overlay.classList.remove('hidden');
+            document.getElementById('progress-text').innerText = `正在重翻當前批次 (${images.length} 張)...`;
+
+            chrome.runtime.sendMessage({
+                action: 'RETRY_FAILED_BATCH',
+                images: images,
+                sourceTabId: sourceTabId
+            }, (response) => {
+                if (response?.status !== 'retrying') {
+                    alert('批次重翻請求失敗：' + (response?.error || '未知錯誤'));
+                    if (overlay) overlay.classList.add('hidden');
+                }
+            });
+        });
+    }
+
     // 通知背景結果分頁已載入完成
     chrome.runtime.sendMessage({ action: "resultPageReady" }).catch(() => {});
 
