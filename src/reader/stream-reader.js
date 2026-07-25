@@ -117,11 +117,11 @@ function initPageContainers() {
         readerContainer.appendChild(wrapper);
     });
 
-    // 2. 啟動 Intersection Observer 僅用於更新頂部當前閱讀頁碼
+    // 2. 啟動 Intersection Observer：更新頁碼並讓可見區域圖片享 VIP 優先插隊預載
     const observerOptions = {
         root: null,
-        rootMargin: '100px 0px',
-        threshold: 0.1
+        rootMargin: '300px 0px', // 擴大預載視野
+        threshold: 0.05
     };
 
     const observer = new IntersectionObserver((entries) => {
@@ -129,6 +129,11 @@ function initPageContainers() {
             if (entry.isIntersecting) {
                 const index = parseInt(entry.target.dataset.index);
                 currentPageEl.textContent = index + 1;
+                
+                // 如果目前滑到的頁面尚未下載，且不在佇列前端，立即插隊至最優先下載
+                if (!loadedImagesMap.has(index)) {
+                    prioritizePageInQueue(index);
+                }
             }
         });
     }, observerOptions);
@@ -138,24 +143,42 @@ function initPageContainers() {
         pageObservers.push({ element: el, observer });
     });
 
-    // 3. 立刻啟動自動背景併發佇列下載圖片
+    // 3. 立刻啟動自動背景順序佇列預載 (不需要手動滑動即可全自動下載全本)
     startBackgroundDownloadQueue();
 }
 
-// 自動背景下載佇列主邏輯 (將併發數提升至 5，此為 N網 官方預載的安全限流上限，兼顧極速與防封鎖)
+// 全局預載佇列陣列
+let backgroundDownloadQueue = [];
+
+function prioritizePageInQueue(index) {
+    const qIdx = backgroundDownloadQueue.indexOf(index);
+    if (qIdx > 0) {
+        backgroundDownloadQueue.splice(qIdx, 1);
+        backgroundDownloadQueue.unshift(index); // 插隊到隊列最前面
+    } else if (qIdx === -1 && !loadedImagesMap.has(index)) {
+        backgroundDownloadQueue.unshift(index);
+    }
+}
+
+// 自動背景下載佇列主邏輯 (全自動按 1,2,3 順序預載全本)
 async function startBackgroundDownloadQueue() {
     progressBar.style.display = 'block';
     progressFill.style.width = '0%';
-    progressText.textContent = `正在預載圖片中... (0 / ${totalPages})`;
+    progressText.textContent = `正在全自動預載圖片中... (0 / ${totalPages})`;
 
-    const queue = Array.from({ length: totalPages }, (_, i) => i);
-    const maxConcurrency = 5;
+    backgroundDownloadQueue = Array.from({ length: totalPages }, (_, i) => i);
     let activeWorkers = 0;
     let completedCount = 0;
 
     const runWorker = async () => {
-        while (queue.length > 0) {
-            const index = queue.shift();
+        while (backgroundDownloadQueue.length > 0) {
+            const index = backgroundDownloadQueue.shift();
+            
+            // 跳過已經載入好的
+            if (loadedImagesMap.has(index) && loadedImagesMap.get(index) !== 'loading') {
+                continue;
+            }
+
             activeWorkers++;
             
             try {
