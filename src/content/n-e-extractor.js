@@ -152,15 +152,16 @@ async function extractMangaMetadata(isNHentai, isEHentai) {
           return `https://i3.nhentai.net/galleries/${mediaId}/${idx + 1}.${ext}`;
         });
       } else {
-        // 縮圖推導備援
+        // 縮圖推導備援 (自動從第一張縮圖標籤中精確提取副檔名, 如 .webp / .png / .jpg)
         const firstThumb = document.querySelector('.thumb-container img');
         if (firstThumb) {
           const thumbSrc = firstThumb.getAttribute('src') || firstThumb.dataset.src || '';
-          const m = thumbSrc.match(/\/galleries\/(\d+)\/1t?\./i);
+          const m = thumbSrc.match(/\/galleries\/(\d+)\/1t?\.(jpg|png|webp|gif)/i);
           if (m) {
             const mediaId = m[1];
+            const detectedExt = m[2];
             for (let i = 1; i <= totalPages; i++) {
-              directImageUrls.push(`https://i3.nhentai.net/galleries/${mediaId}/${i}.jpg`);
+              directImageUrls.push(`https://i3.nhentai.net/galleries/${mediaId}/${i}.${detectedExt}`);
             }
           }
         }
