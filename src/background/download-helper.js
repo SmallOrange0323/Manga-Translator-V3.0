@@ -35,25 +35,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         for (let i = 0; i < urls.length; i++) {
           const url = urls[i];
           // 產生檔名，補零對齊以維持排序關係，如 001.jpg
-          const ext = url.split('.').pop().split('?')[0] || 'jpg';
+          let ext = 'jpg';
+          if (url.includes('.png')) ext = 'png';
+          else if (url.includes('.webp')) ext = 'webp';
+          else if (url.includes('.gif')) ext = 'gif';
+
           const fileIndex = String(i + 1).padStart(3, '0');
           const imgName = `${fileIndex}.${ext}`;
 
           try {
-            const res = await fetch(url);
-            if (!res.ok) throw new Error(`HTTP 錯誤: ${res.status}`);
-            const blob = await res.blob();
-            folder.file(imgName, blob);
+            if (url.startsWith('data:')) {
+              const base64Content = url.split(',')[1];
+              folder.file(imgName, base64Content, { base64: true });
+            } else {
+              const res = await fetch(url);
+              if (!res.ok) throw new Error(`HTTP 錯誤: ${res.status}`);
+              const blob = await res.blob();
+              folder.file(imgName, blob);
+            }
             log.info('DownloadHelper', `下載圖片成功 (${i + 1}/${urls.length}): ${imgName}`);
           } catch (imgErr) {
             log.error('DownloadHelper', `下載單張圖片失敗 (${i + 1}/${urls.length}): ${url}`, imgErr);
-            // 寫入一個佔位文字檔，避免打包缺少頁面
             folder.file(`${imgName}_failed.txt`, `下載失敗: ${url}`);
           }
         }
 
-        const zipBlob = await zip.generateAsync({ type: 'blob' });
-        const zipUrl = URL.createObjectURL(zipBlob);
+        // Service Worker 環境下禁用 URL.createObjectURL，改用 base64 data URL
+        const base64Data = await zip.generateAsync({ type: 'base64' });
+        const zipUrl = `data:application/zip;base64,${base64Data}`;
 
         // 使用 chrome.downloads 下載 ZIP
         chrome.downloads.download({
