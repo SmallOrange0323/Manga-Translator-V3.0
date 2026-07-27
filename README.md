@@ -2,69 +2,52 @@
 
 ![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg)
-![Build](https://img.shields.io/badge/Build-Vite-blueviolet.svg)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg)
 
-**Manga Translator V3.0** 是一個基於 Chrome Extension Manifest V3 規範現代化重構的瀏覽器擴充套件。專為漫畫與小說愛好者設計，提供高穩定度、極速圖片預載、經典圖文對照與行動端優化的全方位翻譯解決方案。
+**漫畫翻譯器 V3.0** 是一款現代化、功能強大的瀏覽器翻譯擴充套件。專為漫畫與小說愛好者打造，提供極速流暢的集中閱讀體驗、精緻的圖文對照對話框翻譯，以及完美適配手機與電腦全平台的閱讀環境。
 
 ---
 
-## 🌟 V3.0 核心亮點與功能特點
+## 🌟 核心功能特色
 
-### 📖 1. N網 / E網 集中流式閱讀器 (Stream Reader)
-- **0-HTML 直連 CDN 媒體庫解析引擎 (Direct CDN Engine)**：
-  - 參考專業下載軟體（如 *Tachiyomi* / *Gallery-DL*）技術，直接從詳情頁提取媒體庫 ID (`media_id`) 與縮圖副檔名。
-  - **0 次背景 HTML 請求**，直接推導生成 200+ 頁圖片的直連 CDN 網址，100% 繞過伺服器 Rate-Limit 429 封鎖。
-- **全自動依序背景預載 (Auto-Sequential Preload)**：
-  - 開啟頁面即自動啟動 5 條 Worker 全自動從第 1 頁排隊預載全本圖片，完全無需手動往下滑動。
-- **可見區域 VIP 動態插隊 (Observer VIP Priority)**：
-  - 當手動滑動至特定頁面時，該頁自動置頂至預載佇列最前端享秒速下載。
-- **自癒式不死預載佇列 (Self-Healing Queue & Heartbeat)**：
-  - 遇到網路繁忙時，受阻圖片自動重推回佇列末尾並拉長休眠；配合 4 秒心跳監視器，確保全本 100% 自動下載完畢永不中斷。
+### 📖 1. 條漫集中流式閱讀器 (Stream Reader)
+- **免等待極速載入**：直接擷取漫畫媒體庫，打開頁面瞬間載入圖片，遠離載入轉圈圈與限制。
+- **全自動依序背景預載**：開啟閱讀器後，系統會自動在背景按順序下載整本漫畫圖片，完全不需要您手動往下滑動。
+- **看哪裡先載哪裡**：若您快速滑動到後面的頁面，系統會優先下載您當前正在看的頁面，帶來流暢無卡頓的閱讀體驗。
+- **自動斷線救援**：遇到網路波動或伺服器繁忙時，系統會自動重試並救援失敗的圖片，確保整本漫畫 100% 完整載入。
 
-### 🎨 2. 經典結果頁與雙重重翻控制 (`result.html`)
-- **精緻圖文對照與對話框校對**：
-  - 桌機版左右圖文對照，行動端平滑滑動；支援即時對話框文字編輯與校對。
-- **雙軌獨立重翻譯機制**：
-  - **`🔄 重新翻譯全漫畫`**：一鍵將整作品圖片重新發送 AI 翻譯。
-  - **`⚡ 重翻指定批次`**：卡片依 `📦 批次 #1`, `#2` 自動包裹於獨立區塊，標頭帶有獨立重翻按鈕，支援單獨重翻特定批次（如重翻第 4 批次，100% 原地歸位不竄改其他批次）。
-- **強效譯文淨化過濾 (`sanitizeTranslationText`)**：
-  - 自動過濾移除譯文中的所有 `\n` 與多餘換行，拼接為無縫單一連貫長句，徹底提升漫畫對話框閱讀體驗。
-- **🚀 串流模式一鍵開新分頁翻譯**：
-  - 串流閱讀器頂部配有「🚀 開新分頁全本翻譯」按鈕，可將流式閱讀器快取的圖片打包發送至獨立結果頁進行翻譯對照。
+### 🎨 2. 經典對照結果頁與獨立重翻譯 (`result.html`)
+- **圖文並排對照與對話框編輯**：桌機版支援左右圖文對照，行動端支援順暢滑動；可隨時點擊文字框進行校對與修改。
+- **靈活的雙重重翻譯**：
+  - **`🔄 重新翻譯全漫畫`**：一鍵將整本作品交給 AI 重新翻譯。
+  - **`⚡ 重翻指定批次`**：將漫畫自動分組，您可以只選擇重翻出錯的特定小批次，完全不影響其他已經翻好的頁面。
+- **閱讀體驗優化**：自動淨化譯文格式，去除多餘的換行，拼接為連貫順暢的句子，最適合漫畫對話框閱讀。
+- **一鍵跳轉翻譯**：在流式閱讀器中瀏覽漫畫時，點擊「🚀 開新分頁全本翻譯」即可自動帶入結果頁進行對照翻譯。
 
-### 📦 3. Manifest V3 專用 Base64 ZIP 打包與多格式匯出
-- **Service Worker 相容 Base64 ZIP 打包**：
-  - 針對 MV3 Service Worker 禁用 `URL.createObjectURL` 的限制，採用標準 `data:application/zip;base64,` 轉譯，實現一鍵點擊秒級發起全本漫畫 ZIP 下載。
-- **多格式匯出**：
-  - 支援一鍵匯出 HTML / PDF / TXT 等格式。
+### 📦 3. 一鍵打包下載與多格式匯出
+- **整本漫畫 ZIP 打包**：預載完成後，點擊「打包下載」按鈕即可將整本漫畫的所有圖片一鍵下載成 ZIP 壓縮檔。
+- **多元匯出**：支援將翻譯結果一鍵儲存為 HTML、PDF 或 TXT 文字檔。
 
-### 📱 4. 行動端適配與抗凍結防護 (Edge Android Optimization)
-- **`touch-action: manipulation;` 觸控加速**：
-  - 徹底消滅 Android 系統 300ms 點擊延遲與滑動手勢吸收，點擊秒響應。
-- **按鈕 5 秒超時自動解鎖保險 (Auto-Unlock Safety Timer)**：
-  - 解決 Android WebView 切換 App 背景凍結導致按鈕灰掉鎖死問題，5 秒自動復甦。
-- **頁面切回自癒 (`visibilitychange`)**：
-  - 重獲焦點時自動檢查並恢復 UI 活性與掃描狀態。
-
-### ☁️ 5. Storage-First 狀態機與雲端同步刷新
-- **雲端金鑰即時刷新 (`refreshCache`)**：
-  - 解決雲端金鑰同步至 `chrome.storage.local` 後選項頁面與狀態機未即時感知的痛點。
-- **API 金鑰輪詢與自動降級**：
-  - 多 Key 並列與模型自動降級 (如 Gemini 系列)，確保翻譯穩定不中斷。
+### 📱 4. 行動端 (Edge Android) 專屬優化
+- **極速觸控響應**：針對手機觸控螢幕優化，點擊與選擇圖片無延遲。
+- **按鈕防鎖死與自動恢復**：解決手機切換 App 或背景時按鈕灰掉鎖死的問題，切回瀏覽器時自動恢復點擊活性。
 
 ---
 
-## 🏗️ 技術架構 (Tech Stack)
+## 🏗️ 技術架構與設計細節 (For Developers)
 
-| 模組 | 使用技術 / 規範 |
+本章節為開發者提供 MV3 專案的底層技術細節：
+
+| 模組 / 功能 | 技術實現細節 |
 | :--- | :--- |
-| **建置工具** | Vite 5 + `@crxjs/vite-plugin` |
-| **瀏覽器規範** | Chrome Extension Manifest V3 (MV3) |
-| **背景服務** | Service Worker (`src/background/index.js`) |
-| **UI 隔離** | Shadow DOM (`src/content/`) 隔離宿主網頁 CSS |
-| **狀態管理** | `chrome.storage.local` (Storage-First 狀態機) |
-| **壓縮打包** | `JSZip` (Base64 Data URL 模式) |
+| **建置系統** | Vite 5 + `@crxjs/vite-plugin` 防禦性 MV3 建置 |
+| **網頁解析** | **0-HTML Direct CDN Engine**：直連媒體庫 `media_id` 解析，避免 200+ HTML 分頁爬蟲請求 |
+| **預載與佇列** | **Self-Healing Queue**：背景 5 Worker 併發 + 可見區域 `IntersectionObserver` VIP 插隊 + 4秒心跳監控 |
+| **狀態管理** | **Storage-First 狀態機**：基於 `chrome.storage.local`，SW 重啟進度無縫恢復 |
+| **UI 隔離** | Shadow DOM 注入，完全隔離宿主網頁 CSS |
+| **壓縮下載** | **JSZip (Base64 Data URL 模式)**：解決 Service Worker 環境下禁用 `URL.createObjectURL` 的限制 |
+| **行動端適配** | `touch-action: manipulation` 消除 300ms 觸控延遲 + 5秒超時自動解鎖定時器 |
+| **譯文處理** | `sanitizeTranslationText` 強力過濾 `\n` 並自動拼合長句 |
 
 ---
 
@@ -86,33 +69,24 @@ Manga-Translator-V3.0/
 
 ---
 
-## 🚀 開發與建置說明 (Getting Started)
+## 🚀 安裝與開發說明
 
-### 1. 安裝依賴
+### 1. 安裝依賴與啟動開發
 ```bash
 npm install
-```
-
-### 2. 啟動開發模式
-```bash
 npm run dev
 ```
 
-### 3. 生產打包與 ZIP 建立
+### 2. 生產打包
 ```bash
-# 編譯 dist-v3
 npm run build
-
-# 打包 ZIP 商店發布包
 npm run pack
 ```
 
-### 📥 載入套件方式 (Unpacked Installation)
-本擴充功能主要以封裝套件/解壓縮載入方式使用：
-1. 開啟 Chrome 或 Edge 瀏覽器，前往 `chrome://extensions/`。
+### 📥 載入擴充功能 (Unpacked Installation)
+1. 前往瀏覽器擴充功能頁面（`chrome://extensions/`）。
 2. 開啟右上角的 **「開發者模式 (Developer Mode)」**。
-3. 點擊 **「載入解壓縮擴充功能 (Load Unpacked)」**。
-4. 選擇本專案根目錄下的 **`dist-v3`** 資料夾即可完成載入！
+3. 點擊 **「載入解壓縮擴充功能 (Load Unpacked)」**，選擇專案中的 **`dist-v3`** 資料夾即可。
 
 ---
 
