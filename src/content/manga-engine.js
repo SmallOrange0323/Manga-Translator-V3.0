@@ -215,7 +215,7 @@ document.head.appendChild(style);
 export function crawlImages() {
     let mangaImages = [];
 
-    // ── 1. GigaViewer / Comic-y-ours 平台 JSON 媒體庫專屬自動解析 ──
+    // ── 1. GigaViewer / Comic-y-ours / 生肉網站 JSON 媒體庫專屬自動解析 ──
     try {
         const jsonEl = document.getElementById('episode-json') || document.querySelector('[data-episode-json]');
         if (jsonEl) {
@@ -233,30 +233,70 @@ export function crawlImages() {
             });
         }
     } catch(e) {
-        console.warn('[Manga-Engine] GigaViewer JSON 提取失敗，回退至 DOM 掃描', e);
+        console.warn('[Manga-Engine] GigaViewer JSON 提取失敗，回退至廣用掃描', e);
     }
 
-    // ── 2. 廣用 DOM 與 Canvas 閱讀器容器掃描 ──
-    const imgs = Array.from(document.querySelectorAll('img, canvas, svg image'));
+    // ── 2. <script> 標籤漫畫圖片陣列全域正則掃描器 (生肉網站 Script 變數適配) ──
+    try {
+        const scripts = Array.from(document.querySelectorAll('script'));
+        scripts.forEach(script => {
+            const code = script.textContent || '';
+            if (!code || code.length > 500000) return;
+            
+            // 正則匹配包含漫畫副檔名的連續圖片 URL
+            const matches = code.match(/https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"'<>]*)?/gi);
+            if (matches && matches.length >= 3) {
+                matches.forEach(imgUrl => {
+                    const lower = imgUrl.toLowerCase();
+                    if (!lower.includes('logo') && !lower.includes('avatar') && !lower.includes('icon') && !lower.includes('banner')) {
+                        try {
+                            const fullUrl = new URL(imgUrl, window.location.href).href;
+                            mangaImages.push({ url: fullUrl, width: 800, height: 1200 });
+                        } catch(e) {}
+                    }
+                });
+            }
+        });
+    } catch(e) {
+        console.warn('[Manga-Engine] Script 正則抓取失敗:', e);
+    }
+
+    // ── 3. 廣用 DOM 與 Canvas 閱讀器容器掃描 (全方位 Lazy 屬性大滿貫) ──
+    const imgs = Array.from(document.querySelectorAll('img, canvas, svg image, div[style*="background"], div[class*="page"]'));
     
-    // 定義常見漫畫網站 (包含 GigaViewer, Comic-DAYS, Comic-y-ours) 的閱讀器容器
+    // 生肉網站與日本電子漫畫閱讀器常見容器
     const MANGA_CONTAINERS = [
         '.ts-main-image', '.reading-content', '#readerarea', '.manga-image', 
         '.page-break', '.blocks-gallery-item', '.js-page-image', '.viewer-page', 
-        '.page-container', '[class*="page-image"]', '[id*="reader"]'
+        '.page-container', '[class*="page-image"]', '[id*="reader"]',
+        '.reader-content', '.chap-content', '.viewer-cnt', '[class*="reader"]',
+        '[class*="chapter"]', '[id*="chapter"]', '.container-chapter', '.chapter-content'
     ];
 
     imgs.forEach(img => {
-        let width = img.naturalWidth || img.width || img.offsetWidth;
-        let height = img.naturalHeight || img.height || img.offsetHeight;
-        let url = img.src || img.getAttribute('href') || ''; // 取得預設解析的絕對路徑
+        let width = img.naturalWidth || img.width || img.offsetWidth || 0;
+        let height = img.naturalHeight || img.height || img.offsetHeight || 0;
+        let url = img.src || img.getAttribute('href') || '';
         
-        // Lazy Load 處理：真實圖片通常在特殊屬性中
-        const lazyAttrs = ['data-src', 'data-lazy-src', 'data-original', 'data-src-img', 'data-url', 'data-page-src'];
+        // 全方位 Lazy-Load 屬性大滿貫 (涵蓋 JManga, Madara, WordPress 等生肉網站)
+        const lazyAttrs = [
+            'data-src', 'data-lazy-src', 'data-original', 'data-src-img', 'data-url', 
+            'data-page-src', 'data-full-url', 'data-cdn', 'data-image', 'data-img', 
+            'data-path', 'data-file', 'data-image-src', 'data-bg', 'data-actual-src'
+        ];
+        
         let dataSrc = null;
         for (const attr of lazyAttrs) {
             dataSrc = img.getAttribute(attr);
             if (dataSrc) break;
+        }
+
+        // CSS background-image 提取
+        if (!dataSrc && !url && img.style && img.style.backgroundImage) {
+            const bgMatch = img.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
+            if (bgMatch && bgMatch[1]) {
+                dataSrc = bgMatch[1];
+            }
         }
 
         if (dataSrc) {
@@ -274,7 +314,7 @@ export function crawlImages() {
         }
 
         // Canvas 處理
-        if (img.tagName.toLowerCase() === 'canvas') {
+        if (img.tagName && img.tagName.toLowerCase() === 'canvas') {
             try { 
                 url = img.toDataURL('image/jpeg'); 
                 width = img.width || 800;
@@ -285,17 +325,17 @@ export function crawlImages() {
         // 判斷是否在漫畫容器內
         const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector));
 
-        // 過濾條件優化：
+        // 過濾條件：
         let isTooSmall = false;
         if (isInMangaContainer) {
-            // 漫畫閱讀容器內：大幅放寬門檻
-            isTooSmall = (width > 0 && width < 150) || (height > 0 && height < 100);
+            // 漫畫閱讀容器內：大幅放寬門檻 (允許 Lazy-load 階段寬高為 0 的標籤)
+            isTooSmall = (width > 0 && width < 100) || (height > 0 && height < 100);
         } else {
             // 容器外：嚴格限制
             isTooSmall = (width > 0 && width < 600) || (height > 0 && height < 300);
         }
 
-        const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer;
+        const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
         const junkKeywords = ['emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction'];
         const isJunk = junkKeywords.some(key => url && url.toLowerCase().includes(key));
 
