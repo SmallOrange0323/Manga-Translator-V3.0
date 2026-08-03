@@ -212,8 +212,85 @@ document.head.appendChild(style);
 /**
  * 抓取網頁中的實體大圖 (包含 GigaViewer / Comic-y-ours 等日本電子漫畫閱讀器專屬解析)
  */
+/**
+ * 將網頁上由 CSS/DOM 切割拼圖 (Scrambled DOM Tiles) 組成的漫畫頁面，照相對座標自動重繪還原為整張無打亂圖片
+ */
+function tryReconstructScrambledDOM(containerEl) {
+    if (!containerEl) return null;
+    const pieces = Array.from(containerEl.querySelectorAll('div, span, canvas, img')).filter(p => {
+        const r = p.getBoundingClientRect();
+        return r.width > 20 && r.height > 20;
+    });
+
+    if (pieces.length >= 4) {
+        const cRect = containerEl.getBoundingClientRect();
+        if (cRect.width < 200 || cRect.height < 200) return null;
+
+        const canvas = document.createElement('canvas');
+        const scale = 2; // 高清 2x 採樣
+        canvas.width = Math.round(cRect.width * scale);
+        canvas.height = Math.round(cRect.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale);
+
+        let drewCount = 0;
+        pieces.forEach(p => {
+            const pRect = p.getBoundingClientRect();
+            const relX = pRect.left - cRect.left;
+            const relY = pRect.top - cRect.top;
+
+            const tagName = p.tagName.toLowerCase();
+            if ((tagName === 'img' || tagName === 'canvas') && p.width > 0) {
+                try {
+                    ctx.drawImage(p, relX, relY, pRect.width, pRect.height);
+                    drewCount++;
+                } catch(e) {}
+            } else {
+                const style = window.getComputedStyle(p);
+                const bgUrl = style.backgroundImage;
+                if (bgUrl && bgUrl.startsWith('url(')) {
+                    const match = bgUrl.match(/url\(['"]?(.*?)['"]?\)/);
+                    if (match && match[1]) {
+                        const tmpImg = new Image();
+                        tmpImg.src = match[1];
+                        if (tmpImg.complete && tmpImg.naturalWidth > 0) {
+                            try {
+                                ctx.drawImage(tmpImg, relX, relY, pRect.width, pRect.height);
+                                drewCount++;
+                            } catch(e) {}
+                        }
+                    }
+                }
+            }
+        });
+
+        if (drewCount >= 2) {
+            try {
+                return canvas.toDataURL('image/jpeg', 0.95);
+            } catch(e) {}
+        }
+    }
+    return null;
+}
+
 export function crawlImages() {
     let mangaImages = [];
+
+    // ── -1. 專屬 DOM 切割拼圖 (Scrambled DOM Tiles) 自動重繪還原 ──
+    const pageContainers = Array.from(document.querySelectorAll('.page-container, .reading-content, .chap-content, [class*="page"], [id*="page"]'));
+    pageContainers.forEach(container => {
+        const restoredUrl = tryReconstructScrambledDOM(container);
+        if (restoredUrl) {
+            const r = container.getBoundingClientRect();
+            mangaImages.push({
+                element: container,
+                url: restoredUrl,
+                isCanvas: true,
+                width: r.width,
+                height: r.height
+            });
+        }
+    });
 
     // ── 0. Canvas 解密還原圖層優先擷取 (針對打亂切割圖檔 Scrambled Canvas DRM) ──
     const canvases = Array.from(document.querySelectorAll('canvas'));
