@@ -215,6 +215,28 @@ document.head.appendChild(style);
 export function crawlImages() {
     let mangaImages = [];
 
+    // ── 0. Canvas 解密還原圖層優先擷取 (針對打亂切割圖檔 Scrambled Canvas DRM) ──
+    const canvases = Array.from(document.querySelectorAll('canvas'));
+    canvases.forEach(canvas => {
+        let width = canvas.width || canvas.offsetWidth || 0;
+        let height = canvas.height || canvas.offsetHeight || 0;
+        if (width >= 300 && height >= 300) {
+            try {
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+                if (dataUrl && dataUrl.length > 1000) {
+                    mangaImages.push({
+                        element: canvas,
+                        url: dataUrl,
+                        isCanvas: true,
+                        width, height
+                    });
+                }
+            } catch(e) {
+                console.warn('[Manga-Engine] Canvas toDataURL 受跨域限制:', e);
+            }
+        }
+    });
+
     // ── 1. GigaViewer / Comic-y-ours / 生肉網站 JSON 媒體庫專屬自動解析 ──
     try {
         const jsonEl = document.getElementById('episode-json') || document.querySelector('[data-episode-json]');
@@ -350,8 +372,14 @@ export function crawlImages() {
         }
     });
 
-    // 移除重複 URL 並轉換為側邊欄需要的結構
-    const uniqueUrls = [...new Set(mangaImages.map(m => m.url))];
+    // 智慧型去重與 Canvas 還原圖優先：若存在 Canvas 解密還原圖，優先採用 Canvas 避免被打亂的原始圖檔取代
+    const canvasImages = mangaImages.filter(m => m.isCanvas);
+    let finalImages = mangaImages;
+    if (canvasImages.length > 0) {
+        finalImages = canvasImages;
+    }
+
+    const uniqueUrls = [...new Set(finalImages.map(m => m.url))];
     const navLinks = detectNavigationLinks();
     
     return {
