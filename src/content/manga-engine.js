@@ -209,20 +209,50 @@ document.head.appendChild(style);
 /**
  * 抓取網頁中的實體大圖 (過濾小圖示)
  */
+/**
+ * 抓取網頁中的實體大圖 (包含 GigaViewer / Comic-y-ours 等日本電子漫畫閱讀器專屬解析)
+ */
 export function crawlImages() {
-    const imgs = Array.from(document.querySelectorAll('img, canvas'));
     let mangaImages = [];
+
+    // ── 1. GigaViewer / Comic-y-ours 平台 JSON 媒體庫專屬自動解析 ──
+    try {
+        const jsonEl = document.getElementById('episode-json') || document.querySelector('[data-episode-json]');
+        if (jsonEl) {
+            const rawJson = jsonEl.dataset.episodeJson || jsonEl.dataset.value || jsonEl.textContent || '';
+            const data = JSON.parse(rawJson);
+            const pages = data?.readableProduct?.pageStructure?.pages || data?.pages || [];
+            pages.forEach(p => {
+                const src = p.src || p.url || p.image_url;
+                if (src) {
+                    try {
+                        const fullUrl = new URL(src, window.location.href).href;
+                        mangaImages.push({ url: fullUrl, width: 800, height: 1200 });
+                    } catch(e) {}
+                }
+            });
+        }
+    } catch(e) {
+        console.warn('[Manga-Engine] GigaViewer JSON 提取失敗，回退至 DOM 掃描', e);
+    }
+
+    // ── 2. 廣用 DOM 與 Canvas 閱讀器容器掃描 ──
+    const imgs = Array.from(document.querySelectorAll('img, canvas, svg image'));
     
-    // 定義常見漫畫網站的閱讀器容器
-    const MANGA_CONTAINERS = ['.ts-main-image', '.reading-content', '#readerarea', '.manga-image', '.page-break', '.blocks-gallery-item'];
+    // 定義常見漫畫網站 (包含 GigaViewer, Comic-DAYS, Comic-y-ours) 的閱讀器容器
+    const MANGA_CONTAINERS = [
+        '.ts-main-image', '.reading-content', '#readerarea', '.manga-image', 
+        '.page-break', '.blocks-gallery-item', '.js-page-image', '.viewer-page', 
+        '.page-container', '[class*="page-image"]', '[id*="reader"]'
+    ];
 
     imgs.forEach(img => {
         let width = img.naturalWidth || img.width || img.offsetWidth;
         let height = img.naturalHeight || img.height || img.offsetHeight;
-        let url = img.src; // 取得預設解析的絕對路徑
+        let url = img.src || img.getAttribute('href') || ''; // 取得預設解析的絕對路徑
         
         // Lazy Load 處理：真實圖片通常在特殊屬性中
-        const lazyAttrs = ['data-src', 'data-lazy-src', 'data-original', 'data-src-img', 'data-url'];
+        const lazyAttrs = ['data-src', 'data-lazy-src', 'data-original', 'data-src-img', 'data-url', 'data-page-src'];
         let dataSrc = null;
         for (const attr of lazyAttrs) {
             dataSrc = img.getAttribute(attr);
@@ -230,7 +260,6 @@ export function crawlImages() {
         }
 
         if (dataSrc) {
-            // 由於 data-src 可能是相對路徑，必須轉為絕對路徑
             try {
                 if (dataSrc.startsWith('//')) {
                     url = window.location.protocol + dataSrc;
@@ -246,34 +275,32 @@ export function crawlImages() {
 
         // Canvas 處理
         if (img.tagName.toLowerCase() === 'canvas') {
-            try { url = img.toDataURL('image/jpeg'); } catch(e) {}
+            try { 
+                url = img.toDataURL('image/jpeg'); 
+                width = img.width || 800;
+                height = img.height || 1200;
+            } catch(e) {}
         }
         
         // 判斷是否在漫畫容器內
         const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector));
 
         // 過濾條件優化：
-        // 1. 智慧型尺寸過濾門檻：分流處理在容器內與不在容器內的情況
         let isTooSmall = false;
         if (isInMangaContainer) {
-            // 常見容器內：放寬限制。寬度小於 300px，或高度小於 100px 判定為尺寸不足
-            isTooSmall = (width > 0 && width < 300) || (height > 0 && height < 100);
+            // 漫畫閱讀容器內：大幅放寬門檻
+            isTooSmall = (width > 0 && width < 150) || (height > 0 && height < 100);
         } else {
-            // 容器外（依照使用者反饋提高門檻）：嚴格限制。寬度小於 600px，或高度小於 300px 判定為尺寸不足
+            // 容器外：嚴格限制
             isTooSmall = (width > 0 && width < 600) || (height > 0 && height < 300);
         }
 
-        // 2. 若寬高為 0 (未加載) 但不在常見漫畫閱讀容器中，也判定為非目標雜訊
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer;
-
-        // 3. 過濾明顯非漫畫的垃圾關鍵字網址
         const junkKeywords = ['emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction'];
         const isJunk = junkKeywords.some(key => url && url.toLowerCase().includes(key));
 
-        // 4. 不是太小的圖片、不是未載入的非容器雜訊、且不包含垃圾關鍵字
-        if (!isTooSmall && !isUnloadedJunk && !isJunk) {
-            // 過濾掉明顯是 Logo 或小 Icon 的 base64 碎圖
-            if (url && !url.includes('data:image/svg+xml') && !url.includes('data:image/gif;base64,R0lGOD')) {
+        if (!isTooSmall && !isUnloadedJunk && !isJunk && url) {
+            if (!url.includes('data:image/svg+xml') && !url.includes('data:image/gif;base64,R0lGOD')) {
                 mangaImages.push({
                     element: img,
                     url: url,
