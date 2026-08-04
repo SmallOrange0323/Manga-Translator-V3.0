@@ -424,18 +424,24 @@ export function crawlImages() {
         // 判斷是否在漫畫容器內
         const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector));
 
-        // 過濾條件：
+        // 嚴格尺寸門檻 (漫畫頁面高度普遍 >= 350px, 寬度 >= 250px)
         let isTooSmall = false;
         if (isInMangaContainer) {
-            // 漫畫閱讀容器內：大幅放寬門檻 (允許 Lazy-load 階段寬高為 0 的標籤)
-            isTooSmall = (width > 0 && width < 100) || (height > 0 && height < 100);
+            // 漫畫閱讀容器內：排除小於 250x350 的選單小圖示、讚按鈕與 Icon
+            isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
         } else {
-            // 容器外：嚴格限制
-            isTooSmall = (width > 0 && width < 600) || (height > 0 && height < 300);
+            // 容器外：嚴格限制 (排除一般網頁圖示與廣告橫圖)
+            isTooSmall = (width > 0 && width < 500) || (height > 0 && height < 400);
         }
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
-        const junkKeywords = ['emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction'];
+        
+        // 垃圾關鍵字大滿貫 (徹底排除選單、頭像、社群與按鈕等雜訊圖)
+        const junkKeywords = [
+            'emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction',
+            'thumb', 'small', 'widget', 'social', 'badge', 'ad-', 'comment',
+            'loading', 'placeholder', 'footer', 'header', 'nav', 'share', 'profile'
+        ];
         const isJunk = junkKeywords.some(key => url && url.toLowerCase().includes(key));
 
         if (!isTooSmall && !isUnloadedJunk && !isJunk && url) {
