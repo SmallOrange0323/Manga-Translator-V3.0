@@ -53,11 +53,14 @@ async function packageZip(zipName, filterFn = null) {
 async function run() {
     console.log('🚀 開始打包商店上架 Zip 檔案...');
 
+    const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'));
+    const version = pkg.version || '3.0.1';
+
     // 1. 打包完整版
-    await packageZip('Manga_Translator_V3.0.0_Store_Package.zip');
+    await packageZip(`Manga_Translator_V${version}_Store_Package.zip`);
 
     // 2. 打包精選 1.5MB 輕量版 (過濾多餘立繪與跑步動畫，適配 Edge 商店)
-    await packageZip('Manga_Translator_V3.0.0_Store_Package_Light.zip', (relPath) => {
+    await packageZip(`Manga_Translator_V${version}_Store_Package_Light.zip`, (relPath) => {
         // 跑步素材精選 01, 02, 03, 06, 07, 08, 09, 30
         if (relPath.startsWith('assets/running/')) {
             const fileName = path.basename(relPath);
