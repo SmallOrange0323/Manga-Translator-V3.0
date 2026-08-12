@@ -1327,7 +1327,7 @@ function initMobileReader() {
         dots.forEach((d, i) => d.classList.toggle('active', i === index));
     }
 
-    // ── 2. Scroll 偵測 ──
+    // ── 2. Scroll 偵測：自動動態同步當前頁碼 (P.1, P.2...) 與 FAB 按鈕 ──
     const scrollObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (!entry.isIntersecting) return;
@@ -1337,13 +1337,18 @@ function initMobileReader() {
                 updateActiveDot(idx);
                 currentVisibleCard = entry.target;
                 
-                // 【新增】預設開啟翻譯面板
+                const pageNumStr = entry.target.querySelector('.card-page-badge')?.textContent || `P.${idx + 1}`;
+                if (fab) fab.textContent = `📖 查看 ${pageNumStr} 翻譯`;
+
+                // 若面板當前正開啟中，自動連動切換至當前可見頁面的翻譯內容
                 const textWrapper = entry.target.querySelector('.card-text-wrapper');
-                if (textWrapper && !textWrapper.classList.contains('is-open')) {
+                const hasAnyOpenPanel = document.querySelector('.card-text-wrapper.is-open');
+                
+                if (hasAnyOpenPanel && textWrapper && !textWrapper.classList.contains('is-open')) {
                     openPanel(textWrapper);
                 }
 
-                // 確保其他非當前卡片的面板收起
+                // 確保其他非當前卡片的面板平滑收起
                 cards.forEach((c, i) => {
                     if (i !== idx) c.querySelector('.card-text-wrapper')?.classList.remove('is-open');
                 });
@@ -1394,12 +1399,12 @@ function initMobileReader() {
             contentArea.appendChild(textWrapper.firstChild);
         }
 
-        // 建立 panel header（固定在最上方，不用 sticky）
+        const pageNumStr = card.querySelector('.card-page-badge')?.textContent || '';
         const panelHeader = document.createElement('div');
         panelHeader.className = 'mobile-panel-header';
         panelHeader.innerHTML = `
             <div class="mobile-panel-header-row">
-                <span class="mobile-panel-title">📄 翻譯內容</span>
+                <span class="mobile-panel-title">📄 ${pageNumStr} 翻譯內容</span>
                 <button class="mobile-close-btn">✕ 收起</button>
             </div>
         `;

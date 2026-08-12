@@ -39,14 +39,36 @@ async function init() {
         chrome.tabs.create({ url: chrome.runtime.getURL('src/options/index.html') });
     });
 
-    // 3. 偵測並注入行動版「⚡ 串聯流式閱讀」按鈕
-    chrome.tabs.get(sourceTabId, (tab) => {
-        const url = tab?.url || '';
-        const isNE = url.includes('nhentai.net') || url.includes('e-hentai.org') || url.includes('exhentai.org');
-        if (isNE) {
-            injectMobileStreamBtn();
-        }
-    });
+    // 3. 綁定行動版「⚡ 啟動串聯流式閱讀」主動按鈕
+    const btnStreamLarge = document.getElementById('btn-stream-reader-large');
+    if (btnStreamLarge) {
+        btnStreamLarge.addEventListener('click', async () => {
+            if (!sourceTabId) return;
+            btnStreamLarge.disabled = true;
+            const originalText = btnStreamLarge.textContent;
+            btnStreamLarge.textContent = '⏳ 正在讀取 N網/E網 媒體庫...';
+
+            const unlockTimer = setTimeout(() => {
+                btnStreamLarge.disabled = false;
+                btnStreamLarge.textContent = originalText;
+            }, 5000);
+
+            chrome.tabs.sendMessage(sourceTabId, { action: 'extractNEMetadata' }, async (response) => {
+                clearTimeout(unlockTimer);
+                btnStreamLarge.disabled = false;
+                btnStreamLarge.textContent = originalText;
+
+                if (chrome.runtime.lastError || !response || !response.success || !response.data) {
+                    alert('❌ 無法觸發串流閱讀：請確認您正處於 N網或 E網 的漫畫詳情首頁！');
+                    return;
+                }
+
+                // 成功獲取媒體庫數據，寫入本地 storage 並開啟 stream-reader
+                await chrome.storage.local.set({ mt_current_stream: response.data });
+                chrome.tabs.create({ url: chrome.runtime.getURL('src/reader/stream-reader.html') });
+            });
+        });
+    }
 
     // 4. 執行第一次掃描
     scanImages();
