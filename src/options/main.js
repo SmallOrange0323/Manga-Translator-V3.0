@@ -358,6 +358,15 @@ function setupEventHandlers() {
                     if (!el) return;
                     const oldVal = el.value;
                     el.innerHTML = '';
+
+                    // 若為 OCR 模型選單，預先加入本地端 Manga-OCR 選項
+                    if (id === 'ocrModelName') {
+                        const localOpt = document.createElement('option');
+                        localOpt.value = 'local-wasm-ocr';
+                        localOpt.textContent = '💻 本地端 Manga-OCR (WebGPU 顯卡加速 / 日文漫畫專用 / 0 API 消耗)';
+                        el.appendChild(localOpt);
+                    }
+
                     validModels.forEach(m => {
                         const mid = m.name.replace('models/', '');
                         const opt = document.createElement('option');
