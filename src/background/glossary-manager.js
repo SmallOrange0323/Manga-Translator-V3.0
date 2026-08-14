@@ -80,24 +80,30 @@ export async function saveGlossary(mangaKey, glossaryEntry) {
  * 整併 AI 萃取的新術語
  */
 export function mergeGlossaryTerms(existingTerms, newTerms) {
+    const safeExisting = Array.isArray(existingTerms) ? existingTerms : [];
     if (!Array.isArray(newTerms) || newTerms.length === 0) {
-        return { terms: existingTerms, addedCount: 0 };
+        return { terms: safeExisting, addedCount: 0 };
     }
 
-    const existingOriSet = new Set(existingTerms.map(t => t.ori.toLowerCase().trim()));
+    const existingOriSet = new Set(
+        safeExisting.map(t => (t?.ori || t?.original || '').toLowerCase().trim()).filter(Boolean)
+    );
     let addedCount = 0;
-    const merged = [...existingTerms];
+    const merged = [...safeExisting];
 
     for (const newTerm of newTerms) {
-        if (!newTerm.ori || !newTerm.trans) continue;
-        const oriKey = newTerm.ori.toLowerCase().trim();
+        if (!newTerm) continue;
+        const ori = (newTerm.ori || newTerm.original || '').trim();
+        const trans = (newTerm.trans || newTerm.translation || '').trim();
+        if (!ori || !trans) continue;
 
+        const oriKey = ori.toLowerCase();
         if (existingOriSet.has(oriKey)) continue;
 
         merged.push({
-            ori: newTerm.ori.trim(),
-            trans: newTerm.trans.trim(),
-            source: 'ai'
+            ori: ori,
+            trans: trans,
+            source: newTerm.source || 'ai'
         });
         existingOriSet.add(oriKey);
         addedCount++;

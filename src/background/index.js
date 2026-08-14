@@ -3,7 +3,8 @@ import * as Constants from '../utils/constants.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import './download-helper.js';
 import { loadGlossary, saveGlossary, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
-import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch, extractGlobalStoryAndGlossary, extractTextFromImage } from './translate-api.js';
+import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch, extractGlobalStoryAndGlossary, extractTextFromImage, callGeminiAPIBatchOcr } from './translate-api.js';
+import { wasmOcrEngine } from './wasm-ocr.js';
 import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
@@ -1169,20 +1170,28 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
 
     const maxDim = await state.get('imageMaxDimension', 1024);
     const ocrModelName = await state.get('ocrModelName', 'gemini-3.1-flash-lite');
-    const ocrBatchSize = parseInt(await state.get('ocrBatchSize', 5)) || 5;
+    const isWasmOcr = (ocrModelName === 'local-wasm-ocr');
+    const ocrBatchSizeSetting = await state.get('ocrBatchSize', 5);
+    const ocrBatchSize = isWasmOcr ? 5 : (parseInt(ocrBatchSizeSetting) || 5);
+
+    log.info('TwoStepPipeline', `[階段 1] 模式: ${isWasmOcr ? '💻 本地 WASM OCR' : `☁️ 雲端批次 OCR (${ocrModelName})`}，每批打包: ${ocrBatchSize} 頁`);
 
     // ── 階段 1：OCR 提取全書台詞 ──
     const scriptLines = [];
     for (let i = 0; i < images.length; i += ocrBatchSize) {
         if (await state.get('isStopping')) break;
         const currentBatch = images.slice(i, i + ocrBatchSize);
+        const startPage = i + 1;
+        const endPage = Math.min(i + ocrBatchSize, images.length);
+
         chrome.tabs.sendMessage(resultTabId, {
             action: 'updateProgress',
-            current: `正在提取第 ${i + 1}~${Math.min(i + ocrBatchSize, images.length)} 頁劇本...`,
+            current: `正在提取第 ${startPage}~${endPage} 頁劇本...`,
             total: images.length
         });
+        broadcastStatus(`📖 [階段 1] 正在提取第 ${startPage}~${endPage} 頁劇本...`, 'info');
 
-        // 下載並縮放 Base64
+        // 並行抓取並縮放本批圖片 Base64
         const base64List = await Promise.all(currentBatch.map(async (imgData) => {
             const imgSrc = imgData.src || imgData;
             if (imgSrc.startsWith('data:image')) return imgSrc.split(',')[1];
@@ -1195,18 +1204,32 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
             }
         }));
 
-        // 並行調用 OCR 模型
-        const ocrResults = await Promise.all(base64List.map(async (b64, idx) => {
-            if (!b64) return '';
+        let batchScripts = [];
+        if (isWasmOcr) {
+            // ── 本地 WebAssembly OCR ──
+            batchScripts = await wasmOcrEngine.recognizeBatch(base64List);
+        } else {
+            // ── 雲端多圖打包批次 OCR (自動 Key 輪替) ──
             try {
-                return await extractTextFromImage(b64, { model: ocrModelName });
-            } catch (err) {
-                log.warn('TwoStepPipeline', `第 ${i + idx + 1} 頁 OCR 提取失敗: ${err.message}`);
-                return '';
+                batchScripts = await callGeminiAPIBatchOcr(base64List, {
+                    model: ocrModelName,
+                    pageOffset: i
+                });
+            } catch (batchOcrErr) {
+                log.warn('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 失敗，嘗試逐張重試: ${batchOcrErr.message}`);
+                // 退回逐張重試
+                batchScripts = await Promise.all(base64List.map(async (b64, idx) => {
+                    if (!b64) return '';
+                    try {
+                        return await extractTextFromImage(b64, { model: ocrModelName });
+                    } catch (err) {
+                        return '';
+                    }
+                }));
             }
-        }));
+        }
 
-        ocrResults.forEach((text, idx) => {
+        batchScripts.forEach((text, idx) => {
             const pageNum = i + idx + 1;
             if (text && text.trim()) {
                 scriptLines.push(`[P.${pageNum}]\n${text.trim()}`);
@@ -1215,7 +1238,7 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
     }
 
     const fullScriptText = scriptLines.join('\n\n');
-    log.info('TwoStepPipeline', `全書劇本提取完成，總字數: ${fullScriptText.length} 字`);
+    log.info('TwoStepPipeline', `全書劇本提取完成，有效台詞段落: ${scriptLines.length} 頁，總字數: ${fullScriptText.length} 字`);
 
     // ── 階段 1.5：全域劇本通讀與分層存儲 ──
     let sessionContextSnippet = '';
@@ -1241,21 +1264,40 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
             };
 
             // 2. 【長期持久層】專有名詞合併存入詞庫
-            if (currentMangaKey && Array.isArray(analysis.terms) && analysis.terms.length > 0) {
-                await mergeGlossaryTerms(currentMangaKey, analysis.terms);
-                log.info('Glossary', `已將 ${analysis.terms.length} 筆專用術語合併入作品 "${currentMangaKey}" 詞庫`);
+            const normalizedTerms = (analysis.terms || []).map(t => ({
+                ori: (t.ori || t.original || '').trim(),
+                trans: (t.trans || t.translation || '').trim(),
+                source: 'ai'
+            })).filter(t => t.ori && t.trans);
+
+            if (currentMangaKey && normalizedTerms.length > 0) {
+                const currentEntry = (await loadGlossary(currentMangaKey)) || { terms: [] };
+                const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], normalizedTerms);
+                if (addedCount > 0) {
+                    await saveGlossary(currentMangaKey, {
+                        displayName: currentEntry.displayName || currentMangaKey,
+                        terms: mergedTerms
+                    });
+                    log.info('Glossary', `已將 ${addedCount} 筆專用術語合併入作品 "${currentMangaKey}" 詞庫`);
+                }
             }
 
             // 3. 組裝供階段 2 精翻使用的 Session Context Prompt
             const loadedGlossary = currentMangaKey ? await loadGlossary(currentMangaKey) : null;
-            const termsList = loadedGlossary?.terms || analysis.terms || [];
+            const termsList = (loadedGlossary && Array.isArray(loadedGlossary.terms)) ? loadedGlossary.terms : normalizedTerms;
             
+            const termsSnippet = termsList.map(t => {
+                const ori = t.ori || t.original;
+                const trans = t.trans || t.translation;
+                return (ori && trans) ? `    - ${ori} => ${trans}` : null;
+            }).filter(Boolean).join('\n');
+
             sessionContextSnippet = `
 <story_context>
   <synopsis>${analysis.storySummary || '無特殊背景'}</synopsis>
   <character_dynamics>${analysis.characterRelationships || '依照對白自然語氣'}</character_dynamics>
   <required_terms>
-${termsList.map(t => `    - ${t.original} => ${t.translation}`).join('\n')}
+${termsSnippet}
   </required_terms>
 </story_context>`;
 

@@ -549,7 +549,131 @@ export function parseBatchOutput(data, batchSize) {
 }
 
 /**
- * 【雙階段模式】單張圖片純文字 OCR 提取（不進行翻譯，僅獲取日文生肉對白）
+ * 【雙階段模式】多圖批次打包日文 OCR 提取
+ * 將多張圖片打包進單一 API 請求，大幅縮減網絡延遲並提升速度。
+ * @param {string[]} base64Array - 圖片 Base64 陣列
+ * @param {Object} options - 選項（包含 model, pageOffset, apiKey 等）
+ * @returns {Promise<string[]>} 長度固定為 base64Array.length 的各頁日文對白字串陣列
+ */
+export async function callGeminiAPIBatchOcr(base64Array, options = {}) {
+    if (!state.isInitialized) await state.init();
+    const n = base64Array.length;
+    if (n === 0) return [];
+
+    const model = options.model || (await state.get('ocrModelName', 'gemini-3.1-flash-lite'));
+    const resolvedKey = options.apiKey || state.getNextApiKey();
+    if (!resolvedKey) throw new Error('API Key is missing and pool is empty');
+
+    const keyAlias = state.getApiKeyAlias(resolvedKey);
+    const customOcrPrompt = (await state.get('customPromptOcr', '')) || '';
+
+    const systemPrompt = `
+<system_instructions>
+You are an expert manga text extractor specialized in Japanese manga OCR.
+Task: Extract ALL Japanese dialogue, narration, and monologue text for each manga image in reading order.
+Rules:
+1. Return pure Japanese raw text for each image. Do NOT translate.
+2. If an image contains no text (e.g. cover, landscape, action effect only), return an empty string for that image.
+3. Strictly correlate each page with its zero-based pageIndex (0 to ${n - 1}).
+${customOcrPrompt ? `Custom extraction rules:\n${customOcrPrompt}` : ''}
+</system_instructions>`;
+
+    const userParts = [];
+    base64Array.forEach((b64, idx) => {
+        userParts.push({ text: `\n=== PAGE_BOUNDARY: IMAGE_INDEX=${idx} ===\n` });
+        userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+    });
+
+    const body = {
+        system_instruction: {
+            parts: [{ text: systemPrompt }]
+        },
+        contents: [{ role: 'user', parts: userParts }],
+        generationConfig: {
+            temperature: 0.1,
+            response_mime_type: 'application/json',
+            response_schema: {
+                type: 'OBJECT',
+                properties: {
+                    pages: {
+                        type: 'ARRAY',
+                        items: {
+                            type: 'OBJECT',
+                            properties: {
+                                pageIndex: { type: 'INTEGER' },
+                                text: { type: 'STRING' }
+                            },
+                            required: ['pageIndex', 'text']
+                        }
+                    }
+                },
+                required: ['pages']
+            }
+        },
+        safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ]
+    };
+
+    const timeoutMs = Math.min(30 + n * 10, 180) * 1000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const startTime = performance.now();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${resolvedKey}`;
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+        });
+        const latencyMs = Math.round(performance.now() - startTime);
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            log.api('TranslateAPI', '批次 OCR 失敗', { model, latencyMs, keyAlias, status: `HTTP ${response.status}` });
+            throw new Error(`批次 OCR API 錯誤 (${response.status}): ${errorText}`);
+        }
+
+        const json = await response.json();
+        const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        const cleanStr = sanitizeJsonForParsing(rawText);
+        let data = { pages: [] };
+        try {
+            data = JSON.parse(cleanStr);
+        } catch (parseErr) {
+            log.warn('TranslateAPI', `[批次 OCR 解析] JSON 解析失敗: ${cleanStr.slice(0, 200)}`);
+        }
+
+        log.api('TranslateAPI', `批次 OCR 成功 (${n} 張)`, { model, latencyMs, keyAlias, status: 'OK' });
+
+        // 對齊索引，長度固定為 n
+        const pageScripts = Array(n).fill('');
+        if (Array.isArray(data.pages)) {
+            data.pages.forEach(p => {
+                const idx = typeof p.pageIndex === 'number' ? p.pageIndex : -1;
+                if (idx >= 0 && idx < n) {
+                    pageScripts[idx] = (p.text || '').trim();
+                }
+            });
+        }
+
+        return pageScripts;
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error(`批次 OCR 逾時 (${timeoutMs / 1000}s)`);
+        throw e;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+/**
+ * 【雙階段模式】單張圖片純文字 OCR 提取（備援或單頁模式使用）
  */
 export async function extractTextFromImage(imageBase64, options = {}) {
     if (!state.isInitialized) await state.init();
@@ -558,19 +682,8 @@ export async function extractTextFromImage(imageBase64, options = {}) {
         prompt = (await state.get('customPromptOcr', '')) || 'Extract ALL Japanese story dialogue from this manga image. Return pure text only.'
     } = options;
 
-    // 若選擇本地 WebAssembly OCR，可在此呼叫本地 WASM 引擎，未安裝時優雅回退至輕量模型
-    if (model === 'local-wasm-ocr') {
-        log.info('LocalOCR', '使用瀏覽器本地 WebAssembly OCR 引擎進行日文辨識...');
-        // 如果未來有載入本地 WASM Worker，可直接於此執行本地純離線 OCR
-    }
-
-    let { apiKey } = options;
-    if (!apiKey) {
-        apiKey = state.apiKeys[0];
-    }
+    const apiKey = options.apiKey || state.getNextApiKey();
     if (!apiKey) throw new Error('未設定 API Key');
-
-    const resolvedModel = model === 'local-wasm-ocr' ? 'gemini-3.1-flash-lite' : model;
 
     const body = {
         contents: [
@@ -593,7 +706,7 @@ export async function extractTextFromImage(imageBase64, options = {}) {
         ]
     };
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
