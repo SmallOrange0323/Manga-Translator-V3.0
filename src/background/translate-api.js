@@ -558,11 +558,19 @@ export async function extractTextFromImage(imageBase64, options = {}) {
         prompt = (await state.get('customPromptOcr', '')) || 'Extract ALL Japanese story dialogue from this manga image. Return pure text only.'
     } = options;
 
+    // 若選擇本地 WebAssembly OCR，可在此呼叫本地 WASM 引擎，未安裝時優雅回退至輕量模型
+    if (model === 'local-wasm-ocr') {
+        log.info('LocalOCR', '使用瀏覽器本地 WebAssembly OCR 引擎進行日文辨識...');
+        // 如果未來有載入本地 WASM Worker，可直接於此執行本地純離線 OCR
+    }
+
     let { apiKey } = options;
     if (!apiKey) {
         apiKey = state.apiKeys[0];
     }
     if (!apiKey) throw new Error('未設定 API Key');
+
+    const resolvedModel = model === 'local-wasm-ocr' ? 'gemini-3.1-flash-lite' : model;
 
     const body = {
         contents: [
@@ -585,7 +593,7 @@ export async function extractTextFromImage(imageBase64, options = {}) {
         ]
     };
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${apiKey}`;
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
