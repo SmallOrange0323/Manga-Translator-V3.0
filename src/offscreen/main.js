@@ -142,6 +142,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     const { action, payload } = message;
 
+    if (action === 'PING') {
+        sendResponse({ pong: true });
+        return false;
+    }
+
     if (action === 'CHECK_LOCAL_AI_ENV') {
         checkWebGpuSupport().then(res => sendResponse({ success: true, data: res }));
         return true;
