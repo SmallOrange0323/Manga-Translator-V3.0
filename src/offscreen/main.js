@@ -20,38 +20,33 @@ async function getTesseractWorker() {
             log.info('OffscreenAI', '正在初始化本地端日文漫畫 OCR Worker (使用內建本機 WASM 模組)...');
             const workerPath = chrome.runtime.getURL('assets/tesseract/worker.min.js');
             const corePath = chrome.runtime.getURL('assets/tesseract/tesseract-core-simd-lstm.wasm.js');
+            // 使用 Cloudflare / jsDelivr 高速 CDN 鏡像，避免從國外原站下載卡住
+            const langPath = 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0';
 
-            const worker = await createWorker('jpn_vert+jpn', 1, {
+            const workerPromise = createWorker('jpn', 1, {
                 workerPath,
                 corePath,
+                langPath,
                 workerBlobURL: false,
                 logger: m => {
-                    if (m.status === 'downloading tdata') {
+                    if (m.status === 'downloading tdata' || m.status === 'loading tdata') {
                         const pct = Math.round((m.progress || 0) * 100);
-                        log.info('OffscreenAI', `📥 正在下載本地日文模型快取: ${pct}%`);
+                        log.info('OffscreenAI', `📥 正在載入/快取本地日文模型: ${pct}%`);
                     }
                 }
             });
-            tesseractWorker = worker;
+
+            // 15 秒超時保護
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('日文模型下載超時 (15s)')), 15000)
+            );
+
+            tesseractWorker = await Promise.race([workerPromise, timeoutPromise]);
             log.info('OffscreenAI', '✅ 本地端日文 OCR Worker 初始化就緒 (0 API 消耗模式)');
             return tesseractWorker;
         } catch (err) {
-            log.warn('OffscreenAI', `Tesseract Worker 縱書初始化失敗: ${err.message}，嘗試標準日文模式...`);
-            try {
-                const workerPath = chrome.runtime.getURL('assets/tesseract/worker.min.js');
-                const corePath = chrome.runtime.getURL('assets/tesseract/tesseract-core-simd-lstm.wasm.js');
-                const fallbackWorker = await createWorker('jpn', 1, {
-                    workerPath,
-                    corePath,
-                    workerBlobURL: false
-                });
-                tesseractWorker = fallbackWorker;
-                log.info('OffscreenAI', '✅ 本地端日文 (標準) Worker 初始化就緒');
-                return tesseractWorker;
-            } catch (e2) {
-                log.error('OffscreenAI', `本地 OCR 引擎無法啟動: ${e2.message}`);
-                throw e2;
-            }
+            log.warn('OffscreenAI', `Tesseract Worker 初始化失敗: ${err.message}`);
+            throw err;
         } finally {
             isWorkerInitializing = false;
         }
