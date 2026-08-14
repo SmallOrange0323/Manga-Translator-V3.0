@@ -22,7 +22,7 @@ async function getTesseractWorker() {
             const corePath = chrome.runtime.getURL('assets/tesseract/tesseract-core-simd-lstm.wasm.js');
             const langPath = chrome.runtime.getURL('assets/tesseract/lang-data');
 
-            const worker = await createWorker('jpn_vert+jpn', 1, {
+            const initTask = createWorker('jpn', 1, {
                 workerPath,
                 corePath,
                 langPath,
@@ -36,30 +36,18 @@ async function getTesseractWorker() {
                 }
             });
 
+            // 4 秒強制超時保護，避免 Extension Worker 死鎖
+            const timeoutTask = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Extension Worker 啟動超時 (4s)，瀏覽器隔離限制')), 4000)
+            );
+
+            const worker = await Promise.race([initTask, timeoutTask]);
             tesseractWorker = worker;
             log.info('OffscreenAI', '✅ 本地端日文 OCR Worker 初始化就緒 (100% 離線 / 0 API 消耗)');
             return tesseractWorker;
         } catch (err) {
-            log.warn('OffscreenAI', `Tesseract Worker 縱書初始化失敗: ${err.message}，嘗試本機標準日文模式...`);
-            try {
-                const workerPath = chrome.runtime.getURL('assets/tesseract/worker.min.js');
-                const corePath = chrome.runtime.getURL('assets/tesseract/tesseract-core-simd-lstm.wasm.js');
-                const langPath = chrome.runtime.getURL('assets/tesseract/lang-data');
-
-                const fallbackWorker = await createWorker('jpn', 1, {
-                    workerPath,
-                    corePath,
-                    langPath,
-                    workerBlobURL: false,
-                    gzip: true
-                });
-                tesseractWorker = fallbackWorker;
-                log.info('OffscreenAI', '✅ 本地端日文 (標準) Worker 初始化就緒 (本機離線)');
-                return tesseractWorker;
-            } catch (e2) {
-                log.error('OffscreenAI', `本地 OCR 引擎無法啟動: ${e2.message}`);
-                throw e2;
-            }
+            log.warn('OffscreenAI', `本地 Worker 啟動失敗: ${err.message}`);
+            throw err;
         } finally {
             isWorkerInitializing = false;
         }
@@ -106,7 +94,12 @@ async function recognizeImageLocal(base64) {
         const worker = await getTesseractWorker();
         const imgSrc = base64.startsWith('data:') ? base64 : `data:image/jpeg;base64,${base64}`;
 
-        const ret = await worker.recognize(imgSrc);
+        const recogTask = worker.recognize(imgSrc);
+        const timeoutTask = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('單頁 OCR 辨識超時 (5s)')), 5000)
+        );
+
+        const ret = await Promise.race([recogTask, timeoutTask]);
         const rawText = ret.data.text || '';
         const cleanText = rawText
             .split('\n')
