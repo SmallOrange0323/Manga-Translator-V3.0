@@ -140,10 +140,10 @@ function initLocalAiManager() {
         if (resp && resp.success && resp.data && gpuStatusText) {
             const { hasWebGPU, adapterName } = resp.data;
             if (hasWebGPU) {
-                gpuStatusText.textContent = `🎮 顯卡加速: ${adapterName} (就緒)`;
+                gpuStatusText.textContent = `🎮 本地模型: Manga-OCR (ViT) | 顯卡加速: ${adapterName}`;
                 gpuStatusText.style.color = '#155724';
             } else {
-                gpuStatusText.textContent = `💻 本地端: CPU / WASM 模式 (${adapterName})`;
+                gpuStatusText.textContent = `💻 本地模型: Manga-OCR (ViT) | 模式: CPU/WASM (${adapterName})`;
                 gpuStatusText.style.color = '#856404';
             }
         }

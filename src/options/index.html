@@ -315,14 +315,14 @@
                 <div id="ocrModelContainer" style="display: none; background: #f0f7ff; padding: 12px; border-radius: 6px; border: 1px solid #cce5ff; margin-top: 10px;">
                     <label for="ocrModelName" style="margin-top: 0; color: #0056b3;">📷 階段一：文字辨識 OCR 模型 (提取全書日文劇本):</label>
                     <select id="ocrModelName" style="margin-top: 5px;">
-                        <option value="gemini-3.1-flash-lite" selected>Gemini 3.1 Flash-Lite (極速/高配額/推薦)</option>
-                        <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (高準確度)</option>
+                        <option value="gemini-3.1-flash-lite" selected>Gemini 3.1 Flash-Lite (雲端極速/推薦)</option>
+                        <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (雲端高準確度)</option>
                         <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                         <option value="gemma-4-26b-a4b-it">Gemma 4 26B (視覺專用)</option>
-                        <option value="local-wasm-ocr">💻 瀏覽器本地端 OCR (WebGPU / WASM / 0 API 消耗 / 支援離線)</option>
+                        <option value="local-wasm-ocr">💻 本地端 Manga-OCR (WebGPU 顯卡加速 / 日文漫畫專用 / 0 API 消耗)</option>
                     </select>
                     <div id="localGpuInfo" style="margin-top: 6px; padding: 6px 8px; background: #e8f4fd; border-radius: 4px; font-size: 11px; color: #004085; display: flex; justify-content: space-between; align-items: center;">
-                        <span id="gpuStatusText">🎮 顯卡加速: 正在檢測 WebGPU 狀態...</span>
+                        <span id="gpuStatusText">🎮 本地引擎: Manga-OCR (ViT) | 顯卡加速: 正在檢測...</span>
                         <button type="button" id="btnClearLocalAiCache" style="padding: 2px 6px; font-size: 10px; border: 1px solid #b8daff; background: #fff; border-radius: 3px; cursor: pointer; color: #004085;">🧹 清理快取</button>
                     </div>
                     <small style="color: #666; font-size: 11px; display: block; margin-top: 4px;">
