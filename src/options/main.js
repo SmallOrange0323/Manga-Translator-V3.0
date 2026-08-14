@@ -112,6 +112,17 @@ async function initGeneralSettings() {
     const ocrPrompt = await state.get('customPromptOcr', Constants.DEFAULT_PROMPT_OCR);
     const ocrPromptEl = document.getElementById('customPromptOcr');
     if (ocrPromptEl) ocrPromptEl.value = ocrPrompt;
+
+    // 模式切換動態連動：當選擇雙階段模式時，展開 OCR 模型選擇區
+    const translationModeSelect = document.getElementById('translationMode');
+    const ocrContainer = document.getElementById('ocrModelContainer');
+    if (translationModeSelect && ocrContainer) {
+        const updateOcrVisibility = () => {
+            ocrContainer.style.display = translationModeSelect.value === 'two-step' ? 'block' : 'none';
+        };
+        updateOcrVisibility();
+        translationModeSelect.addEventListener('change', updateOcrVisibility);
+    }
 }
 
 /**

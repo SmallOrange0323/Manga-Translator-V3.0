@@ -3,7 +3,7 @@ import * as Constants from '../utils/constants.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import './download-helper.js';
 import { loadGlossary, saveGlossary, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
-import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch } from './translate-api.js';
+import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch, extractGlobalStoryAndGlossary, extractTextFromImage } from './translate-api.js';
 import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
@@ -12,6 +12,9 @@ let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
 // 注意：此為記憶體變數，SW 重啟後清空屬正常行為
 const lastNovelUrlByTab = {};
+
+// 【雙階段模式】單話任務短期記憶體暫存區 (Session Context)，任務結束後自動釋放，絕不污染長期詞庫
+const sessionStoryContext = {};
 
 
 log.info('Background', '漫譯 V3 背景服務程式已啟動');
@@ -484,8 +487,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   const { sourceTabId, images, navLinks } = jobs[resultTabId];
                   delete jobs[resultTabId];
                   state.set('pendingBatchJobs', jobs);
-                  // 將 navLinks 一起傳給翻譯處理器
-                  processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks);
+                  // 依據 translationMode (一條龍 vs 雙階段) 自動派發
+                  dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks);
               }
           });
       }
@@ -827,7 +830,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { sourceTabId, images, navLinks } = message.payload;
       const mobileTabId = sender.tab?.id;
       if (mobileTabId) {
-          processMangaBatchPCMode(sourceTabId, mobileTabId, images, navLinks || null);
+          dispatchMangaBatchProcessing(sourceTabId, mobileTabId, images, navLinks || null);
       }
       sendResponse({ status: 'ok' });
       return false;
@@ -1124,8 +1127,150 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
     });
 }
 
+/**
+ * 漫畫批次翻譯統一派發器：依據使用者設定之 translationMode 分流
+ * - one-step: 一條龍模式 (每批圖片直接送 Vision 直譯，極速、零等待)
+ * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
+ */
+async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
+    const mode = await state.get('translationMode', 'one-step');
+    log.info('Background', `[任務派發] 當前模式: ${mode}，圖片數: ${images.length}，是否重試: ${isRetry}`);
+    if (mode === 'two-step' && !isRetry) {
+        return processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex);
+    } else {
+        return processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex);
+    }
+}
+
+/**
+ * 【雙階段模式 (Two-Step Story Pipeline)】專屬處理器：
+ * 階段 1：使用 ocrModelName (如 Gemma 4 26B / Flash-Lite) 快速提取全書純日文對白，拼裝成 fullScriptText
+ * 階段 1.5：1 次純文字 API 通讀全本台詞，萃取【單話劇情大綱 + 角色關係 + 專有名詞】
+ *           - 單話劇情大綱與角色關係 ➔ 寫入 sessionStoryContext 短期暫存
+ *           - 專屬術語 ➔ 合併存入長期詞庫 (saveGlossary)
+ * 階段 2：組合 sessionContextSnippet，呼叫 Vision 精翻輸出
+ */
+async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
+    const broadcastStatus = (msg, type = 'info') => {
+        if (!sourceTabId) return;
+        chrome.tabs.sendMessage(sourceTabId, {
+            action: 'TRANSLATION_STATUS',
+            payload: { msg, type }
+        }).catch(() => {});
+    };
+
+    log.info('TwoStepPipeline', `啟動雙階段劇本預讀工作流：共 ${images.length} 張圖片`);
+    broadcastStatus(`📖 [階段 1] 啟動 OCR 提取全書台詞劇本 (共 ${images.length} 頁)...`, 'info');
+    chrome.tabs.sendMessage(resultTabId, {
+        action: 'updateProgress',
+        current: `正在提取全書劇本 (0/${images.length})`,
+        total: images.length
+    });
+
+    const maxDim = await state.get('imageMaxDimension', 1024);
+    const ocrModelName = await state.get('ocrModelName', 'gemini-3.1-flash-lite');
+    const ocrBatchSize = parseInt(await state.get('ocrBatchSize', 5)) || 5;
+
+    // ── 階段 1：OCR 提取全書台詞 ──
+    const scriptLines = [];
+    for (let i = 0; i < images.length; i += ocrBatchSize) {
+        if (await state.get('isStopping')) break;
+        const currentBatch = images.slice(i, i + ocrBatchSize);
+        chrome.tabs.sendMessage(resultTabId, {
+            action: 'updateProgress',
+            current: `正在提取第 ${i + 1}~${Math.min(i + ocrBatchSize, images.length)} 頁劇本...`,
+            total: images.length
+        });
+
+        // 下載並縮放 Base64
+        const base64List = await Promise.all(currentBatch.map(async (imgData) => {
+            const imgSrc = imgData.src || imgData;
+            if (imgSrc.startsWith('data:image')) return imgSrc.split(',')[1];
+            try {
+                const res = await fetch(imgSrc);
+                const blob = await res.blob();
+                return await resizeImageBlobToBase64(blob, maxDim);
+            } catch (e) {
+                return null;
+            }
+        }));
+
+        // 並行調用 OCR 模型
+        const ocrResults = await Promise.all(base64List.map(async (b64, idx) => {
+            if (!b64) return '';
+            try {
+                return await extractTextFromImage(b64, { model: ocrModelName });
+            } catch (err) {
+                log.warn('TwoStepPipeline', `第 ${i + idx + 1} 頁 OCR 提取失敗: ${err.message}`);
+                return '';
+            }
+        }));
+
+        ocrResults.forEach((text, idx) => {
+            const pageNum = i + idx + 1;
+            if (text && text.trim()) {
+                scriptLines.push(`[P.${pageNum}]\n${text.trim()}`);
+            }
+        });
+    }
+
+    const fullScriptText = scriptLines.join('\n\n');
+    log.info('TwoStepPipeline', `全書劇本提取完成，總字數: ${fullScriptText.length} 字`);
+
+    // ── 階段 1.5：全域劇本通讀與分層存儲 ──
+    let sessionContextSnippet = '';
+    const navCtx = await state.get('navigationContext', {});
+    const currentMangaKey = navCtx[sourceTabId];
+
+    if (fullScriptText.trim().length > 20) {
+        broadcastStatus(`✨ [階段 1.5] 通讀全篇劇本，分析當話劇情大綱與人物關係...`, 'info');
+        chrome.tabs.sendMessage(resultTabId, {
+            action: 'updateProgress',
+            current: `正在分析全局劇情大綱與人物關係...`,
+            total: images.length
+        });
+
+        try {
+            const analysis = await extractGlobalStoryAndGlossary(fullScriptText);
+            log.info('TwoStepPipeline', `劇本全局分析成功:`, analysis);
+
+            // 1. 【短期暫存層】單話劇情大綱與角色關係存入 Session 記憶體
+            sessionStoryContext[resultTabId] = {
+                storySummary: analysis.storySummary || '',
+                characterRelationships: analysis.characterRelationships || ''
+            };
+
+            // 2. 【長期持久層】專有名詞合併存入詞庫
+            if (currentMangaKey && Array.isArray(analysis.terms) && analysis.terms.length > 0) {
+                await mergeGlossaryTerms(currentMangaKey, analysis.terms);
+                log.info('Glossary', `已將 ${analysis.terms.length} 筆專用術語合併入作品 "${currentMangaKey}" 詞庫`);
+            }
+
+            // 3. 組裝供階段 2 精翻使用的 Session Context Prompt
+            const loadedGlossary = currentMangaKey ? await loadGlossary(currentMangaKey) : null;
+            const termsList = loadedGlossary?.terms || analysis.terms || [];
+            
+            sessionContextSnippet = `
+<story_context>
+  <synopsis>${analysis.storySummary || '無特殊背景'}</synopsis>
+  <character_dynamics>${analysis.characterRelationships || '依照對白自然語氣'}</character_dynamics>
+  <required_terms>
+${termsList.map(t => `    - ${t.original} => ${t.translation}`).join('\n')}
+  </required_terms>
+</story_context>`;
+
+            broadcastStatus(`🎯 已掌握全局設定（大綱+角色），開始進入批次精翻！`, 'ok');
+        } catch (storyErr) {
+            log.warn('TwoStepPipeline', `全域劇本分析失敗，退回無劇情背景精翻: ${storyErr.message}`);
+        }
+    }
+
+    // ── 階段 2：帶著全域背景記憶進行批次 Vision 精翻 ──
+    return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet);
+}
+
 // PC 模式的專屬翻譯處理器 (並行版本 - 使用 Semaphore 控制並發數)
-async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
+async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '') {
     // 輔助函式：廣播狀態給行動端來源分頁的日誌面板
     const broadcastStatus = (msg, type = 'info') => {
         if (!sourceTabId) return;
@@ -1165,7 +1310,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
     log.info('Background', `翻譯設定讀取完成 — 主要模型: ${modelName}，備援模型: ${fallbackModelName}`);
 
     // ── 語彙庫初始化與注入 (遵循 V1.8.6 邏輯) ──
-    let glossarySnippet = '';
+    let glossarySnippet = injectedGlossarySnippet || '';
     const navCtx = await state.get('navigationContext', {});
     let currentMangaKey = navCtx[sourceTabId];
     let currentDisplayName = currentMangaKey;

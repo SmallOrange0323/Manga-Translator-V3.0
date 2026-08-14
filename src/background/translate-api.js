@@ -547,3 +547,140 @@ export function parseBatchOutput(data, batchSize) {
 
     return finalResults;
 }
+
+/**
+ * 【雙階段模式】單張圖片純文字 OCR 提取（不進行翻譯，僅獲取日文生肉對白）
+ */
+export async function extractTextFromImage(imageBase64, options = {}) {
+    if (!state.isInitialized) await state.init();
+    const {
+        model = await state.get('ocrModelName', 'gemini-3.1-flash-lite'),
+        prompt = (await state.get('customPromptOcr', '')) || 'Extract ALL Japanese story dialogue from this manga image. Return pure text only.'
+    } = options;
+
+    let { apiKey } = options;
+    if (!apiKey) {
+        apiKey = state.apiKeys[0];
+    }
+    if (!apiKey) throw new Error('未設定 API Key');
+
+    const body = {
+        contents: [
+            {
+                role: 'user',
+                parts: [
+                    { inline_data: { mime_type: 'image/jpeg', data: imageBase64 } },
+                    { text: prompt }
+                ]
+            }
+        ],
+        generationConfig: {
+            temperature: 0.1
+        },
+        safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ]
+    };
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OCR API 錯誤 (${response.status}): ${errorText}`);
+    }
+
+    const json = await response.json();
+    return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+}
+
+/**
+ * 【雙階段模式 - 階段 1.5】全域劇本通讀：分析全本漫畫台詞草稿，掌握當話劇情大綱、角色互動與專屬術語
+ */
+export async function extractGlobalStoryAndGlossary(rawScriptText, options = {}) {
+    if (!state.isInitialized) await state.init();
+    const model = options.model || (await state.get('modelName', 'gemini-3.1-flash-lite'));
+    const apiKey = options.apiKey || state.apiKeys[0];
+    if (!apiKey) throw new Error('未設定 API Key');
+
+    const systemPrompt = `你是一位專業漫畫翻譯總監。以下是一部完整漫畫中所有頁面的日文對白與台詞草稿（包含 [P.1]、[P.2] 等頁碼標註）。
+請通讀全篇台詞，深度分析並輸出 JSON 格式的全局設定：
+1. storySummary: 本話/本章劇情大綱（簡述故事背景、核心衝突、登場情境與情節發展，約 80~150 字）。
+2. characterRelationships: 角色互動與稱謂說明（例如：A是隊長語氣威嚴、B是部下稱呼A為隊長、C與D是情侶等）。
+3. terms: 專有名詞、角色姓名、地名與招式術語對照表（日文原名 original、繁體中文推薦譯名 translation）。`;
+
+    const schema = {
+        type: 'OBJECT',
+        properties: {
+            storySummary: { type: 'STRING' },
+            characterRelationships: { type: 'STRING' },
+            terms: {
+                type: 'ARRAY',
+                items: {
+                    type: 'OBJECT',
+                    properties: {
+                        original: { type: 'STRING' },
+                        translation: { type: 'STRING' }
+                    },
+                    required: ['original', 'translation']
+                }
+            }
+        },
+        required: ['storySummary', 'characterRelationships', 'terms']
+    };
+
+    const body = {
+        contents: [
+            {
+                role: 'user',
+                parts: [
+                    { text: `${systemPrompt}\n\n【全篇漫畫劇本台詞】：\n${rawScriptText}` }
+                ]
+            }
+        ],
+        generationConfig: {
+            temperature: 0.2,
+            response_mime_type: 'application/json',
+            response_schema: schema
+        },
+        safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ]
+    };
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`劇本全局分析 API 錯誤 (${response.status}): ${errorText}`);
+    }
+
+    const json = await response.json();
+    const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const cleanStr = sanitizeJsonForParsing(rawText);
+    try {
+        const parsed = JSON.parse(cleanStr);
+        if (await state.get('enableTaiwanLocalization', true)) {
+            localizeObjectStrings(parsed);
+        }
+        return parsed;
+    } catch (e) {
+        log.warn('TranslateAPI', `[劇本解析失敗] 原始文字: ${cleanStr}`);
+        return { storySummary: '', characterRelationships: '', terms: [] };
+    }
+}

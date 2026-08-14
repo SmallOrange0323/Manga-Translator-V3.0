@@ -308,9 +308,22 @@
 
                 <label for="translationMode">處理模式:</label>
                 <select id="translationMode">
-                    <option value="one-step" selected>一條龍服務 (單一模型同時負責辨識與翻譯)</option>
-                    <option value="two-step">雙階段處理 [較慢]</option>
+                    <option value="one-step" selected>⚡ 一條龍模式 (極速直譯 / 單一模型看圖翻譯)</option>
+                    <option value="two-step">📖 雙階段劇本預讀模式 (先通讀全本 ➔ 暫存劇情與角色關係 ➔ 帶記憶精翻)</option>
                 </select>
+
+                <div id="ocrModelContainer" style="display: none; background: #f0f7ff; padding: 12px; border-radius: 6px; border: 1px solid #cce5ff; margin-top: 10px;">
+                    <label for="ocrModelName" style="margin-top: 0; color: #0056b3;">📷 階段一：文字辨識 OCR 模型 (提取全書日文劇本):</label>
+                    <select id="ocrModelName" style="margin-top: 5px;">
+                        <option value="gemini-3.1-flash-lite" selected>Gemini 3.1 Flash-Lite (極速/高配額/推薦)</option>
+                        <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (高準確度)</option>
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemma-4-26b-a4b-it">Gemma 4 26B (視覺專用)</option>
+                    </select>
+                    <small style="color: #666; font-size: 11px; display: block; margin-top: 4px;">
+                        💡 雙階段模式會先使用此模型提取全本台詞草稿，由大模型 1 次通讀掌握當話劇情與人物稱謂（暫存於單次任務記憶體），再進行全域精翻。
+                    </small>
+                </div>
 
                 <label for="modelName">主要翻譯模型:</label>
                 <select id="modelName">
