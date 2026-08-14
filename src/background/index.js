@@ -941,7 +941,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           log.info('Background', `[重翻批次] 收到 ${images.length} 張圖片，開始重新翻譯... (resultTabId: ${retryResultTabId})`);
           // 直接以現有 resultTabId 啟動批次翻譯，isRetry = false，這會清空結果頁面並重頭開始
-          processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, false);
+          dispatchMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, false);
       }, 300);
 
       sendResponse({ status: 'retrying' });
@@ -1947,7 +1947,7 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
                             log.warn('Background', '[AutoBatch] 結果頁無回應，改開新頁');
                             openNewResultPage(tabId, images, navLinks, mangaKey, mobile);
                         } else {
-                            processMangaBatchPCMode(tabId, resultTabId, images, navLinks);
+                            dispatchMangaBatchProcessing(tabId, resultTabId, images, navLinks);
                         }
                     });
                     return;
