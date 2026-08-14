@@ -254,11 +254,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   log.info('Messenger', `收到訊息: ${message.action}`, { tabId: sender.tab?.id });
 
   if (message.action === 'PING') {
-    sendResponse({ status: 'PONG', version: '3.0.0' });
+    sendResponse({ status: 'PONG', version: '3.0.1' });
+    return false;
+  }
+
+  if (message.action === 'GET_LOCAL_AI_STATUS') {
+    wasmOcrEngine.getGpuStatus().then(status => {
+      sendResponse({ success: true, data: status });
+    }).catch(err => {
+      sendResponse({ success: false, message: err.message });
+    });
+    return true;
+  }
+
+  if (message.action === 'CLEAR_LOCAL_AI_CACHE') {
+    wasmOcrEngine.clearCache().then(res => {
+      sendResponse(res);
+    }).catch(err => {
+      sendResponse({ success: false, message: err.message });
+    });
+    return true;
   }
 
   if (message.action === 'STOP_TRANSLATION') {
-
       state.set('isStopping', true);
       log.warn('Background', '收到停止指令，正在中斷所有任務...');
       sendResponse({ status: 'stopping' });

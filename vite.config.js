@@ -33,7 +33,8 @@ export default defineConfig({
       input: {
         reader: 'src/reader/result.html',
         mobile: 'src/mobile/index.html',
-        streamReader: 'src/reader/stream-reader.html'
+        streamReader: 'src/reader/stream-reader.html',
+        offscreen: 'src/offscreen/index.html'
       },
       output: {
         manualChunks: undefined,

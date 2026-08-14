@@ -123,6 +123,43 @@ async function initGeneralSettings() {
         updateOcrVisibility();
         translationModeSelect.addEventListener('change', updateOcrVisibility);
     }
+
+    // 初始化本機 WebGPU 狀態與清理快取按鈕
+    initLocalAiManager();
+}
+
+/**
+ * 初始化本機 WebGPU 狀態偵測與快取管理
+ */
+function initLocalAiManager() {
+    const gpuStatusText = document.getElementById('gpuStatusText');
+    const btnClearCache = document.getElementById('btnClearLocalAiCache');
+
+    // 向 Background 查詢 WebGPU 狀態
+    chrome.runtime.sendMessage({ action: 'GET_LOCAL_AI_STATUS' }, (resp) => {
+        if (resp && resp.success && resp.data && gpuStatusText) {
+            const { hasWebGPU, adapterName } = resp.data;
+            if (hasWebGPU) {
+                gpuStatusText.textContent = `🎮 顯卡加速: ${adapterName} (就緒)`;
+                gpuStatusText.style.color = '#155724';
+            } else {
+                gpuStatusText.textContent = `💻 本地端: CPU / WASM 模式 (${adapterName})`;
+                gpuStatusText.style.color = '#856404';
+            }
+        }
+    });
+
+    if (btnClearCache) {
+        btnClearCache.addEventListener('click', () => {
+            btnClearCache.disabled = true;
+            btnClearCache.textContent = '⏳ 清理中...';
+            chrome.runtime.sendMessage({ action: 'CLEAR_LOCAL_AI_CACHE' }, (res) => {
+                btnClearCache.disabled = false;
+                btnClearCache.textContent = '✅ 已清理';
+                setTimeout(() => { btnClearCache.textContent = '🧹 清理快取'; }, 2000);
+            });
+        });
+    }
 }
 
 /**
