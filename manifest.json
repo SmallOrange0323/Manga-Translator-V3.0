@@ -52,7 +52,8 @@
         "src/popup/main.js",
         "src/options/index.html",
         "src/reader/stream-reader.html",
-        "src/offscreen/index.html"
+        "src/offscreen/index.html",
+        "assets/*"
       ],
       "matches": [
         "<all_urls>"
