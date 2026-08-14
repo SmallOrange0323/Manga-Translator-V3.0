@@ -1186,13 +1186,13 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         total: images.length
     });
 
-    const maxDim = await state.get('imageMaxDimension', 1024);
+    const maxDim = parseInt(await state.get('imageMaxDimension', 1280)) || 1280;
     const ocrModelName = await state.get('ocrModelName', 'gemini-3.1-flash-lite');
     const isWasmOcr = (ocrModelName === 'local-wasm-ocr');
-    const ocrBatchSizeSetting = await state.get('ocrBatchSize', 5);
-    const ocrBatchSize = isWasmOcr ? 5 : (parseInt(ocrBatchSizeSetting) || 5);
+    // 比照圖片批次設定數量，不再將本地模式寫死為 5
+    const ocrBatchSize = parseInt(await state.get('ocrBatchSize', 10)) || 10;
 
-    log.info('TwoStepPipeline', `[階段 1] 模式: ${isWasmOcr ? '💻 本地 WASM OCR' : `☁️ 雲端批次 OCR (${ocrModelName})`}，每批打包: ${ocrBatchSize} 頁`);
+    log.info('TwoStepPipeline', `[階段 1] 模式: ${isWasmOcr ? '💻 本地 WASM OCR' : `☁️ 雲端批次 OCR (${ocrModelName})`}，每批打包: ${ocrBatchSize} 頁，傳送尺寸: ${maxDim}px`);
 
     // ── 階段 1：OCR 提取全書台詞 ──
     const scriptLines = [];
