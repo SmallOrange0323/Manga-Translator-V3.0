@@ -89,9 +89,12 @@ export async function checkLocalGpuStatus() {
 export async function runLocalAiOcrBatch(base64Array) {
     try {
         const resp = await sendToOffscreen('LOCAL_AI_OCR_BATCH', { base64Array });
+        if (resp.errors && resp.errors.length > 0) {
+            log.warn('OffscreenManager', `本地 OCR 遭遇錯誤: ${resp.errors.join(' | ')}`);
+        }
         return resp.results || Array(base64Array.length).fill('');
     } catch (e) {
-        log.warn('OffscreenManager', `本地批次辨識失敗: ${e.message}`);
+        log.warn('OffscreenManager', `本地批次辨識調度異常: ${e.message}`);
         return Array(base64Array.length).fill('');
     }
 }

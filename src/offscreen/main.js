@@ -148,18 +148,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (action === 'LOCAL_AI_OCR_PAGE') {
-        recognizeImageLocal(payload.base64).then(text => sendResponse({ success: true, text }));
+        recognizeImageLocal(payload.base64).then(res => sendResponse({ success: true, text: res.text, error: res.error }));
         return true;
     }
 
     if (action === 'LOCAL_AI_OCR_BATCH') {
         (async () => {
             const results = [];
+            const errors = [];
             for (const b64 of (payload.base64Array || [])) {
-                const text = await recognizeImageLocal(b64);
-                results.push(text);
+                const res = await recognizeImageLocal(b64);
+                results.push(res.text);
+                if (res.error) errors.push(res.error);
             }
-            sendResponse({ success: true, results });
+            sendResponse({ success: true, results, errors });
         })();
         return true;
     }
