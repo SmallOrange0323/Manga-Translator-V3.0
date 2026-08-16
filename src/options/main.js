@@ -81,7 +81,8 @@ async function initGeneralSettings() {
         ['requestDelay', 4000],
         ['imageMaxDimension', 1024],
         ['ocrModelName', 'gemma-4-26b-a4b-it'],
-        ['enableTaiwanLocalization', true]
+        ['enableTaiwanLocalization', true],
+        ['incognitoPrivacyMode', true]
     ];
 
     for (const [id, def] of fields) {

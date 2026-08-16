@@ -23,6 +23,22 @@ log.info('Background', '漫譯 V3 背景服務程式已啟動');
 // 檢查是否處於無痕模式背景實例中 (用於 split 模式分流)
 const isIncognitoProcess = chrome.extension ? chrome.extension.inIncognitoContext : false;
 
+/**
+ * 判斷指定分頁是否為無痕視窗
+ * @param {number} tabId 
+ * @returns {Promise<boolean>}
+ */
+async function isTabIncognito(tabId) {
+    if (isIncognitoProcess) return true;
+    if (!tabId) return false;
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        return !!tab?.incognito;
+    } catch (_) {
+        return false;
+    }
+}
+
 // 當 Service Worker 啟動或重啟時，初次化狀態
 state.init().then(async () => {
     log.info('Background', `狀態載入完成 (無痕模式: ${isIncognitoProcess})，檢查待處理任務...`);
@@ -211,7 +227,12 @@ async function processNovelQueue() {
             }
 
             // ── 異步術語萃取 (與漫畫模式對齊) ──
-            if (mangaKey && allTranslatedResults.length > 0) {
+            const isIncognitoTab = await isTabIncognito(sender?.tab?.id);
+            const incognitoPrivacy = await state.get('incognitoPrivacyMode', true);
+
+            if (isIncognitoTab && incognitoPrivacy) {
+                log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗，已自動跳過小說術語萃取與詞庫儲存');
+            } else if (mangaKey && allTranslatedResults.length > 0) {
                 log.info('Background', `[小說萃取] 開始分析小說譯文，提取關鍵術語...`);
                 setTimeout(async () => {
                     try {
@@ -1281,14 +1302,19 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 characterRelationships: analysis.characterRelationships || ''
             };
 
-            // 2. 【長期持久層】專有名詞合併存入詞庫
+            // 2. 【長期持久層】專有名詞合併存入詞庫 (無痕模式下保護隱私跳過寫入)
             const normalizedTerms = (analysis.terms || []).map(t => ({
                 ori: (t.ori || t.original || '').trim(),
                 trans: (t.trans || t.translation || '').trim(),
                 source: 'ai'
             })).filter(t => t.ori && t.trans);
 
-            if (currentMangaKey && normalizedTerms.length > 0) {
+            const isIncognitoSource = await isTabIncognito(sourceTabId);
+            const incognitoPrivacy = await state.get('incognitoPrivacyMode', true);
+
+            if (isIncognitoSource && incognitoPrivacy) {
+                log.info('Glossary', '🔒 [隱私保護] 偵測到無痕視窗翻譯，已跳過專有名詞持久化寫入詞庫');
+            } else if (currentMangaKey && normalizedTerms.length > 0) {
                 const currentEntry = (await loadGlossary(currentMangaKey)) || { terms: [] };
                 const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], normalizedTerms);
                 if (addedCount > 0) {
@@ -1741,20 +1767,17 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         }
     }
 
-    // ── 異步術語萃取 (遵循 V1.8.6) ──
-    // [DEBUG] 診斷用 log：確認萃取觸發條件
-    log.info('Background', `[術語萃取-DEBUG] currentMangaKey = "${currentMangaKey}" | allBatchResults.length = ${allBatchResults.length}`);
-    if (allBatchResults.length > 0) {
-        log.info('Background', `[術語萃取-DEBUG] allBatchResults 第一筆格式樣本: ${JSON.stringify(allBatchResults[0])}`);
-    }
+    // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護) ──
+    const isIncognitoBatch = await isTabIncognito(sourceTabId);
+    const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
 
-    if (currentMangaKey && allBatchResults.length > 0) {
+    if (isIncognitoBatch && incognitoPrivacySetting) {
+        log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗翻譯，已自動跳過漫畫術語萃取與詞庫儲存');
+    } else if (currentMangaKey && allBatchResults.length > 0) {
         log.info('Background', `[術語萃取] 開始分析漫畫譯文，共 ${allBatchResults.length} 組對話...`);
         setTimeout(async () => {
             try {
                 const newTerms = await extractTermsFromTranslation(allBatchResults, { model: modelName });
-                // [DEBUG] 確認 AI 回傳了什麼
-                log.info('Background', `[術語萃取-DEBUG] AI 回傳術語數量: ${newTerms?.length ?? 0} | 內容: ${JSON.stringify(newTerms?.slice(0, 3))}`);
                 if (newTerms && newTerms.length > 0) {
                     const currentEntry = await loadGlossary(currentMangaKey) || { terms: [] };
                     const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], newTerms);
