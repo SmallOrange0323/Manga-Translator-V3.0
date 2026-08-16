@@ -347,7 +347,8 @@ export function crawlImages() {
             if (matches && matches.length >= 3) {
                 matches.forEach(imgUrl => {
                     const lower = imgUrl.toLowerCase();
-                    if (!lower.includes('logo') && !lower.includes('avatar') && !lower.includes('icon') && !lower.includes('banner')) {
+                    const isScriptJunk = ['logo', 'avatar', 'icon', 'banner', 'upvote', 'downvote', 'funny', 'love', 'surprised', 'angry', 'vote', 'emoji', 'reaction', '512x512', '256x256', '128x128'].some(k => lower.includes(k));
+                    if (!isScriptJunk) {
                         try {
                             const fullUrl = new URL(imgUrl, window.location.href).href;
                             mangaImages.push({ url: fullUrl, width: 800, height: 1200 });
@@ -436,15 +437,25 @@ export function crawlImages() {
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
         
-        // 垃圾關鍵字大滿貫 (徹底排除選單、頭像、社群與按鈕等雜訊圖)
+        // 垃圾關鍵字大滿貫 (徹底排除選單、頭像、社群、評分、反應表情包與按鈕等雜訊圖)
         const junkKeywords = [
             'emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction',
             'thumb', 'small', 'widget', 'social', 'badge', 'ad-', 'comment',
-            'loading', 'placeholder', 'footer', 'header', 'nav', 'share', 'profile'
+            'loading', 'placeholder', 'footer', 'header', 'nav', 'share', 'profile',
+            'upvote', 'downvote', 'funny', 'love', 'surprised', 'angry', 'vote', 'rating',
+            'emoticon', 'stickers', 'smilies', 'dislike', 'thumbs-up', 'thumbs-down',
+            'wp-reactions', 'post-ratings', 'emotion'
         ];
-        const isJunk = junkKeywords.some(key => url && url.toLowerCase().includes(key));
+        const isJunkUrl = junkKeywords.some(key => url && url.toLowerCase().includes(key));
+        
+        // 正方形表情/評分圖標特徵排除 (如 512x512, 256x256, 128x128 等小於 600px 的 1:1 圖標)
+        const isSquareReactionIcon = /(?:512x512|256x256|128x128|64x64|48x48|96x96|150x150|300x300)/i.test(url || '') || 
+                                     (width > 0 && height > 0 && width <= 600 && height <= 600 && Math.abs(width - height) < 10 && isJunkUrl);
 
-        if (!isTooSmall && !isUnloadedJunk && !isJunk && url) {
+        // 父容器特徵排除
+        const isInReactionBox = img && img.closest && img.closest('.reactions, .wp-reactions, .post-ratings, .comment-reactions, .emotion-box, .votes, .social-share, .footer-widgets');
+
+        if (!isTooSmall && !isUnloadedJunk && !isJunkUrl && !isSquareReactionIcon && !isInReactionBox && url) {
             if (!url.includes('data:image/svg+xml') && !url.includes('data:image/gif;base64,R0lGOD')) {
                 mangaImages.push({
                     element: img,
