@@ -428,11 +428,15 @@ ${SYSTEM_BATCH_RULES}
 </system_instructions>
 ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
 
-    // 建立 User Parts
+    // 建立 User Parts (支援單圖損毀防禦，避免空圖片觸發 API 400 錯誤)
     const userParts = [];
     base64Array.forEach((b64, idx) => {
         userParts.push({ text: `\n=== PAGE_BOUNDARY: IMAGE_INDEX=${idx} ===\n` });
-        userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+        if (typeof b64 === 'string' && b64.length > 50) {
+            userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+        } else {
+            userParts.push({ text: `[IMAGE_INDEX=${idx} IS EMPTY OR CORRUPTED, PLEASE OUTPUT {"pageIndex": ${idx}, "results": []}]` });
+        }
     });
 
     const body = {
@@ -596,7 +600,11 @@ ${customOcrPrompt ? `Custom extraction rules:\n${customOcrPrompt}` : ''}
     const userParts = [];
     base64Array.forEach((b64, idx) => {
         userParts.push({ text: `\n=== PAGE_BOUNDARY: IMAGE_INDEX=${idx} ===\n` });
-        userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+        if (typeof b64 === 'string' && b64.length > 50) {
+            userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+        } else {
+            userParts.push({ text: `[IMAGE_INDEX=${idx} IS EMPTY OR CORRUPTED, PLEASE OUTPUT {"pageIndex": ${idx}, "text": ""}]` });
+        }
     });
 
     const body = {
