@@ -217,9 +217,24 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
                 }
 
                 const json = await response.json();
-                const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                const candidate = json.candidates?.[0];
+                const finishReason = candidate?.finishReason;
+                const rawText = candidate?.content?.parts?.[0]?.text || '';
+
+                if (!rawText) {
+                    if (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST') {
+                        throw new Error(`觸發 Google 安全性過濾器 (finishReason: ${finishReason})，即將切換備援模型重試`);
+                    }
+                    throw new Error(`API 回傳為空 (finishReason: ${finishReason || 'UNKNOWN'})`);
+                }
+
                 const cleanJsonStr = sanitizeJsonForParsing(rawText);
-                const parsed = JSON.parse(cleanJsonStr);
+                let parsed;
+                try {
+                    parsed = JSON.parse(cleanJsonStr);
+                } catch (pe) {
+                    throw new Error(`JSON 解析失敗: ${pe.message} (Raw: ${cleanJsonStr.slice(0, 100)})`);
+                }
                 
                 // 台灣用語在地化轉換
                 if (await state.get('enableTaiwanLocalization', true)) {
