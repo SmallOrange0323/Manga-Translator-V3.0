@@ -1227,7 +1227,7 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
             action: 'updateProgress',
             current: `正在提取第 ${startPage}~${endPage} 頁劇本...`,
             total: images.length
-        });
+        }).catch(() => {});
         broadcastStatus(`📖 [階段 1] 正在提取第 ${startPage}~${endPage} 頁劇本...`, 'info');
 
         // 並行抓取並縮放本批圖片 Base64
@@ -1282,6 +1282,7 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
     // ── 階段 1.5：全域劇本通讀與分層存儲 ──
     let sessionContextSnippet = '';
     const navCtx = await state.get('navigationContext', {});
+    chrome.tabs.sendMessage(resultTabId, { action: 'clearResults', expectedCount: images.length }).catch(() => {});
     const currentMangaKey = navCtx[sourceTabId];
 
     if (fullScriptText.trim().length > 20) {
@@ -1290,7 +1291,7 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
             action: 'updateProgress',
             current: `正在分析全局劇情大綱與人物關係...`,
             total: images.length
-        });
+        }).catch(() => {});
 
         try {
             const analysis = await extractGlobalStoryAndGlossary(fullScriptText);
@@ -1526,7 +1527,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             : `${i + 1} / ${images.length}`;
         
         log.info('Background', `[DebugLog] 發送進度更新 sendMessage: ${progressText}`);
-        chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length });
+        chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
         broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
 
         log.info('Background', `[DebugLog] 開始載入本批 ${currentBatch.length} 張圖片`);
@@ -1743,7 +1744,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         batchIndex: currentBatchIdx,
                         pageIndex: completedCount
                     }
-                });
+                }).catch(() => {});
             } else {
                 await incrementDailyUsage(modelName);
                 allBatchResults.push(...(res.results || []));
@@ -1756,7 +1757,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         batchIndex: currentBatchIdx,
                         pageIndex: completedCount
                     }
-                });
+                }).catch(() => {});
             }
         }
 
@@ -1801,7 +1802,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         if (allBatchResults.length === 0) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：allBatchResults 為空，翻譯結果可能格式錯誤。`);
     }
 
-    chrome.tabs.sendMessage(resultTabId, { action: 'batchComplete' });
+    chrome.tabs.sendMessage(resultTabId, { action: 'batchComplete' }).catch(() => {});
     broadcastStatus(`✅ 全部 ${images.length} 張翻譯完成！請查看結果頁。`, 'success');
     // 廣播任務完成，讓 Sidepanel 恢復開始按鈕
     chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
