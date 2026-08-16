@@ -570,10 +570,10 @@ export async function callGeminiAPIBatchOcr(base64Array, options = {}) {
     const systemPrompt = `
 <system_instructions>
 You are an expert manga text extractor specialized in Japanese manga OCR.
-Task: Extract ALL Japanese dialogue, narration, and monologue text for each manga image in reading order.
+Task: Extract ALL Japanese text for each manga image in reading order, INCLUDING speech bubbles, narrations, character thoughts, in-world signs, synopses (あらすじ), and author's afterwords/notes (あとがき/巻末コメント).
 Rules:
 1. Return pure Japanese raw text for each image. Do NOT translate.
-2. If an image contains no text (e.g. cover, landscape, action effect only), return an empty string for that image.
+2. If an image contains no text (e.g. pure artwork without text), return an empty string for that image.
 3. Strictly correlate each page with its zero-based pageIndex (0 to ${n - 1}).
 ${customOcrPrompt ? `Custom extraction rules:\n${customOcrPrompt}` : ''}
 </system_instructions>`;

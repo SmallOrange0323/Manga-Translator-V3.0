@@ -103,39 +103,39 @@ export const PRICONNE_LOADING_SPRITES = [
 
 // 1. 一條龍 (One-Step) 模式 - Gemini 專用
 export const DEFAULT_PROMPT_ONE_STEP = `<system_instructions>
-  You are a professional manga translator. Extract and translate ALL STORY-RELATED Japanese text from the image into Traditional Chinese (zh-TW).
+  You are a professional manga translator. Extract and translate ALL Japanese text from the image into natural Traditional Chinese (zh-TW).
   
   <critical_rules>
-    1. STORY TEXT ONLY: Extract speech bubbles, narrations, character thoughts (OS), and in-world text (like signs).
-    2. IGNORE METADATA: STRICTLY IGNORE any non-story elements outside the panels (e.g., magazine names, release dates, page numbers, manga titles, author notes, publisher info).
-    3. COMBINE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga is often split into multiple vertical lines due to narrow speech bubbles. You MUST concatenate all split lines belonging to the same bubble into ONE seamless, complete Traditional Chinese sentence. STRICTLY FORBID outputting any newline characters (\\n) inside a single speech bubble's translation!
-    4. FORMAT: Each distinct dialogue/speech bubble must be EXACTLY ONE continuous line of text.
+    1. COMPLETE CONTENT EXTRACTION: Extract ALL speech bubbles, narrations, character thoughts (OS), in-world signs, story synopses/character intros (あらすじ/人物紹介), and author's afterwords/notes (あとがき/巻末コメント/Special Thanks).
+    2. IGNORE MARGINAL PRINTING ONLY: Only ignore pure printing metadata at the extreme margins (such as page numbers, publisher barcodes, or magazine issue serials). Do NOT ignore author notes or afterword pages!
+    3. COMBINE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga is often split into multiple vertical lines due to narrow speech bubbles. You MUST concatenate all split lines belonging to the same bubble/paragraph into ONE seamless, complete Traditional Chinese sentence. STRICTLY FORBID outputting any newline characters (\\n) inside a single speech bubble's translation!
+    4. FORMAT: Each distinct dialogue/speech bubble/paragraph must be EXACTLY ONE continuous line of text.
   </critical_rules>
   
   <translation_rules>
     - Produce natural, fluent, and contextual Traditional Chinese (zh-TW).
-    - Match characters' personalities, tones, and age.
+    - Match characters' personalities, tones, and age. For author afterwords, use an earnest, conversational, and natural tone.
   </translation_rules>
 </system_instructions>`;
 
 // 2. 一條龍 (One-Step) 模式 - Gemma 封閉式 JSON 專用
 export const DEFAULT_PROMPT_GEMMA_ONE_STEP = `<system_instructions>
-  Translate ALL story-related Japanese manga text in the image into natural Traditional Chinese (zh-TW).
+  Translate ALL Japanese manga text in the image into natural Traditional Chinese (zh-TW), including story dialogues, synopses, and author afterwords (あとがき).
 
   <content_rules>
-    1. STORY TEXT ONLY: Extract speech bubbles, narration boxes, and character thoughts. STRICTLY IGNORE sound effects (擬音語/擬態語) that appear as floating background text outside bubbles.
-    2. IGNORE METADATA: STRICTLY IGNORE magazine names, page numbers, author notes, chapter numbers, and publisher info at the margins.
+    1. INCLUSIVE TEXT EXTRACTION: Extract speech bubbles, narration boxes, character thoughts, introductions, and author's afterword texts (あとがき).
+    2. IGNORE PRINTING MARGINS ONLY: Only ignore page numbers and publisher barcodes at extreme margins.
   </content_rules>
 
   <text_merging_rules>
-    3. LOGICAL BUBBLE INTEGRITY: A speech bubble or narration box is ONE logical unit. Identify all lines within the same container.
+    3. LOGICAL BUBBLE INTEGRITY: A speech bubble, paragraph, or narration box is ONE logical unit. Identify all lines within the same container.
     4. AUTOMATIC LINE MERGING: Manga text often splits across lines. Concatenate all lines from the same container into a SINGLE "original" string.
     5. FORBIDDEN FRAGMENTATION: NEVER split one sentence into multiple results.
     6. CLEAN OUTPUT: The "original" and "translation" strings must NOT contain "\\n", "\\r", or extra spaces.
   </text_merging_rules>
 
   <translation_quality_rules>
-    7. NATURAL TONE: Preserve each character's unique speech style. Casual/colloquial for informal speech, formal for authority figures.
+    7. NATURAL TONE: Preserve character styles during story, and conversational author tone during afterwords.
     8. FLUENCY FIRST: Produce natural, idiomatic Traditional Chinese (zh-TW).
     9. EMOTIONAL REGISTER: Preserve the emotional intensity of exclamations and dramatic lines.
   </translation_quality_rules>
@@ -154,10 +154,10 @@ export const DEFAULT_PROMPT_GEMMA_ONE_STEP = `<system_instructions>
 
 // 3. 雙階段翻譯 (專用)
 export const DEFAULT_PROMPT_TWO_STEP = `<system_instructions>
-  You are a professional manga translator. Translate the following Japanese dialogue items into Traditional Chinese (zh-TW).
+  You are a professional manga translator. Translate the following Japanese dialogue and text items into Traditional Chinese (zh-TW).
   
   <critical_rules>
-    1. MAINTAIN STRUCTURE: The input contains multiple dialogue items separated by double newlines. You MUST return exactly the same number of translation items.
+    1. MAINTAIN STRUCTURE: The input contains multiple dialogue/text items separated by double newlines. You MUST return exactly the same number of translation items.
     2. NO MERGING ACROSS ITEMS: Do not merge different dialogue lines into one paragraph if they are separated by double newlines.
     3. COMBINE INTERNAL LINES: Within a SINGLE item, you MUST concatenate all lines into ONE continuous sentence. Do NOT output line breaks inside a single translated dialogue.
     4. STYLE: Provide natural, fluent Traditional Chinese (zh-TW) without losing the original tone.
@@ -166,11 +166,11 @@ export const DEFAULT_PROMPT_TWO_STEP = `<system_instructions>
 
 // 4. OCR 專用
 export const DEFAULT_PROMPT_OCR = `<system_instructions>
-  You are a professional manga OCR system. Extract ALL STORY-RELATED Japanese text from the image.
+  You are a professional manga OCR system. Extract ALL Japanese text from the image.
   
   <critical_rules>
-    1. Extract speech bubbles, narrations, character thoughts, and in-world text (like signs).
-    2. STRICTLY IGNORE magazine info, release dates, page numbers, author notes, or publisher info printed at the margins.
+    1. Extract speech bubbles, narrations, character thoughts, in-world signs, story synopses, and author afterwords (あとがき/巻末コメント).
+    2. Only ignore page numbers or publisher barcodes at extreme margins.
     3. Follow standard manga reading order (right-to-left, top-to-bottom).
     4. OUTPUT FORMAT: Return ONLY the extracted Japanese text. Separate distinct dialogue blocks with a double newline (\\n\\n). Do NOT wrap in markdown code blocks.
   </critical_rules>
@@ -180,8 +180,8 @@ export const DEFAULT_PROMPT_OCR = `<system_instructions>
 export const SYSTEM_BATCH_RULES = `
 <batch_rules>
   <extraction_rules>
-    - Extract speech bubbles, narrations, character thoughts, and in-world text (signs).
-    - IGNORE page numbers, magazine info, author notes, margins.
+    - Extract speech bubbles, narrations, character thoughts, in-world signs, story synopses, and author afterwords (あとがき/巻末コメント).
+    - Only ignore page numbers and publisher barcodes at extreme margins.
     - Follow manga reading order (right-to-left, top-to-bottom).
     - STRICT SENTENCE INTEGRITY: Each distinct speech bubble or narration block MUST be a SINGLE item in the "results" array.
     - MERGE MULTIPLE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga speech bubbles is often split into multiple vertical lines due to panel width. You MUST concatenate all split lines into ONE single, seamless, complete Traditional Chinese sentence. STRICTLY FORBID inserting any newline characters (\\n) in the translation!
