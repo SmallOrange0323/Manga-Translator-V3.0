@@ -1493,12 +1493,21 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             console.groupCollapsed(`[DebugLog Group] 📥 第 ${Math.floor(i / batchSize) + 1} 批圖片下載與壓縮處理詳細日誌 (i = ${i})`);
         }
         log.info('Background', `[DebugLog] 進入批次主迴圈，第 ${Math.floor(i / batchSize) + 1} 批，i = ${i}`);
-        // Kill-Switch：若結果頁已關閉，終止
-        try {
-            await chrome.tabs.get(resultTabId);
-        } catch (e) {
-            log.info('Background', '結果頁面已關閉，中止批次任務。');
-            break;
+        // Kill-Switch：僅在明確偵測到分頁被使用者手動關閉時終止任務
+        if (resultTabId && typeof resultTabId === 'number') {
+            try {
+                const tab = await chrome.tabs.get(resultTabId);
+                if (!tab) {
+                    log.info('Background', `結果分頁 ${resultTabId} 不存在，中止任務。`);
+                    break;
+                }
+            } catch (tabErr) {
+                if (tabErr.message && tabErr.message.includes('No tab with id')) {
+                    log.info('Background', `結果分頁 ${resultTabId} 已關閉，中止任務。`);
+                    break;
+                }
+                log.warn('Background', `檢查分頁狀態非致命警告，繼續執行任務: ${tabErr.message}`);
+            }
         }
 
         const currentBatch = images.slice(i, i + batchSize);
