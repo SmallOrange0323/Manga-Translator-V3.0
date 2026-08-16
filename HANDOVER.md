@@ -1,10 +1,10 @@
 # 漫譯 V3.0 (Manga Translator V3.0) 專案交接與進度備忘錄
 
-**文件生成時間**：2026-08-15  
+**文件生成時間**：2026-08-17  
 **目前 Git 分支**：`feature/prompt-xml-upgrade`  
-**最新 Commit Hash**：`34e524c`  
+**最新 Commit Hash**：`c3ae285`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已 100% 內建離線日文豎排/橫排/英文語言包與 WASM 引擎，支援完全離線零依賴本地 OCR。
+**工作區狀態**：已完成無痕隱私保護、成人漫畫虛構文學豁免、前情提要與後記翻譯支援、以及互動表情/評分圖標精準過濾。
 
 ---
 
