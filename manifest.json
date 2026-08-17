@@ -13,8 +13,7 @@
     "scripting",
     "contextMenus",
     "identity",
-    "downloads",
-    "offscreen"
+    "downloads"
   ],
   "oauth2": {
     "client_id": "892014744898-ea2t1djhd9sqs350hb244pifstrlre4q.apps.googleusercontent.com",
@@ -52,7 +51,6 @@
         "src/popup/main.js",
         "src/options/index.html",
         "src/reader/stream-reader.html",
-        "src/offscreen/index.html",
         "assets/*"
       ],
       "matches": [

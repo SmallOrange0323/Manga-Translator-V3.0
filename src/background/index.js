@@ -4,7 +4,6 @@ import { extractMangaTitle } from '../utils/manga-utils.js';
 import './download-helper.js';
 import { loadGlossary, saveGlossary, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
 import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch, extractGlobalStoryAndGlossary, extractTextFromImage, callGeminiAPIBatchOcr } from './translate-api.js';
-import { wasmOcrEngine } from './wasm-ocr.js';
 import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
