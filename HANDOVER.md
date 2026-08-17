@@ -2,10 +2,10 @@
 
 **文件生成時間**：2026-08-18  
 **目前 Git 分支**：`feature/prompt-xml-upgrade`  
-**最新 Commit Hash**：`24bd139`  
+**最新 Commit Hash**：`0467625`  
 **最新版本號**：`V3.0.2`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已完成側邊欄多分頁切換狀態感知器 (syncCurrentTabState)、移除臃腫本機 WASM 達成 9.5MB 極致瘦身、無痕模式隱私保護、成人漫畫虛構文學豁免、前情提要與後記支援、以及表情大圖標精準過濾。
+**工作區狀態**：已修復行動端左右滑動單頁吸附（display: contents 消除批次群組跳頁 Bug）、側邊欄多分頁狀態感知器、9.5MB 極致瘦身、無痕隱私保護、成人漫畫虛構豁免與表情圖標過濾。
 
 ---
 
