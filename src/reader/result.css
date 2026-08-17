@@ -1179,27 +1179,15 @@ body.mt-mobile-mode {
     }
     .results-container::-webkit-scrollbar { display: none; }
 
-    /* ── 行動版批次分組解鎖：消除 batch-section 橫向切割綁定，讓子卡片平鋪 ── */
+    /* ── 行動版批次分組解鎖：透過 display: contents 消除外層包裹，讓每張卡片直接作為 Snap 容器子項平鋪，恢復單頁滑動 ── */
     .batch-section {
-        display: flex !important;
-        flex-direction: row !important;
-        flex-shrink: 0 !important;
-        width: auto !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        border: none !important;
-        background: transparent !important;
+        display: contents !important;
     }
     .batch-header {
         display: none !important; /* 行動版隱藏批次大標頭，避免卡出一頁空白 */
     }
     .batch-grid {
-        display: flex !important;
-        flex-direction: row !important;
-        flex-shrink: 0 !important;
-        gap: 0 !important;
-        padding: 0 !important;
-        margin: 0 !important;
+        display: contents !important;
     }
 
     /* ── 每張卡片 = 一個全螢幕頁面 ── */
