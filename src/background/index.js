@@ -1770,6 +1770,41 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
         }
 
+        // ── 智慧單頁補翻自癒機制 (Auto-Healing) ──
+        // 若批次翻譯中有任何圖片結果為空（results.length === 0 或 error），自動在背景單張精準補翻！
+        const missingItems = validItems.filter(item => {
+            const res = allPageResults[item.originalIdx];
+            return !res || res.error || !Array.isArray(res.results) || res.results.length === 0;
+        });
+
+        if (missingItems.length > 0 && !await state.get('isStopping')) {
+            log.warn('Background', `[批次自癒] 偵測到 ${missingItems.length} 張圖片未產出結果，自動在背景啟動單圖精準自癒補翻...`);
+            broadcastStatus(`⏳ 自動為 ${missingItems.length} 張頁面補翻...`, 'info');
+            
+            await Promise.all(missingItems.map(async (item) => {
+                try {
+                    const singleResult = await translateTexts([], {
+                        model: fallbackModelName || modelName,
+                        fallbackModel: modelName,
+                        prompt: finalPrompt,
+                        glossarySnippet,
+                        imageBase64: item.b64,
+                        schema: {
+                            type: 'OBJECT',
+                            properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
+                            required: ['results']
+                        }
+                    });
+                    if (singleResult && Array.isArray(singleResult.results) && singleResult.results.length > 0) {
+                        allPageResults[item.originalIdx] = singleResult;
+                        log.info('Background', `[批次自癒] 第 ${item.originalIdx + 1} 頁自癒補翻成功 (${singleResult.results.length} 條對白)`);
+                    }
+                } catch (healErr) {
+                    log.warn('Background', `[批次自癒] 第 ${item.originalIdx + 1} 頁自癒嘗試失敗: ${healErr.message}`);
+                }
+            }));
+        }
+
         // 回傳本批結果給 UI
         for (let j = 0; j < currentBatch.length; j++) {
             const imgData = currentBatch[j];
