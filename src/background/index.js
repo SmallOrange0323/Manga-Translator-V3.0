@@ -1770,19 +1770,20 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
         }
 
-        // ── 智慧單頁補翻自癒機制 (Auto-Healing) ──
-        // 若批次翻譯中有任何圖片結果為空（results.length === 0 或 error），自動在背景單張精準補翻！
+        // ── 智慧微批次自癒補翻機制 (Mini-Batch Healing - 永遠最多僅耗費 1 次 Request) ──
         const missingItems = validItems.filter(item => {
             const res = allPageResults[item.originalIdx];
             return !res || res.error || !Array.isArray(res.results) || res.results.length === 0;
         });
 
         if (missingItems.length > 0 && !await state.get('isStopping')) {
-            log.warn('Background', `[批次自癒] 偵測到 ${missingItems.length} 張圖片未產出結果，自動在背景啟動單圖精準自癒補翻...`);
-            broadcastStatus(`⏳ 自動為 ${missingItems.length} 張頁面補翻...`, 'info');
+            log.warn('Background', `[批次自癒] 偵測到 ${missingItems.length} 張圖片未產出結果，自動打包為 1 個微批次進行精準補翻...`);
+            broadcastStatus(`⏳ 打包補翻 ${missingItems.length} 張頁面 (僅 1 次 Request)...`, 'info');
             
-            await Promise.all(missingItems.map(async (item) => {
-                try {
+            try {
+                if (missingItems.length === 1) {
+                    // 單張直接精翻 (消耗 1 次 Request)
+                    const item = missingItems[0];
                     const singleResult = await translateTexts([], {
                         model: fallbackModelName || modelName,
                         fallbackModel: modelName,
@@ -1797,12 +1798,26 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     });
                     if (singleResult && Array.isArray(singleResult.results) && singleResult.results.length > 0) {
                         allPageResults[item.originalIdx] = singleResult;
-                        log.info('Background', `[批次自癒] 第 ${item.originalIdx + 1} 頁自癒補翻成功 (${singleResult.results.length} 條對白)`);
+                        log.info('Background', `[批次自癒] 第 ${item.originalIdx + 1} 頁自癒補翻成功！`);
                     }
-                } catch (healErr) {
-                    log.warn('Background', `[批次自癒] 第 ${item.originalIdx + 1} 頁自癒嘗試失敗: ${healErr.message}`);
+                } else {
+                    // 多張遺漏：再次打包為 1 個微批次送出 (依然僅消耗 1 次 Request！)
+                    const healResults = await callGeminiAPIBatch(
+                        missingItems.map(v => v.b64),
+                        finalPrompt,
+                        glossarySnippet
+                    );
+                    missingItems.forEach((item, k) => {
+                        const hr = healResults[k];
+                        if (hr && Array.isArray(hr.results) && hr.results.length > 0) {
+                            allPageResults[item.originalIdx] = hr;
+                            log.info('Background', `[批次自癒] 第 ${item.originalIdx + 1} 頁微批次補翻成功！`);
+                        }
+                    });
                 }
-            }));
+            } catch (healErr) {
+                log.warn('Background', `[批次自癒] 微批次補翻嘗試失敗: ${healErr.message}`);
+            }
         }
 
         // 回傳本批結果給 UI
