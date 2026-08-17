@@ -1,6 +1,6 @@
 {
   "name": "manga-translator-v3",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Manga Translator V3.0 - Modernized with Vite & MV3",
   "type": "module",
   "scripts": {
