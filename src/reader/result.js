@@ -713,42 +713,21 @@ function getOrCreateBatchSection(batchIndex) {
         section = document.createElement('div');
         section.className = 'mt-batch-section';
         section.dataset.batch = batchIndex;
-        section.style.cssText = `
-            margin-bottom: 28px;
-            border: 2px solid #8d80f1;
-            border-radius: 16px;
-            background: #ffffff;
-            padding: 20px;
-            box-shadow: 0 4px 16px rgba(141, 128, 241, 0.08);
-        `;
         
         const header = document.createElement('div');
         header.className = 'mt-batch-header';
-        header.style.cssText = `
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding-bottom: 12px;
-            margin-bottom: 16px;
-            border-bottom: 2px dashed #e2e0ed;
-        `;
         
         header.innerHTML = `
-            <div style="font-weight: 900; color: #6a5ad3; font-size: 16px; display: flex; align-items: center; gap: 8px;">
+            <div class="mt-batch-title">
                 <span>📦 批次 #${batchIndex + 1}</span>
             </div>
-            <button class="btn-export accent btn-retranslate-single-batch" data-batch="${batchIndex}" style="padding: 6px 16px; font-size: 13px; cursor: pointer; border-radius: 8px;">
+            <button class="btn-export accent btn-retranslate-single-batch" data-batch="${batchIndex}">
                 ⚡ 重翻第 ${batchIndex + 1} 批次
             </button>
         `;
         
         const grid = document.createElement('div');
         grid.className = 'mt-batch-grid';
-        grid.style.cssText = `
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        `;
         
         section.appendChild(header);
         section.appendChild(grid);

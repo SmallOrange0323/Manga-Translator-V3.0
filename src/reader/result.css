@@ -185,12 +185,46 @@ body {
 /* ─── Results ─── */
 
 .results-container {
-    max-width: 1550px;
-    margin: 0 auto;
-    padding: 32px 40px 100px;
+    max-width: 1200px;
+    margin: 32px auto 80px;
+    padding: 0 24px;
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 28px;
+}
+
+/* ─── PC 端批次分組容器樣式 ─── */
+.mt-batch-section {
+    margin-bottom: 28px;
+    border: 2px solid #8d80f1;
+    border-radius: 16px;
+    background: #ffffff;
+    padding: 20px;
+    box-shadow: 0 4px 16px rgba(141, 128, 241, 0.08);
+}
+
+.mt-batch-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+    border-bottom: 2px dashed #e2e0ed;
+}
+
+.mt-batch-title {
+    font-weight: 900;
+    color: #6a5ad3;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mt-batch-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
 }
 
 /* ─── Card ─── */
@@ -1180,12 +1214,15 @@ body.mt-mobile-mode {
     .results-container::-webkit-scrollbar { display: none; }
 
     /* ── 行動版批次分組解鎖：透過 display: contents 消除外層包裹，讓每張卡片直接作為 Snap 容器子項平鋪，恢復單頁滑動 ── */
+    .mt-batch-section,
     .batch-section {
         display: contents !important;
     }
+    .mt-batch-header,
     .batch-header {
         display: none !important; /* 行動版隱藏批次大標頭，避免卡出一頁空白 */
     }
+    .mt-batch-grid,
     .batch-grid {
         display: contents !important;
     }
