@@ -1877,14 +1877,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile);
   }
 
-  // 1. 智慧標題辨識
+  // 1. 智慧標題辨識 (靜默綁定當前分頁作品詞庫)
   const pageTitle = tab.title || '';
   const titleResult = extractMangaTitle(pageTitle);
   if (titleResult) {
     const navCtx = await state.get('navigationContext', {});
     navCtx[tabId] = titleResult.romanKey;
     await state.set('navigationContext', navCtx);
-    log.info('Background', `偵測到作品標題: ${titleResult.displayName} (Key: ${titleResult.romanKey})`);
     
     // 通知 UI 標題已識別 (供 UI 顯示當前作品)
     chrome.runtime.sendMessage({
@@ -1907,8 +1906,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   } catch (e) {
       log.error('Background', `無法解析當前跳轉網址的 origin: ${currentUrl}`, e);
   }
-
-  log.info('Background', `小說續傳判定 - 分頁: ${tabId}, 允許網域: ${allowedOrigin}, 當前網域: ${currentOrigin}`);
 
   // 跨網域安全保護：只要允許的網域與當前網域不一致（包含舊有殘留的 true 值），自動停用並清除狀態
   if (allowedOrigin !== currentOrigin) {
