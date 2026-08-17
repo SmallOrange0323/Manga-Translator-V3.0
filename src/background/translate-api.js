@@ -438,6 +438,8 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
             userParts.push({ text: `[IMAGE_INDEX=${idx} IS EMPTY OR CORRUPTED, PLEASE OUTPUT {"pageIndex": ${idx}, "results": []}]` });
         }
     });
+    // 強制單次 Request 輸出總量對齊約束
+    userParts.push({ text: `\n=== VERIFICATION REQUIREMENT: Total ${n} images provided (Index 0 to ${n - 1}). Your output JSON "pages" array MUST have EXACTLY ${n} objects for each image in sequential order. Do NOT skip any page. ===\n` });
 
     const body = {
         system_instruction: {
