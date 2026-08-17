@@ -17,6 +17,10 @@ const lastNovelUrlByTab = {};
 // 【雙階段模式】單話任務短期記憶體暫存區 (Session Context)，任務結束後自動釋放，絕不污染長期詞庫
 const sessionStoryContext = {};
 
+// 追蹤當前正在進行漫畫翻譯任務的分頁 (分頁 ID ➔ 任務詳情)
+const activeTranslationJobs = new Map();
+
+
 
 log.info('Background', '漫譯 V3 背景服務程式已啟動');
 
@@ -506,6 +510,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
       });
       sendResponse({ status: 'ok' });
+      return false;
+  }
+
+  // 查詢特定分頁是否正在進行漫畫翻譯長任務
+  if (message.action === 'CHECK_TAB_TRANSLATION_STATUS') {
+      const tabId = message.payload?.tabId;
+      const isTranslating = tabId ? activeTranslationJobs.has(tabId) : false;
+      const jobInfo = tabId ? activeTranslationJobs.get(tabId) : null;
+      sendResponse({ isTranslating, jobInfo });
+      return false;
+  }
+
+  // 側邊欄或前台主動停止漫畫翻譯任務
+  if (message.action === 'STOP_TRANSLATION') {
+      const tabId = message.payload?.tabId || sender.tab?.id;
+      state.set('isStopping', true);
+      if (tabId) {
+          const job = activeTranslationJobs.get(tabId);
+          if (job) {
+              activeTranslationJobs.delete(job.sourceTabId);
+              activeTranslationJobs.delete(job.resultTabId);
+          }
+          activeTranslationJobs.delete(tabId);
+      } else {
+          activeTranslationJobs.clear();
+      }
+      chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
+      sendResponse({ success: true });
       return false;
   }
 
@@ -1191,6 +1223,9 @@ async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, na
  * 階段 2：組合 sessionContextSnippet，呼叫 Vision 精翻輸出
  */
 async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
+    if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'two-step' });
+    if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'two-step' });
+
     const broadcastStatus = (msg, type = 'info') => {
         if (!sourceTabId) return;
         chrome.tabs.sendMessage(sourceTabId, {
@@ -1358,6 +1393,9 @@ ${termsSnippet}
 
 // PC 模式的專屬翻譯處理器 (並行版本 - 使用 Semaphore 控制並發數)
 async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '') {
+    if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
+    if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
+
     // 輔助函式：廣播狀態給行動端來源分頁的日誌面板
     const broadcastStatus = (msg, type = 'info') => {
         if (!sourceTabId) return;
@@ -1810,6 +1848,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         if (!currentMangaKey) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：currentMangaKey 為空，作品標題可能無法被辨識。`);
         if (allBatchResults.length === 0) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：allBatchResults 為空，翻譯結果可能格式錯誤。`);
     }
+
+    if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+    if (resultTabId) activeTranslationJobs.delete(resultTabId);
 
     chrome.tabs.sendMessage(resultTabId, { action: 'batchComplete' }).catch(() => {});
     broadcastStatus(`✅ 全部 ${images.length} 張翻譯完成！請查看結果頁。`, 'success');

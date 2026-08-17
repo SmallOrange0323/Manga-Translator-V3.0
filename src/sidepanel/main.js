@@ -888,9 +888,72 @@ if (novelRetryAllBtn) {
     };
 }
 
+// =====================================================
+// 💡 分頁切換與即時狀態感知器 (Tab Switch Aware Sync)
+// 徹底解決：切換到其他漫畫分頁時，按鈕卡在「正在翻譯/停止」的 Bug
+// =====================================================
+async function syncCurrentTabState() {
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) return;
+
+        // 若當前切換到擴充功能自身內部頁面（例如 result.html 或 options.html），不強制洗掉側邊欄狀態
+        if (tab.url && tab.url.startsWith('chrome-extension://')) {
+            return;
+        }
+
+        // 1. 刷新該漫畫作品詞庫
+        refreshGlossaryStatus();
+
+        // 2. 查詢當前分頁是否正在進行翻譯長任務
+        chrome.runtime.sendMessage({
+            action: 'CHECK_TAB_TRANSLATION_STATUS',
+            payload: { tabId: tab.id }
+        }, (response) => {
+            if (chrome.runtime.lastError) return;
+            const isTranslating = response?.isTranslating || false;
+            const stopBtn = document.getElementById('mt-stop-btn');
+            const startBtn = document.getElementById('mt-start-btn');
+            const pauseBtn = document.getElementById('mt-pause-btn');
+
+            if (isTranslating) {
+                // 當前分頁正在翻譯中：顯示停止按鈕與跑步卡片
+                if (stopBtn) stopBtn.style.display = 'flex';
+                if (startBtn) startBtn.style.display = 'none';
+                if (pauseBtn) pauseBtn.style.display = 'flex';
+                showTranslatingCard(response.jobInfo?.imgCount || 0);
+            } else {
+                // 當前分頁沒有正在進行的翻譯任務：恢復「開始翻譯」按鈕
+                if (stopBtn) stopBtn.style.display = 'none';
+                if (startBtn) startBtn.style.display = 'flex';
+                if (pauseBtn) {
+                    pauseBtn.style.display = 'none';
+                    pauseBtn.textContent = '⏸️ 暫停';
+                    pauseBtn.classList.remove('is-paused');
+                }
+                hideTranslatingCard();
+            }
+        });
+    } catch (e) {
+        console.warn('[Sidepanel] syncCurrentTabState error:', e);
+    }
+}
+
+// 監聽瀏覽器分頁切換
+chrome.tabs.onActivated.addListener(() => {
+    syncCurrentTabState();
+});
+
+// 監聽分頁 URL 變更完成 (例如同一分頁內點擊跳轉到另一本漫畫)
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete' && tab.active) {
+        syncCurrentTabState();
+    }
+});
+
 // 初始化載入
 updateQuotaUI();
-refreshGlossaryStatus();
+syncCurrentTabState();
 
 // 綁定串聯流式閱讀按鈕點擊事件
 const streamBtn = document.getElementById('mt-stream-read-btn');
