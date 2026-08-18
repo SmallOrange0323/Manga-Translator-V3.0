@@ -2146,9 +2146,24 @@ async function ensureContentScriptInjected(tabId) {
         log.info('Background', `[PrepareTab] 分頁 ${tabId} 已具備環境`);
         return true;
     } catch {
-        // 2. Ping 失敗，誠實地返回 false（這將觸發 UI 的 F5 重整提示，對使用者最為透明且安全）
-        log.warn('Background', `[PrepareTab] 分頁 ${tabId} 連線已失效或為孤兒腳本，提示使用者重新整理網頁`);
-        return false;
+        // 2. Ping 失敗 (通常因擴充套件重新載入導致舊分頁變成孤兒腳本)，自動嘗試動態重注入
+        try {
+            log.info('Background', `[PrepareTab] 檢測到分頁 ${tabId} 斷線，正在自動動態注入 Content Script...`);
+            const manifest = chrome.runtime.getManifest();
+            const contentScripts = manifest.content_scripts?.[0]?.js || ['src/content/main.js'];
+            await chrome.scripting.executeScript({
+                target: { tabId },
+                files: contentScripts
+            });
+            await new Promise(r => setTimeout(r, 400));
+            // 再次驗證連線
+            await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+            log.info('Background', `[PrepareTab] 分頁 ${tabId} 自動注入成功並已恢復通訊！`);
+            return true;
+        } catch (injectErr) {
+            log.warn('Background', `[PrepareTab] 分頁 ${tabId} 自動注入失敗 (${injectErr.message})，提示使用者手動重新整理`);
+            return false;
+        }
     }
 }
 
