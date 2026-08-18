@@ -6,11 +6,18 @@ let currentTheme = 'umamusume';
 let sourceTabId = null;
 let activeMangaKey = null;
 
-// 譯文文字淨化工具：徹底清理 \n 與多餘換行，保證句子流暢連貫
+// 譯文文字淨化工具：徹底清理 \n 與多餘換行，若整句被外層對話引號包裹則成對剝離，保留句內引號
 export function sanitizeTranslationText(text) {
     if (!text) return '';
     let clean = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
     clean = clean.replace(/([，。！？；：])\s+/g, '$1');
+    // 只有當整句話是成對被外層引號包裹時才剝離，句中專有名詞引號（如「戰鬥方式」）100% 完整保留
+    if ((clean.startsWith('「') && clean.endsWith('」')) ||
+        (clean.startsWith('『') && clean.endsWith('』')) ||
+        (clean.startsWith('"') && clean.endsWith('"')) ||
+        (clean.startsWith("'") && clean.endsWith("'"))) {
+        clean = clean.slice(1, -1).trim();
+    }
     return clean;
 }
 
@@ -35,8 +42,43 @@ function getRandomAnimPath() {
     };
 }
 
+// ─── 字體大小縮放即時控制系統 ───
+let currentFontScale = 100; // 70% ~ 160%
+
+function applyFontScale(scale) {
+    currentFontScale = Math.max(70, Math.min(160, scale));
+    const zhSize = (17.5 * (currentFontScale / 100)).toFixed(1);
+    const jaSize = (13 * (currentFontScale / 100)).toFixed(1);
+    document.documentElement.style.setProperty('--zh-font-size', `${zhSize}px`);
+    document.documentElement.style.setProperty('--ja-font-size', `${jaSize}px`);
+    const indicator = document.getElementById('font-size-indicator');
+    if (indicator) indicator.textContent = `${currentFontScale}%`;
+    chrome.storage.local.set({ mt_font_scale: currentFontScale });
+}
+
+function initFontSizeControl() {
+    chrome.storage.local.get(['mt_font_scale'], (res) => {
+        if (res && res.mt_font_scale) {
+            applyFontScale(res.mt_font_scale);
+        } else {
+            applyFontScale(100);
+        }
+    });
+
+    const decBtn = document.getElementById('font-decrease-btn');
+    const incBtn = document.getElementById('font-increase-btn');
+    if (decBtn) {
+        decBtn.onclick = () => applyFontScale(currentFontScale - 10);
+    }
+    if (incBtn) {
+        incBtn.onclick = () => applyFontScale(currentFontScale + 10);
+    }
+}
+
 // Initial load: Pull navigation links from background
 document.addEventListener('DOMContentLoaded', () => {
+    initFontSizeControl();
+
     // 加載主題
     chrome.storage.local.get(['mt_theme'], (result) => {
         applyTheme(result.mt_theme || 'umamusume');
@@ -46,28 +88,40 @@ document.addEventListener('DOMContentLoaded', () => {
         if (mainAnim) mainAnim.src = chrome.runtime.getURL(LOADING_GIF_FILENAME);
     });
 
-    chrome.runtime.sendMessage({ action: "getResultMetadata" }, (response) => {
+    // 主動傳入 sourceTabId 查詢元數據與導航資訊
+    chrome.runtime.sendMessage({ action: "getResultMetadata", tabId: sourceTabId }, (response) => {
         if (response) {
-            if (response.navLinks) updateNavUI(response.navLinks);
             if (response.mangaKey) activeMangaKey = response.mangaKey;
             
             if (response.displayName) {
                 const titleEl = document.getElementById('manga-title-display');
-                if (titleEl) titleEl.textContent = '- ' + response.displayName;
+                if (titleEl) {
+                    titleEl.textContent = response.displayName;
+                    titleEl.title = response.displayName;
+                }
             }
 
-            // [新增] 查詢並顯示語彙庫詳細狀態
+            if (response.navLinks) {
+                updateNavUI(response.navLinks);
+            } else {
+                updateNavUI({});
+            }
+
+            // 查詢並顯示語彙庫詳細狀態
             if (activeMangaKey) {
                 chrome.runtime.sendMessage({ action: "getGlossaryDetail", mangaKey: activeMangaKey }, (glossaryResp) => {
                     if (glossaryResp && glossaryResp.entry) {
                         const badge = document.getElementById('glossary-info-badge');
                         if (badge) {
-                            badge.textContent = `已套用語彙庫: ${glossaryResp.entry.displayName} (${glossaryResp.entry.terms?.length || 0} 詞)`;
+                            badge.textContent = `冊 語彙庫 ${glossaryResp.entry.terms?.length || 0} 詞`;
+                            badge.style.display = 'inline-flex';
                             badge.classList.add('show');
                         }
                     }
                 });
             }
+        } else {
+            updateNavUI({});
         }
     });
 
@@ -542,20 +596,30 @@ function sendNavigateMessageWithRetry(payload, btn, label) {
 }
 
 function updateNavUI(navLinks) {
-    const { prev, next } = navLinks;
+    const { prev, next, currentChapter, chapterList } = navLinks || {};
+    const navBar = document.getElementById('chapter-nav-bar');
+    const prevBtn = document.getElementById('nav-prev-chapter-btn');
+    const nextBtn = document.getElementById('nav-next-chapter-btn');
+    const currentText = document.getElementById('current-chapter-text');
+    const chapterMenu = document.getElementById('chapter-dropdown-menu');
     const footer = document.getElementById('nav-footer');
-    const prevBtn = document.getElementById('prev-btn');
-    const nextBtn = document.getElementById('next-btn');
+    const footerPrevBtn = document.getElementById('prev-btn');
+    const footerNextBtn = document.getElementById('next-btn');
+
     const safePrev = isSafeUrl(prev) ? prev : null;
     const safeNext = isSafeUrl(next) ? next : null;
 
-    if (safePrev || safeNext) {
-        if (footer) footer.style.display = 'flex';
+    // 頂部導航欄永遠顯示，提供沉浸追漫體驗
+    if (navBar) navBar.style.display = 'inline-flex';
+    if (footer) footer.style.display = 'flex';
 
-        if (safePrev && prevBtn) {
+    // 頂部中央：上一話
+    if (prevBtn) {
+        if (safePrev) {
             prevBtn.style.display = 'inline-flex';
+            prevBtn.style.opacity = '1';
+            prevBtn.disabled = false;
             prevBtn.onclick = () => {
-                if (nextBtn) nextBtn.disabled = true;
                 sendNavigateMessageWithRetry({
                     url: safePrev,
                     tabId: sourceTabId,
@@ -564,14 +628,59 @@ function updateNavUI(navLinks) {
                 }, prevBtn, '上一話');
             };
             prevBtn.title = safePrev;
-        } else if (prevBtn) {
-            prevBtn.style.display = 'none';
+        } else {
+            prevBtn.style.opacity = '0.4';
+            prevBtn.disabled = true;
         }
+    }
 
-        if (safeNext && nextBtn) {
+    // 頂部中央：目前話數與章節下拉選單 (智慧提取 fallback，確保永不為空)
+    let displayChapter = currentChapter;
+    if (!displayChapter) {
+        const titleText = document.getElementById('manga-title-display')?.textContent || '';
+        const titleMatch = titleText.match(/Chapter\s*([\d\.]+)/i) || titleText.match(/第\s*([\d\.]+)\s*話/i) || titleText.match(/(\d+[\.\d]*)/);
+        if (titleMatch && titleMatch[1]) {
+            displayChapter = `Chapter ${titleMatch[1]}`;
+        } else {
+            const urlMatch = location.href.match(/chapter[_-]?([\d\.]+)/i);
+            displayChapter = urlMatch && urlMatch[1] ? `Chapter ${urlMatch[1]}` : '章節選單';
+        }
+    }
+    if (currentText) {
+        currentText.textContent = displayChapter;
+    }
+
+    if (chapterMenu && Array.isArray(chapterList) && chapterList.length > 0) {
+        chapterMenu.innerHTML = '';
+        chapterList.forEach(ch => {
+            const item = document.createElement('button');
+            item.className = 'dropdown-item';
+            item.textContent = ch.title || ch.url;
+            if (ch.current || (displayChapter && ch.title && ch.title.includes(displayChapter))) {
+                item.style.fontWeight = 'bold';
+                item.style.color = 'var(--accent-vermilion)';
+                item.textContent = `✓ ${ch.title || ch.url}`;
+            }
+            item.onclick = () => {
+                chapterMenu.style.display = 'none';
+                sendNavigateMessageWithRetry({
+                    url: ch.url,
+                    tabId: sourceTabId,
+                    mangaKey: activeMangaKey,
+                    mobile: urlParams.get('mobile') === '1'
+                }, item, ch.title || '選定章節');
+            };
+            chapterMenu.appendChild(item);
+        });
+    }
+
+    // 頂部中央：下一話
+    if (nextBtn) {
+        if (safeNext) {
             nextBtn.style.display = 'inline-flex';
+            nextBtn.style.opacity = '1';
+            nextBtn.disabled = false;
             nextBtn.onclick = () => {
-                if (prevBtn) prevBtn.disabled = true;
                 sendNavigateMessageWithRetry({
                     url: safeNext,
                     tabId: sourceTabId,
@@ -580,11 +689,20 @@ function updateNavUI(navLinks) {
                 }, nextBtn, '下一話');
             };
             nextBtn.title = safeNext;
-        } else if (nextBtn) {
-            nextBtn.style.display = 'none';
+        } else {
+            nextBtn.style.opacity = '0.4';
+            nextBtn.disabled = true;
         }
-    } else {
-        if (footer) footer.style.display = 'none';
+    }
+
+    // 底部導航相容
+    if (safePrev && footerPrevBtn) {
+        footerPrevBtn.style.display = 'inline-flex';
+        footerPrevBtn.onclick = () => prevBtn && prevBtn.click();
+    }
+    if (safeNext && footerNextBtn) {
+        footerNextBtn.style.display = 'inline-flex';
+        footerNextBtn.onclick = () => nextBtn && nextBtn.click();
     }
 }
 
@@ -684,7 +802,7 @@ function updateBatchDropdownMenu() {
     });
 }
 
-// 頂部下拉選單按鈕開關
+// 頂部下拉選單按鈕開關 (批次選單、章節選單、更多選單)
 document.addEventListener('DOMContentLoaded', () => {
     const dropBtn = document.getElementById('retranslate-batch-dropdown-btn');
     const menu = document.getElementById('batch-dropdown-menu');
@@ -692,18 +810,39 @@ document.addEventListener('DOMContentLoaded', () => {
         dropBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const isVisible = menu.style.display === 'block';
+            document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
             if (!isVisible) {
                 updateBatchDropdownMenu();
                 menu.style.display = 'block';
-            } else {
-                menu.style.display = 'none';
             }
         });
+    }
 
-        document.addEventListener('click', () => {
-            if (menu) menu.style.display = 'none';
+    const chapterBtn = document.getElementById('chapter-dropdown-btn');
+    const chapterMenu = document.getElementById('chapter-dropdown-menu');
+    if (chapterBtn && chapterMenu) {
+        chapterBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isVisible = chapterMenu.style.display === 'block';
+            document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+            if (!isVisible) chapterMenu.style.display = 'block';
         });
     }
+
+    const moreBtn = document.getElementById('more-actions-btn');
+    const moreMenu = document.getElementById('more-actions-menu');
+    if (moreBtn && moreMenu) {
+        moreBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isVisible = moreMenu.style.display === 'block';
+            document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+            if (!isVisible) moreMenu.style.display = 'block';
+        });
+    }
+
+    document.addEventListener('click', () => {
+        document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+    });
 });
 
 function getOrCreateBatchSection(batchIndex) {
@@ -1011,9 +1150,42 @@ function buildCard(item, index) {
     const dialoguesContainer = document.createElement('div');
     dialoguesContainer.className = 'dialogues-container';
     const results = item.results || [{ original: item.original, translation: item.translation }];
+
+    // 比照 Preview：在右側頂部加入精緻工具列 (🔄 重翻此頁) + 下方虛線分割
+    const toolbarTop = document.createElement('div');
+    toolbarTop.className = 'card-toolbar-top';
+    toolbarTop.innerHTML = `
+        <button class="btn-washi btn-retrans-top" style="padding: 2px 8px; font-size: 11px;" title="重新呼叫 API 翻譯本頁">🔄 重翻此頁</button>
+    `;
+
+    // 綁定「🔄 重翻此頁」事件
+    toolbarTop.querySelector('.btn-retrans-top').onclick = () => {
+        const btn = toolbarTop.querySelector('.btn-retrans-top');
+        const origText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="mt-loader" style="width:10px; height:10px; border-width:1.5px;"></span> 翻譯中...';
+        
+        chrome.runtime.sendMessage({ 
+            action: "retranslateImage", 
+            url: item.retryUrl || item.image,
+            tabId: sourceTabId,
+            mangaKey: activeMangaKey 
+        }, (response) => {
+            btn.disabled = false;
+            btn.innerHTML = origText;
+            if (response && response.results) {
+                item.results = response.results;
+                item.usedModelName = response.usedModelName;
+                renderDialogueItems(dialoguesContainer, item.results, item);
+            } else {
+                alert("重翻此頁失敗: " + (response?.error || '未知錯誤'));
+            }
+        });
+    };
+
+    textWrapper.appendChild(toolbarTop);
     renderDialogueItems(dialoguesContainer, results, item);
     textWrapper.appendChild(dialoguesContainer);
-    textWrapper.appendChild(createSuccessActionGroup(item, dialoguesContainer));
     card.appendChild(textWrapper);
     return card;
 }
@@ -1024,9 +1196,7 @@ function renderDialogueItems(container, results, item) {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'dialogue-item';
         itemDiv.draggable = true;
-        const dragHandle = document.createElement('div');
-        dragHandle.className = 'mt-drag-handle';
-        dragHandle.innerHTML = `<svg width="12" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>`;
+
         const contentDiv = document.createElement('div');
         contentDiv.className = 'dialogue-content';
         const transText = document.createElement('div');
@@ -1048,7 +1218,6 @@ function renderDialogueItems(container, results, item) {
                     const nextOrig = allOrigs[currentIdx + 1];
                     nextOrig.focus();
                     
-                    // 選取該對話框所有文字，方便使用者打字替換
                     const range = document.createRange();
                     range.selectNodeContents(nextOrig);
                     const selection = window.getSelection();
@@ -1070,7 +1239,6 @@ function renderDialogueItems(container, results, item) {
             <button class="dialogue-icon-btn retranslate-item" title="重新翻譯 (文字重譯)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
             <button class="dialogue-icon-btn copy-orig" title="複製原文"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
         `;
-        itemDiv.appendChild(dragHandle);
         itemDiv.appendChild(contentDiv);
         itemDiv.appendChild(btnGroup);
         container.appendChild(itemDiv);

@@ -84,12 +84,7 @@ export const log = {
     },
 
     state(key, action, newVal) {
-        const ts = getTimestamp();
-        const msg = `狀態更新: [${key}] ${action}`;
-        if (IS_SW) {
-            console.log(`[${ts}] 💾 [儲存] ${msg}`, newVal);
-        } else {
-            console.log(`%c[${ts}] 💾 [儲存] %c${msg}`, STYLES.state, 'color: inherit;', newVal);
-        }
+        // 徹底隱藏狀態機更新日誌，保持 Console 100% 乾淨純淨
+        return;
     }
 };

@@ -1,13 +1,53 @@
 /**
- * 偵測網頁中的「下一話」與「上一話」導航連結
- * 對齊 v1.8.7 的完整邏輯：包含 disabled 過濾、URL 標準化、aria-label 支援
+ * 偵測網頁中的「下一話」、「上一話」導航連結，以及當前話數與完整章節選單
  */
 export function detectNavigationLinks() {
-    const nav = { prev: null, next: null };
+    const nav = { prev: null, next: null, currentChapter: '', chapterList: [] };
     const links = document.querySelectorAll('a');
 
     // 取得當前頁面 URL 並標準化 (移除 hash 與末端斜線)
     const currentUrl = window.location.href.split('#')[0].replace(/\/$/, '');
+
+    // 1. 嘗試從 <select> 下拉選單中獲取章節列表與當前選中項 (常見於 Rawkuma, MangaDex, Madara 等漫畫網站)
+    const chapterSelects = document.querySelectorAll('select#chapter, select#select-chapter, select.chapter-select, select[name="chapter"]');
+    chapterSelects.forEach(select => {
+        if (select && select.options && select.options.length > 0) {
+            const list = [];
+            for (let i = 0; i < select.options.length; i++) {
+                const opt = select.options[i];
+                const optUrl = opt.value && (opt.value.startsWith('http') || opt.value.startsWith('/')) ? opt.value : '';
+                const isSelected = opt.selected || opt.hasAttribute('selected') || (optUrl && currentUrl.includes(optUrl));
+                const title = opt.text.trim();
+                if (isSelected && !nav.currentChapter) {
+                    nav.currentChapter = title;
+                }
+                if (optUrl) {
+                    list.push({
+                        title: title,
+                        url: optUrl.startsWith('http') ? optUrl : new URL(optUrl, window.location.href).href,
+                        current: isSelected
+                    });
+                }
+            }
+            if (list.length > 0 && nav.chapterList.length === 0) {
+                nav.chapterList = list;
+            }
+        }
+    });
+
+    // 2. 若尚未識別出當前話數，嘗試從 URL 或頁面標題（H1, Title）提取 (如 chapter-15.4、第15話)
+    if (!nav.currentChapter) {
+        const urlMatch = currentUrl.match(/chapter[_-]?([\d\.]+)/i) || currentUrl.match(/(\d+[\.\d]*)\/?$/);
+        if (urlMatch && urlMatch[1]) {
+            nav.currentChapter = `Chapter ${urlMatch[1]}`;
+        } else {
+            const titleText = document.title || '';
+            const titleMatch = titleText.match(/Chapter\s*([\d\.]+)/i) || titleText.match(/第\s*([\d\.]+)\s*話/i);
+            if (titleMatch && titleMatch[1]) {
+                nav.currentChapter = `Chapter ${titleMatch[1]}`;
+            }
+        }
+    }
 
     const nextRegex = /(下一|次|next|forward|後|→|≫|»|>)/i;
     const prevRegex = /(上一|前|prev|back|return|先|←|≪|«|<)/i;
@@ -27,7 +67,7 @@ export function detectNavigationLinks() {
             a.classList.contains('disabled') ||
             a.classList.contains('is-disabled')) return;
 
-        // 1. 優先檢查 rel 屬性 (HTML 標準)
+        // 優先檢查 rel 屬性 (HTML 標準)
         const rel = (a.getAttribute('rel') || '').toLowerCase();
         if (!nav.next && (rel === 'next' || rel.includes('next'))) {
             nav.next = href;
@@ -36,7 +76,7 @@ export function detectNavigationLinks() {
             nav.prev = href;
         }
 
-        // 2. 關鍵字匹配（text + title + aria-label，長度限制 30 字避免誤抓長文）
+        // 關鍵字匹配（text + title + aria-label）
         const text = (a.innerText || a.title || a.getAttribute('aria-label') || '').trim();
         if (!text || text.length > 30) return;
 

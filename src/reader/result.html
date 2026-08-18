@@ -4,45 +4,76 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>漫譯 — 批次翻譯結果</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;600;700;900&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="result.css">
 </head>
 <body>
-    <div class="page-grain"></div>
+    <div class="paper-texture"></div>
 
     <header class="result-header">
+        <!-- 左側：朱印標誌 + 作品標題 + 語彙庫徽章 -->
         <div class="header-left">
-            <svg class="header-logo" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>
-                <path d="M8 7h6M8 11h8"/>
-            </svg>
-            <div>
-                <h1>批次翻譯結果 <span id="manga-title-display" style="font-size:16px; color:#666; margin-left:8px; font-weight:normal; vertical-align: middle;"></span> <span id="glossary-info-badge" class="glossary-badge"></span></h1>
-                <p class="header-sub">漫譯 Manga Translator</p>
+            <div class="seal-stamp">譯</div>
+            <div class="title-group">
+                <h1 id="manga-title-display" class="manga-title" title="批次翻譯結果">批次翻譯結果</h1>
+                <span id="glossary-info-badge" class="glossary-seal" style="display:none;"></span>
             </div>
         </div>
-        <div class="actions">
-            <button id="retranslate-all-btn" class="btn-export secondary" title="重新翻譯整本漫畫的所有頁面">
-                🔄 重新翻譯全漫畫
+
+        <!-- 正中央：上一話 / 當前話數下拉 / 下一話 導航列 -->
+        <div id="chapter-nav-bar" class="chapter-nav-bar">
+            <button id="nav-prev-chapter-btn" class="nav-btn">
+                <span>‹</span> 上一話
             </button>
-            <div class="batch-dropdown-wrapper" style="position: relative; display: inline-block;">
-                <button id="retranslate-batch-dropdown-btn" class="btn-export secondary" title="選取特定的批次進行獨立重新翻譯">
-                    ⚡ 重翻指定批次 ▾
+            
+            <div class="dropdown" style="position:relative;">
+                <button id="chapter-dropdown-btn" class="nav-btn chapter-select-btn">
+                    <span id="current-chapter-text">章節選單</span> ▾
                 </button>
-                <div id="batch-dropdown-menu" class="batch-dropdown-menu" style="display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; background: #ffffff; border: 2px solid #8d80f1; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); z-index: 20000; min-width: 200px; padding: 6px 0;">
+                <div id="chapter-dropdown-menu" class="dropdown-menu" style="display:none; min-width:200px; left:50%; transform:translateX(-50%);">
                 </div>
             </div>
-            <button id="export-html-btn" class="btn-export secondary">
-                儲存 HTML
+
+            <button id="nav-next-chapter-btn" class="nav-btn">
+                下一話 <span>›</span>
             </button>
-            <button id="export-pdf-btn" class="btn-export accent">
-                儲存為 PDF
+        </div>
+
+        <!-- 右側操作按鈕群組 -->
+        <div class="actions">
+            <!-- 字體大小即時調節器 -->
+            <div class="font-size-stepper" title="調整對白字體大小">
+                <button id="font-decrease-btn" class="btn-washi btn-stepper" title="縮小字體">A⁻</button>
+                <span id="font-size-indicator" class="font-size-text">100%</span>
+                <button id="font-increase-btn" class="btn-washi btn-stepper" title="放大字體">A⁺</button>
+            </div>
+
+            <button id="retranslate-all-btn" class="btn-washi btn-vermilion" title="重新翻譯整本漫畫的所有頁面">
+                <span>🔄</span> 重新翻譯全漫畫
             </button>
-            <button id="export-txt-btn" class="btn-export">
-                匯出 TXT
-            </button>
-            <button id="toggle-mode-btn" class="btn-export secondary">
-                切換模式
-            </button>
+
+            <div class="dropdown" style="position:relative;">
+                <button id="retranslate-batch-dropdown-btn" class="btn-washi" title="選取特定的批次進行獨立重新翻譯">
+                    <span>📦</span> 批次選單 ▾
+                </button>
+                <div id="batch-dropdown-menu" class="dropdown-menu" style="display:none;">
+                </div>
+            </div>
+
+            <div class="dropdown" style="position:relative;">
+                <button id="more-actions-btn" class="btn-washi btn-icon" title="更多功能">
+                    <span>⋯</span>
+                </button>
+                <div id="more-actions-menu" class="dropdown-menu" style="display:none;">
+                    <button id="export-html-btn" class="dropdown-item">🌐 儲存單檔 HTML</button>
+                    <button id="export-pdf-btn" class="dropdown-item">📄 儲存為 PDF 書冊</button>
+                    <button id="export-txt-btn" class="dropdown-item">📝 匯出純文字劇本</button>
+                    <div style="height:1px; background:var(--border-paper); margin:4px 0;"></div>
+                    <button id="toggle-mode-btn" class="dropdown-item">📱 切換閱讀器模式</button>
+                </div>
+            </div>
         </div>
     </header>
 

@@ -391,6 +391,23 @@ export function crawlImages() {
             if (dataSrc) break;
         }
 
+        // srcset 與 data-srcset 解析：提取最大寬度的超高清圖片
+        const srcSet = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+        if (srcSet) {
+            try {
+                const candidates = srcSet.split(',').map(item => {
+                    const parts = item.trim().split(/\s+/);
+                    const itemUrl = parts[0];
+                    const sizeStr = parts[1] || '0w';
+                    const size = parseInt(sizeStr.replace(/[^\d]/g, '')) || 0;
+                    return { url: itemUrl, size };
+                }).sort((a, b) => b.size - a.size);
+                if (candidates.length > 0 && candidates[0].url) {
+                    dataSrc = candidates[0].url;
+                }
+            } catch(e) {}
+        }
+
         // CSS background-image 提取
         if (!dataSrc && !url && img.style && img.style.backgroundImage) {
             const bgMatch = img.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);

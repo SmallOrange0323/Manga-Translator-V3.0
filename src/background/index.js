@@ -609,12 +609,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
 
   if (message.action === 'getResultMetadata') {
-      const sourceTabId = parseInt(new URL(sender.tab?.url || 'about:blank').searchParams.get('tabId'));
+      const sourceTabId = message.tabId || parseInt(new URL(sender.tab?.url || 'about:blank').searchParams.get('tabId'));
       (async () => {
           const navCtx = await state.get('navigationContext', {});
           const navStore = await state.get('navLinksStore', {});
-          const mangaKey = navCtx[sourceTabId] || null;
-          const navLinks = navStore[sourceTabId] || { prev: null, next: null };
+          const mangaKey = (!isNaN(sourceTabId) && navCtx[sourceTabId]) ? navCtx[sourceTabId] : null;
+          let navLinks = (!isNaN(sourceTabId) && navStore[sourceTabId]) ? { ...navStore[sourceTabId] } : { prev: null, next: null, currentChapter: '', chapterList: [] };
+          
+          // 若 currentChapter 尚未填寫，主動從宿主分頁的 URL 與 Title 精準提取
+          if (!isNaN(sourceTabId)) {
+              try {
+                  const srcTab = await chrome.tabs.get(sourceTabId);
+                  const srcUrl = srcTab?.url || '';
+                  const srcTitle = srcTab?.title || '';
+                  if (!navLinks.currentChapter) {
+                      const urlMatch = srcUrl.match(/chapter[_-]?([\d\.]+)/i) || srcUrl.match(/(\d+[\.\d]*)\/?$/);
+                      if (urlMatch && urlMatch[1]) {
+                          navLinks.currentChapter = `Chapter ${urlMatch[1]}`;
+                      } else {
+                          const titleMatch = srcTitle.match(/Chapter\s*([\d\.]+)/i) || srcTitle.match(/第\s*([\d\.]+)\s*話/i);
+                          if (titleMatch && titleMatch[1]) {
+                              navLinks.currentChapter = `Chapter ${titleMatch[1]}`;
+                          }
+                      }
+                  }
+              } catch(e) {}
+          }
+
           let displayName = null;
           if (mangaKey) {
               try {
@@ -1939,8 +1960,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 // 3. 垃圾回收：當分頁關閉時，清除該分頁的小說模式狀態與相關 context
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  log.info('Background', `偵測到分頁關閉 (tabId=${tabId})，執行垃圾回收...`);
-  
   // 1. 清除小說模式狀態
   await state.update('novelModeTabs', (current = {}) => {
     const next = { ...current };
@@ -1954,7 +1973,41 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     delete next[tabId];
     return next;
   });
+
+  // 3. 清除 navLinksStore 狀態
+  await state.update('navLinksStore', (current = {}) => {
+    const next = { ...current };
+    delete next[tabId];
+    return next;
+  });
 });
+
+// 主動垃圾回收：啟動時及定時清除已關閉分頁的歷史殘留 (幽靈分頁清理)
+async function cleanupGhostTabs() {
+    try {
+        const openTabs = await chrome.tabs.query({});
+        const activeTabIds = new Set(openTabs.map(t => String(t.id)));
+        
+        await state.update('navigationContext', (current = {}) => {
+            const cleaned = {};
+            for (const [tId, val] of Object.entries(current)) {
+                if (activeTabIds.has(String(tId))) cleaned[tId] = val;
+            }
+            return cleaned;
+        });
+
+        await state.update('navLinksStore', (current = {}) => {
+            const cleaned = {};
+            for (const [tId, val] of Object.entries(current)) {
+                if (activeTabIds.has(String(tId))) cleaned[tId] = val;
+            }
+            return cleaned;
+        });
+    } catch(e) {}
+}
+
+cleanupGhostTabs();
+setInterval(cleanupGhostTabs, 60000); // 每分鐘定期清理一次
 
 /**
  * 【缺口F移植】帶重試的訊息傳送工具 (移植自 V1.8.6 sendMessageWithRetry)
