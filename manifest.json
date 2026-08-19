@@ -59,9 +59,18 @@
     }
   ],
   "action": {
-    "default_title": "漫譯 V3.0"
+    "default_title": "漫譯 V3.1",
+    "default_icon": {
+      "16": "icon128.png",
+      "32": "icon128.png",
+      "48": "icon128.png",
+      "128": "icon128.png"
+    }
   },
   "icons": {
+    "16": "icon128.png",
+    "32": "icon128.png",
+    "48": "icon128.png",
     "128": "icon128.png"
   }
 }
