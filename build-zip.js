@@ -56,10 +56,10 @@ async function run() {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'));
     const version = pkg.version || '3.0.1';
 
-    // 1. 打包完整版
+    // 1. 打包完整版 (包含全部主題立繪與動畫)
     await packageZip(`Manga_Translator_V${version}_Store_Package.zip`);
 
-    // 2. 打包精選 1.5MB 輕量版 (過濾多餘立繪與跑步動畫，適配 Edge 商店)
+    // 2. 打包精選輕量版 (精選熱門立繪與跑步動畫，體積約 2.7MB)
     await packageZip(`Manga_Translator_V${version}_Store_Package_Light.zip`, (relPath) => {
         // 跑步素材精選 01, 02, 03, 06, 07, 08, 09, 30
         if (relPath.startsWith('assets/running/')) {
@@ -78,7 +78,15 @@ async function run() {
         return true;
     });
 
-    console.log('🎉 所有 ZIP 商店包已成功寫入專案根目錄！');
+    // 3. 打包極致純淨超輕量版 (過濾所有非必要大型立繪，僅保留核心翻譯與基本 UI，體積 < 600KB)
+    await packageZip(`Manga_Translator_V${version}_Store_Package_UltraLight.zip`, (relPath) => {
+        if (relPath.startsWith('assets/standing/') || relPath.startsWith('assets/standing_priconne/') || relPath.startsWith('assets/running/')) {
+            return false;
+        }
+        return true;
+    });
+
+    console.log('🎉 所有 ZIP 商店包 (完整版 / 精選輕量版 / 極致超輕量版) 已成功寫入專案根目錄！');
 }
 
 run().catch(err => {
