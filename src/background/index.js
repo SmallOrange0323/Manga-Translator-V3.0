@@ -1643,29 +1643,57 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         : [validItems])
                     : null;
 
-                try {
-                    if (batchSize > 1) {
-                        if (i > 0 && requestDelay > 0) {
-                            await new Promise(r => setTimeout(r, requestDelay));
-                        }
+                let batchSuccess = false;
 
-                        if (subBatches.length > 1) {
-                            log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
-                        }
+                if (batchSize > 1) {
+                    if (i > 0 && requestDelay > 0) {
+                        await new Promise(r => setTimeout(r, requestDelay));
+                    }
 
-                        for (const subBatch of subBatches) {
-                            const subResults = await callGeminiAPIBatch(
-                                subBatch.map(v => v.b64),
-                                finalPrompt,
-                                glossarySnippet
-                            );
-                            subBatch.forEach((item, k) => {
-                                allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
-                            });
+                    if (subBatches.length > 1) {
+                        log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
+                    }
+
+                    // ── 多 Key 批次輪流重試：優先換 Key 繼續批次翻譯 ──
+                    const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
+
+                    for (let ki = 0; ki < candidateKeys.length; ki++) {
+                        const targetKey = candidateKeys[ki];
+                        const keyAlias = state.getApiKeyAlias(targetKey);
+
+                        try {
+                            if (ki > 0) {
+                                log.info('Background', `[批次] 正在嘗試切換至 Key ${ki + 1} (${keyAlias}) 進行批次重試...`);
+                                broadcastStatus(`⏳ 切換至 Key ${ki + 1} 批次重試...`, 'info');
+                            }
+
+                            for (const subBatch of subBatches) {
+                                const subResults = await callGeminiAPIBatch(
+                                    subBatch.map(v => v.b64),
+                                    finalPrompt,
+                                    glossarySnippet,
+                                    targetKey
+                                );
+                                subBatch.forEach((item, k) => {
+                                    allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
+                                });
+                            }
+
+                            batchSuccess = true;
+                            if (ki > 0) {
+                                log.info('Background', `[批次] Key ${ki + 1} (${keyAlias}) 批次翻譯成功！`);
+                                broadcastStatus(`✅ Key ${ki + 1} 批次重試成功`, 'ok');
+                            }
+                            break; // 本批次成功，跳出 Key 輪流重試
+                        } catch (batchKeyErr) {
+                            log.warn('Background', `[批次] Key ${ki + 1} (${keyAlias}) 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key...`);
                         }
-                    } else {
-                        const item = validItems[0];
-                        if (item) {
+                    }
+                } else {
+                    // 逐張路徑 (batchSize=1)
+                    const item = validItems[0];
+                    if (item) {
+                        try {
                             const result = await translateTexts([], {
                                 model: modelName,
                                 fallbackModel: fallbackModelName,
@@ -1679,11 +1707,17 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                 }
                             });
                             allPageResults[item.originalIdx] = result;
+                            batchSuccess = true;
+                        } catch (singleErr) {
+                            log.warn('Background', `[逐張] 翻譯失敗: ${singleErr.message}`);
                         }
                     }
-                } catch (batchErr) {
-                    log.warn('Background', `[批次] API 呼叫失敗 (${batchErr.message})，自動降級逐張重試...`);
-                    broadcastStatus(`⚠️ 批次請求受阻 (${batchErr.message.slice(0, 30)})，正在嘗試逐張重試...`, 'warn');
+                }
+
+                // ── 若所有 Key 的批次請求均宣告失敗，才啟動最後防線：逐張降級重試 ──
+                if (!batchSuccess) {
+                    log.warn('Background', `[批次] 所有 API Key 批次翻譯均失敗，啟動備援逐張重試...`);
+                    broadcastStatus(`⚠️ 所有 Key 批次失敗，正在啟動逐張重試...`, 'warn');
 
                     const fallbackResults = Array(validItems.length).fill(null);
                     await Promise.all(validItems.map(async (item, k) => {

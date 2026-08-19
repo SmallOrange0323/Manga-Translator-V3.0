@@ -485,8 +485,8 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
     };
 
 
-    // 超時時間動態計算：基準 60 秒 + 每張 20 秒，上限 300 秒
-    const timeoutMs = Math.min(60 + n * 20, 300) * 1000;
+    // 超時時間動態計算：基準 25 秒 + 每張 3 秒，上限 60 秒 (超時果斷切換下一個 Key)
+    const timeoutMs = Math.min(25 + n * 3, 60) * 1000;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
