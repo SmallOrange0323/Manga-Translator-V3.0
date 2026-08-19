@@ -360,6 +360,14 @@ function setupGlossaryModal() {
     const oriInput = document.getElementById('mt-glossary-ori');
     const transInput = document.getElementById('mt-glossary-trans');
     const backdrop = modal.querySelector('.mt-modal-backdrop');
+    const badge = document.getElementById('glossary-info-badge');
+
+    // 綁定頂部語彙庫徽章點擊開啟彈窗
+    if (badge) {
+        badge.onclick = () => {
+            showGlossaryModal('', '');
+        };
+    }
 
     const closeModal = () => {
         modal.classList.remove('show');
@@ -392,7 +400,6 @@ function setupGlossaryModal() {
         saveBtn.disabled = true;
         saveBtn.textContent = '儲存中...';
 
-        // 先取得 displayName，用於新作品首次建立詞庫時命名正確
         let displayName = '';
         try {
             const detailResp = await new Promise(resolve =>
@@ -408,16 +415,121 @@ function setupGlossaryModal() {
             ori: ori,
             trans: trans
         }, (response) => {
+            saveBtn.disabled = false;
+            saveBtn.textContent = '儲存條目';
+
             if (response && response.success) {
-                // 成功後，Badge 會透過監聽訊息自動更新
-                closeModal();
+                // 清空輸入框並即時刷新彈窗清單與頂部 Badge
+                oriInput.value = '';
+                transInput.value = '';
+                loadGlossaryTermsIntoModal();
+                if (badge && response.count !== undefined) {
+                    badge.textContent = `冊 語彙庫 ${response.count} 詞`;
+                    badge.style.display = 'inline-flex';
+                    badge.classList.add('show');
+                }
             } else {
                 alert('儲存失敗: ' + (response?.error || '未知錯誤'));
-                saveBtn.disabled = false;
-                saveBtn.textContent = '儲存條目';
             }
         });
     };
+}
+
+// 載入當前作品的全部收錄詞彙至彈窗清單中
+function loadGlossaryTermsIntoModal() {
+    const listEl = document.getElementById('mt-glossary-terms-list');
+    const countEl = document.getElementById('mt-glossary-terms-count');
+    const badge = document.getElementById('glossary-info-badge');
+    const oriInput = document.getElementById('mt-glossary-ori');
+    const transInput = document.getElementById('mt-glossary-trans');
+
+    if (!listEl || !activeMangaKey) {
+        if (listEl) listEl.innerHTML = '<div class="mt-glossary-empty-hint">尚未辨識到作品或無詞彙</div>';
+        return;
+    }
+
+    chrome.runtime.sendMessage({ action: "getGlossaryDetail", mangaKey: activeMangaKey }, (res) => {
+        const terms = res?.entry?.terms || [];
+        if (countEl) countEl.textContent = `${terms.length} 詞`;
+        if (badge) {
+            badge.textContent = `冊 語彙庫 ${terms.length} 詞`;
+            badge.style.display = 'inline-flex';
+            badge.classList.add('show');
+        }
+
+        if (terms.length === 0) {
+            listEl.innerHTML = '<div class="mt-glossary-empty-hint">尚未收錄專屬術語，可於上方手動新增</div>';
+            return;
+        }
+
+        listEl.innerHTML = '';
+        terms.forEach((item) => {
+            const row = document.createElement('div');
+            row.className = 'mt-glossary-term-item';
+
+            const info = document.createElement('div');
+            info.className = 'mt-term-info';
+
+            const oriSpan = document.createElement('span');
+            oriSpan.className = 'mt-term-ori';
+            oriSpan.textContent = item.ori;
+            oriSpan.title = item.ori;
+
+            const arrowSpan = document.createElement('span');
+            arrowSpan.className = 'mt-term-arrow';
+            arrowSpan.textContent = '➔';
+
+            const transSpan = document.createElement('span');
+            transSpan.className = 'mt-term-trans';
+            transSpan.textContent = item.trans;
+            transSpan.title = item.trans;
+
+            info.appendChild(oriSpan);
+            info.appendChild(arrowSpan);
+            info.appendChild(transSpan);
+
+            const actions = document.createElement('div');
+            actions.className = 'mt-term-actions';
+
+            // 編輯按鈕：直接帶入上方表單，一鍵覆蓋
+            const editBtn = document.createElement('button');
+            editBtn.className = 'mt-term-btn mt-term-btn-edit';
+            editBtn.textContent = '編輯';
+            editBtn.onclick = () => {
+                if (oriInput) oriInput.value = item.ori;
+                if (transInput) {
+                    transInput.value = item.trans;
+                    transInput.focus();
+                }
+            };
+
+            // 刪除按鈕
+            const delBtn = document.createElement('button');
+            delBtn.className = 'mt-term-btn mt-term-btn-del';
+            delBtn.textContent = '刪除';
+            delBtn.onclick = () => {
+                if (!confirm(`確定要從語彙庫中刪除「${item.ori} ➔ ${item.trans}」嗎？`)) return;
+                chrome.runtime.sendMessage({
+                    action: 'deleteGlossaryTerm',
+                    mangaKey: activeMangaKey,
+                    ori: item.ori
+                }, (delRes) => {
+                    if (delRes && delRes.success) {
+                        loadGlossaryTermsIntoModal();
+                    } else {
+                        alert('刪除失敗: ' + (delRes?.error || '未知錯誤'));
+                    }
+                });
+            };
+
+            actions.appendChild(editBtn);
+            actions.appendChild(delBtn);
+
+            row.appendChild(info);
+            row.appendChild(actions);
+            listEl.appendChild(row);
+        });
+    });
 }
 
 function showGlossaryModal(ori, trans) {
@@ -430,8 +542,15 @@ function showGlossaryModal(ori, trans) {
     oriInput.value = ori || '';
     transInput.value = trans || '';
 
+    // 即時加載當前作品詞彙清單
+    loadGlossaryTermsIntoModal();
+
     modal.classList.add('show');
-    transInput.focus();
+    if (trans) {
+        transInput.focus();
+    } else {
+        oriInput.focus();
+    }
 }
 
 async function saveAsHTML() {

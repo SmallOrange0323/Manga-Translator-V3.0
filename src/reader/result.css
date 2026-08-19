@@ -1191,42 +1191,194 @@ body.theme-priconne .skeleton-anim {
 }
 
 .mt-btn-secondary {
-    padding: 10px 20px;
-    background: transparent;
-    border: 2px solid #eee;
-    border-radius: 12px;
-    font-size: 14px;
-    font-weight: 700;
-    color: #666;
+    padding: 9px 18px;
+    background: #f5f3ef;
+    border: 1px solid var(--border-paper);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-sumi);
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all 0.15s ease;
 }
 
 .mt-btn-secondary:hover {
-    background: #f1f3f5;
-    border-color: #ddd;
+    background: #ebe6dc;
+    border-color: #d1c8b8;
 }
 
 .mt-btn-accent {
-    padding: 10px 24px;
-    background: var(--theme-accent-gradient);
-    border: none;
-    border-radius: 12px;
-    font-size: 14px;
+    padding: 9px 20px;
+    background: var(--accent-vermilion);
+    border: 1px solid #9e322a;
+    border-radius: 8px;
+    font-size: 13px;
     font-weight: 700;
-    color: #ffffff;
+    color: #ffffff !important;
     cursor: pointer;
-    box-shadow: 0 4px 12px rgba(106, 90, 211, 0.2);
-    transition: all 0.2s;
+    box-shadow: 0 2px 6px rgba(184, 59, 50, 0.25);
+    transition: all 0.15s ease;
 }
 
 .mt-btn-accent:hover {
+    background: #a3332a;
     transform: translateY(-1px);
-    box-shadow: 0 6px 16px rgba(106, 90, 211, 0.3);
+    box-shadow: 0 4px 10px rgba(184, 59, 50, 0.35);
 }
 
 .mt-btn-accent:active {
     transform: translateY(0);
+}
+
+.mt-btn-accent:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* 語彙庫徽章可點擊樣式 */
+.glossary-seal {
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.glossary-seal:hover {
+    background: #d8e5dc;
+    border-color: var(--accent-pine);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(35, 165, 102, 0.2);
+}
+
+/* 語彙庫彈窗內部清單樣式 */
+.mt-glossary-terms-section {
+    margin-top: 14px;
+    border-top: 1px solid var(--border-paper);
+    padding-top: 12px;
+}
+
+.mt-glossary-terms-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.mt-glossary-terms-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-sumi);
+}
+
+.mt-glossary-terms-count {
+    font-size: 11px;
+    color: #888;
+    background: #eee;
+    padding: 1px 6px;
+    border-radius: 10px;
+}
+
+.mt-glossary-terms-list {
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid var(--border-paper);
+    border-radius: 8px;
+    background: #faf8f5;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.mt-glossary-term-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #ffffff;
+    border-bottom: 1px solid #f0ece1;
+    font-size: 13px;
+    transition: background 0.15s;
+}
+
+.mt-glossary-term-item:last-child {
+    border-bottom: none;
+}
+
+.mt-glossary-term-item:hover {
+    background: #f7f4ee;
+}
+
+.mt-term-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+}
+
+.mt-term-ori {
+    font-family: var(--font-sans);
+    color: #666;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+}
+
+.mt-term-arrow {
+    color: #aaa;
+    font-size: 11px;
+    flex-shrink: 0;
+}
+
+.mt-term-trans {
+    font-family: var(--font-serif);
+    font-weight: 700;
+    color: var(--text-sumi);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+}
+
+.mt-term-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.mt-term-btn {
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.mt-term-btn-edit {
+    background: #eef3ef;
+    color: var(--accent-pine);
+    border-color: #d8e5dc;
+}
+.mt-term-btn-edit:hover {
+    background: #d8e5dc;
+}
+
+.mt-term-btn-del {
+    background: #fdf2f2;
+    color: var(--accent-vermilion);
+    border-color: #fbd5d5;
+}
+.mt-term-btn-del:hover {
+    background: #fbd5d5;
+}
+
+.mt-glossary-empty-hint {
+    padding: 24px;
+    text-align: center;
+    color: #999;
+    font-size: 12px;
 }
 
 

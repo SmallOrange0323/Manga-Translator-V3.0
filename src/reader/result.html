@@ -121,22 +121,33 @@
         <div class="mt-modal-backdrop"></div>
         <div class="mt-modal-content">
             <div class="mt-modal-header">
-                <h3>📖 新增至語彙庫</h3>
+                <h3 id="mt-glossary-modal-title">📖 作品專屬語彙庫</h3>
                 <button class="mt-modal-close">&times;</button>
             </div>
             <div class="mt-modal-body">
                 <div class="mt-input-group">
                     <label>原文 (日文)</label>
-                    <input type="text" id="mt-glossary-ori" placeholder="例如：ラインフェルト">
+                    <input type="text" id="mt-glossary-ori" placeholder="例如：ゼイク">
                 </div>
                 <div class="mt-input-group">
                     <label>譯文 (中文)</label>
-                    <input type="text" id="mt-glossary-trans" placeholder="例如：萊茵費爾特">
+                    <input type="text" id="mt-glossary-trans" placeholder="例如：傑伊克">
                 </div>
-                <p class="mt-modal-hint">儲存後，未來的翻譯將會優先套用此譯名。</p>
+                <p class="mt-modal-hint">💡 提示：若原文已存在，儲存時將自動覆蓋更新為您自訂的譯名。</p>
+
+                <!-- 已收錄詞彙清單管理區 -->
+                <div class="mt-glossary-terms-section">
+                    <div class="mt-glossary-terms-header">
+                        <span class="mt-glossary-terms-title">📚 當前作品收錄詞彙</span>
+                        <span id="mt-glossary-terms-count" class="mt-glossary-terms-count">0 詞</span>
+                    </div>
+                    <div id="mt-glossary-terms-list" class="mt-glossary-terms-list">
+                        <!-- 動態插入已收錄的詞彙項目 -->
+                    </div>
+                </div>
             </div>
             <div class="mt-modal-footer">
-                <button id="mt-glossary-cancel" class="mt-btn-secondary">取消</button>
+                <button id="mt-glossary-cancel" class="mt-btn-secondary">關閉</button>
                 <button id="mt-glossary-save" class="mt-btn-accent">儲存條目</button>
             </div>
         </div>

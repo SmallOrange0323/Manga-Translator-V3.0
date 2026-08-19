@@ -706,13 +706,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
           try {
               const existing = await loadGlossary(mangaKey) || { displayName: displayName || mangaKey, terms: [] };
-              if (existing.terms.some(t => t.ori === ori)) {
-                  sendResponse({ success: false, error: '該原文已存在' });
-                  return;
+              const cleanOri = ori.trim();
+              const cleanTrans = trans.trim();
+              
+              const existingIndex = existing.terms.findIndex(t => t.ori === cleanOri);
+              if (existingIndex >= 0) {
+                  // 原文已存在，使用者手動覆蓋更新譯名
+                  existing.terms[existingIndex].trans = cleanTrans;
+                  existing.terms[existingIndex].source = 'user';
+                  existing.terms[existingIndex].updatedAt = Date.now();
+                  log.info('Glossary', `[詞彙更新] 作品 "${mangaKey}" 覆蓋詞彙: ${cleanOri} ➔ ${cleanTrans}`);
+              } else {
+                  // 新增詞彙
+                  existing.terms.push({ ori: cleanOri, trans: cleanTrans, source: 'user', createdAt: Date.now() });
+                  log.info('Glossary', `[詞彙新增] 作品 "${mangaKey}" 新增詞彙: ${cleanOri} ➔ ${cleanTrans}`);
               }
-              existing.terms.push({ ori: ori.trim(), trans: trans.trim(), source: 'user', createdAt: Date.now() });
               await saveGlossary(mangaKey, existing);
-              sendResponse({ success: true });
+              sendResponse({ success: true, count: existing.terms.length });
           } catch(e) {
               sendResponse({ success: false, error: e.message });
           }
