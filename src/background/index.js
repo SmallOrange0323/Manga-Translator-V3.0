@@ -42,6 +42,37 @@ async function isTabIncognito(tabId) {
     }
 }
 
+// ─── Service Worker 任務保活心跳管理器 (防止 MV3 長時間非同步處理時被 Chrome 誤殺) ───
+class ServiceWorkerKeepAlive {
+    constructor() {
+        this.timer = null;
+        this.activeJobs = 0;
+    }
+
+    start() {
+        this.activeJobs++;
+        if (this.timer) return;
+        // 每 15 秒輕量呼叫一次 Chrome Extension API 續命，保持 Service Worker 活躍
+        this.timer = setInterval(async () => {
+            try {
+                await chrome.runtime.getPlatformInfo();
+            } catch (_) {}
+        }, 15000);
+        log.info('Background', '🛡️ [KeepAlive] Service Worker 保活心跳已啟動');
+    }
+
+    stop() {
+        this.activeJobs = Math.max(0, this.activeJobs - 1);
+        if (this.activeJobs === 0 && this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
+            log.info('Background', '🛡️ [KeepAlive] Service Worker 保活心跳已停止');
+        }
+    }
+}
+
+const swKeepAlive = new ServiceWorkerKeepAlive();
+
 // 當 Service Worker 啟動或重啟時，初次化狀態
 state.init().then(async () => {
     log.info('Background', `狀態載入完成 (無痕模式: ${isIncognitoProcess})，檢查待處理任務...`);
@@ -1518,184 +1549,146 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         }, 500);
     }
 
-    // 4. 讀取批次大小與圖片大小設定
-    const isGemmaMode = modelName.toLowerCase().includes('gemma');
-    const ocrBatchSizeSetting = await state.get('ocrBatchSize', 5);
-    const batchSize = isGemmaMode ? 1 : (parseInt(ocrBatchSizeSetting) || 1);
-    const requestDelay = await state.get('requestDelay', 4000);
-    const maxDim = await state.get('imageMaxDimension', 1024);
-    
-    if (!state.isInitialized) await state.init();
+    swKeepAlive.start();
+    try {
+        // 4. 讀取批次大小與圖片大小設定
+        const isGemmaMode = modelName.toLowerCase().includes('gemma');
+        const ocrBatchSizeSetting = await state.get('ocrBatchSize', 5);
+        const batchSize = isGemmaMode ? 1 : (parseInt(ocrBatchSizeSetting) || 1);
+        const requestDelay = await state.get('requestDelay', 4000);
+        const maxDim = await state.get('imageMaxDimension', 1024);
+        
+        if (!state.isInitialized) await state.init();
 
-    await state.set('isBatchPaused', false);
+        await state.set('isBatchPaused', false);
 
-    log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (雙緩衝預載加速中)`);
+        log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (雙緩衝預載加速中)`);
 
-    let completedCount = 0;
-    let allBatchResults = [];
+        let completedCount = 0;
+        let allBatchResults = [];
 
-    // ── 5. 雙緩衝管線 (Double-Buffered Pipeline) 啟動：提前非同步預載第 1 批 ──
-    let nextBatchPromise = (images.length > 0)
-        ? fetchAndResizeBatch(images.slice(0, batchSize), maxDim, sourceTabId)
-        : Promise.resolve([]);
+        // ── 5. 雙緩衝管線 (Double-Buffered Pipeline) 啟動：提前非同步預載第 1 批 ──
+        let nextBatchPromise = (images.length > 0)
+            ? fetchAndResizeBatch(images.slice(0, batchSize), maxDim, sourceTabId)
+            : Promise.resolve([]);
 
-    // 主迴圈：依 batchSize 切塊，流水線無縫處理
-    for (let i = 0; i < images.length; i += batchSize) {
-        // Kill-Switch 檢查
-        if (resultTabId && typeof resultTabId === 'number') {
-            try {
-                const tab = await chrome.tabs.get(resultTabId);
-                if (!tab) {
-                    log.info('Background', `結果分頁 ${resultTabId} 不存在，中止任務。`);
-                    break;
-                }
-            } catch (tabErr) {
-                if (tabErr.message && tabErr.message.includes('No tab with id')) {
-                    log.info('Background', `結果分頁 ${resultTabId} 已關閉，中止任務。`);
-                    break;
+        // 主迴圈：依 batchSize 切塊，流水線無縫處理
+        for (let i = 0; i < images.length; i += batchSize) {
+            // Kill-Switch 檢查
+            if (resultTabId && typeof resultTabId === 'number') {
+                try {
+                    const tab = await chrome.tabs.get(resultTabId);
+                    if (!tab) {
+                        log.info('Background', `結果分頁 ${resultTabId} 不存在，中止任務。`);
+                        break;
+                    }
+                } catch (tabErr) {
+                    if (tabErr.message && tabErr.message.includes('No tab with id')) {
+                        log.info('Background', `結果分頁 ${resultTabId} 已關閉，中止任務。`);
+                        break;
+                    }
                 }
             }
-        }
 
-        const currentBatch = images.slice(i, i + batchSize);
-        const totalBatches = Math.ceil(images.length / batchSize);
-        const currentBatchIndex = Math.floor(i / batchSize) + 1;
+            const currentBatch = images.slice(i, i + batchSize);
+            const totalBatches = Math.ceil(images.length / batchSize);
+            const currentBatchIndex = Math.floor(i / batchSize) + 1;
 
-        if (await state.get('isStopping')) {
-            log.warn('Background', '漫畫翻譯任務已被強制停止');
-            break;
-        }
+            if (await state.get('isStopping')) {
+                log.warn('Background', '漫畫翻譯任務已被強制停止');
+                break;
+            }
 
-        // 暫停檢查
-        while (await state.get('isBatchPaused', false)) {
-            await new Promise(r => setTimeout(r, 500));
-            if (await state.get('isStopping')) break;
-        }
+            // 暫停檢查
+            while (await state.get('isBatchPaused', false)) {
+                await new Promise(r => setTimeout(r, 500));
+                if (await state.get('isStopping')) break;
+            }
 
-        const progressText = batchSize > 1
-            ? `第 ${currentBatchIndex} / ${totalBatches} 批 (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
-            : `${i + 1} / ${images.length}`;
-        
-        chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
-        broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
+            const progressText = batchSize > 1
+                ? `第 ${currentBatchIndex} / ${totalBatches} 批 (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
+                : `${i + 1} / ${images.length}`;
+            
+            chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
+            broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
 
-        // 1. 等待本批次圖片下載與壓縮完成
-        const base64Results = await nextBatchPromise;
+            // 1. 等待本批次圖片下載與壓縮完成
+            const base64Results = await nextBatchPromise;
 
-        // 2. 雙緩衝管線核心：若有下一批圖片，立即在發送本批 API 之前非同步啟動下一批預載預壓！
-        const nextStart = i + batchSize;
-        if (nextStart < images.length) {
-            const nextBatchImages = images.slice(nextStart, nextStart + batchSize);
-            nextBatchPromise = fetchAndResizeBatch(nextBatchImages, maxDim, sourceTabId);
-        } else {
-            nextBatchPromise = Promise.resolve([]);
-        }
+            // 2. 雙緩衝管線核心：若有下一批圖片，立即在發送本批 API 之前非同步啟動下一批預載預壓！
+            const nextStart = i + batchSize;
+            if (nextStart < images.length) {
+                const nextBatchImages = images.slice(nextStart, nextStart + batchSize);
+                nextBatchPromise = fetchAndResizeBatch(nextBatchImages, maxDim, sourceTabId);
+            } else {
+                nextBatchPromise = Promise.resolve([]);
+            }
 
-        // 分離有效/無效圖片
-        const validItems = base64Results
-            .map((b64, idx) => ({ b64, originalIdx: idx }))
-            .filter(item => typeof item.b64 === 'string' && item.b64);
+            // 分離有效/無效圖片
+            const validItems = base64Results
+                .map((b64, idx) => ({ b64, originalIdx: idx }))
+                .filter(item => typeof item.b64 === 'string' && item.b64);
 
-        const allPageResults = Array(currentBatch.length).fill(null);
-        base64Results.forEach((r, idx) => {
-            if (!r || typeof r !== 'string') allPageResults[idx] = { error: '圖片載入失敗' };
-        });
+            const allPageResults = Array(currentBatch.length).fill(null);
+            base64Results.forEach((r, idx) => {
+                if (!r || typeof r !== 'string') allPageResults[idx] = { error: '圖片載入失敗' };
+            });
 
-        if (validItems.length > 0) {
-            const PAYLOAD_LIMIT = 15_000_000;
-            const totalPayload = validItems.reduce((sum, v) => sum + v.b64.length, 0);
-            const subBatches = (batchSize > 1)
-                ? (totalPayload > PAYLOAD_LIMIT
-                    ? [validItems.slice(0, Math.ceil(validItems.length / 2)), validItems.slice(Math.ceil(validItems.length / 2))]
-                    : [validItems])
-                : null;
+            if (validItems.length > 0) {
+                const PAYLOAD_LIMIT = 15_000_000;
+                const totalPayload = validItems.reduce((sum, v) => sum + v.b64.length, 0);
+                const subBatches = (batchSize > 1)
+                    ? (totalPayload > PAYLOAD_LIMIT
+                        ? [validItems.slice(0, Math.ceil(validItems.length / 2)), validItems.slice(Math.ceil(validItems.length / 2))]
+                        : [validItems])
+                    : null;
 
-            try {
-                if (batchSize > 1) {
-                    if (i > 0 && requestDelay > 0) {
-                        await new Promise(r => setTimeout(r, requestDelay));
-                    }
+                try {
+                    if (batchSize > 1) {
+                        if (i > 0 && requestDelay > 0) {
+                            await new Promise(r => setTimeout(r, requestDelay));
+                        }
 
-                    if (subBatches.length > 1) {
-                        log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
-                    }
-
-                    for (const subBatch of subBatches) {
-                        const subResults = await callGeminiAPIBatch(
-                            subBatch.map(v => v.b64),
-                            finalPrompt,
-                            glossarySnippet
-                        );
-                        subBatch.forEach((item, k) => {
-                            allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
-                        });
-                    }
-                } else {
-                    const item = validItems[0];
-                    if (item) {
-                        const result = await translateTexts([], {
-                            model: modelName,
-                            fallbackModel: fallbackModelName,
-                            prompt: finalPrompt,
-                            glossarySnippet,
-                            imageBase64: item.b64,
-                            schema: {
-                                type: 'OBJECT',
-                                properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
-                                required: ['results']
-                            }
-                        });
-                        allPageResults[item.originalIdx] = result;
-                    }
-                }
-            } catch (batchErr) {
-                // 【改動2】多 Key 輪流嘗試主模型批次翻譯，全部失敗才切備援模型
-                log.warn('Background', `[批次] 主模型批次翻譯失敗 (Key1)，開始輪流嘗試其他 Key: ${batchErr.message}`);
-                broadcastStatus(`⚠️ 批次翻譯失敗，嘗試其他 API Key...`, 'warn');
-
-                let batchSucceeded = false;
-
-                // 輪流嘗試剩餘的 API Key（跳過第一個已失敗的 Key，從第二個開始）
-                const allKeys = [...state.apiKeys];
-                for (let ki = 1; ki < allKeys.length; ki++) {
-                    const retryKey = allKeys[ki];
-                    try {
-                        log.info('Background', `[批次] Key${ki + 1} (${state.getApiKeyAlias(retryKey)}) 嘗試批次翻譯...`);
-                        broadcastStatus(`⏳ 嘗試 Key${ki + 1} 批次翻譯...`, 'info');
+                        if (subBatches.length > 1) {
+                            log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
+                        }
 
                         for (const subBatch of subBatches) {
                             const subResults = await callGeminiAPIBatch(
                                 subBatch.map(v => v.b64),
                                 finalPrompt,
-                                glossarySnippet,
-                                retryKey  // 指定使用此 Key
+                                glossarySnippet
                             );
                             subBatch.forEach((item, k) => {
                                 allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
                             });
                         }
-                        log.info('Background', `[批次] Key${ki + 1} 批次翻譯成功！`);
-                        broadcastStatus(`✅ Key${ki + 1} 批次翻譯成功`, 'ok');
-                        batchSucceeded = true;
-                        break;
-                    } catch (retryErr) {
-                        log.warn('Background', `[批次] Key${ki + 1} 批次翻譯失敗: ${retryErr.message}`);
+                    } else {
+                        const item = validItems[0];
+                        if (item) {
+                            const result = await translateTexts([], {
+                                model: modelName,
+                                fallbackModel: fallbackModelName,
+                                prompt: finalPrompt,
+                                glossarySnippet,
+                                imageBase64: item.b64,
+                                schema: {
+                                    type: 'OBJECT',
+                                    properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
+                                    required: ['results']
+                                }
+                            });
+                            allPageResults[item.originalIdx] = result;
+                        }
                     }
-                }
+                } catch (batchErr) {
+                    log.warn('Background', `[批次] API 呼叫失敗 (${batchErr.message})，自動降級逐張重試...`);
+                    broadcastStatus(`⚠️ 批次請求受阻 (${batchErr.message.slice(0, 30)})，正在嘗試逐張重試...`, 'warn');
 
-                // 所有 Key 批次均失敗，才啟動備援模型 (Gemma) 逐張翻譯
-                if (!batchSucceeded) {
-                    log.warn('Background', `[批次] 所有 Key (${allKeys.length} 個) 批次翻譯均失敗，啟動備援模型逐張翻譯 (${fallbackModelName})`);
-                    broadcastStatus(`❌ 所有 Key 批次失敗，啟動備援模型逐張翻譯...`, 'err');
-
-                    const limiter = new KeyRateLimiter(state.apiKeys, requestDelay);
-                    const fallbackResults = new Array(validItems.length).fill(null);
-
+                    const fallbackResults = Array(validItems.length).fill(null);
                     await Promise.all(validItems.map(async (item, k) => {
-                        const apiKey = await limiter.acquireKey();
+                        const apiKey = await state.getNextApiKey();
                         try {
-                            if (await state.get('isStopping')) return;
-
                             const result = await translateTexts([], {
                                 model: fallbackModelName,
                                 apiKey: apiKey,
@@ -1722,96 +1715,98 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     });
                 }
             }
-        }
 
-        // 回傳本批結果給 UI
-        for (let j = 0; j < currentBatch.length; j++) {
-            const imgData = currentBatch[j];
-            const imgSrc = imgData.src || imgData;
-            const res = allPageResults[j];
-            completedCount++;
+            // 回傳本批結果給 UI
+            for (let j = 0; j < currentBatch.length; j++) {
+                const imgData = currentBatch[j];
+                const imgSrc = imgData.src || imgData;
+                const res = allPageResults[j];
+                completedCount++;
 
-            const currentBatchIdx = (targetBatchIndex !== null && targetBatchIndex !== undefined) 
-                ? targetBatchIndex 
-                : Math.floor(i / batchSize);
-            if (!res || res.error) {
-                broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${res?.error || '無回應'}`, 'error');
-                chrome.tabs.sendMessage(resultTabId, {
-                    action: 'appendResult',
-                    data: { 
-                        image: imgSrc, 
-                        error: res?.error || '翻譯失敗或無回應',
-                        batchIndex: currentBatchIdx,
-                        pageIndex: completedCount
-                    }
-                }).catch(() => {});
-            } else {
-                await incrementDailyUsage(modelName);
-                allBatchResults.push(...(res.results || []));
-                chrome.tabs.sendMessage(resultTabId, {
-                    action: 'appendResult',
-                    data: { 
-                        image: imgSrc, 
-                        results: res.results, 
-                        usedModelName: res.usedModelName || modelName,
-                        batchIndex: currentBatchIdx,
-                        pageIndex: completedCount
-                    }
-                }).catch(() => {});
-            }
-        }
-
-        // 批次間延遲
-        const finalDelay = batchSize > 1 ? requestDelay * 1.5 : requestDelay;
-        if (i + batchSize < images.length) {
-            await new Promise(r => setTimeout(r, finalDelay));
-        }
-    }
-
-    // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護) ──
-    const isIncognitoBatch = await isTabIncognito(sourceTabId);
-    const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
-
-    if (isIncognitoBatch && incognitoPrivacySetting) {
-        log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗翻譯，已自動跳過漫畫術語萃取與詞庫儲存');
-    } else if (currentMangaKey && allBatchResults.length > 0) {
-        log.info('Background', `[術語萃取] 開始分析漫畫譯文，共 ${allBatchResults.length} 組對話...`);
-        setTimeout(async () => {
-            try {
-                const newTerms = await extractTermsFromTranslation(allBatchResults, { model: modelName });
-                if (newTerms && newTerms.length > 0) {
-                    const currentEntry = await loadGlossary(currentMangaKey) || { terms: [] };
-                    const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], newTerms);
-                    if (addedCount > 0) {
-                        await saveGlossary(currentMangaKey, {
-                            displayName: currentDisplayName || currentMangaKey,
-                            terms: mergedTerms
-                        });
-                        log.info('Background', `[術語萃取] 作品 "${currentMangaKey}" 新增 ${addedCount} 筆術語。`);
-                    } else {
-                        log.info('Background', `[術語萃取] 分析完成，無新增術語。`);
-                    }
+                const currentBatchIdx = (targetBatchIndex !== null && targetBatchIndex !== undefined) 
+                    ? targetBatchIndex 
+                    : Math.floor(i / batchSize);
+                if (!res || res.error) {
+                    broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${res?.error || '無回應'}`, 'error');
+                    chrome.tabs.sendMessage(resultTabId, {
+                        action: 'appendResult',
+                        data: { 
+                            image: imgSrc, 
+                            error: res?.error || '翻譯失敗或無回應',
+                            batchIndex: currentBatchIdx,
+                            pageIndex: completedCount
+                        }
+                    }).catch(() => {});
+                } else {
+                    await incrementDailyUsage(modelName);
+                    allBatchResults.push(...(res.results || []));
+                    chrome.tabs.sendMessage(resultTabId, {
+                        action: 'appendResult',
+                        data: { 
+                            image: imgSrc, 
+                            results: res.results, 
+                            usedModelName: res.usedModelName || modelName,
+                            batchIndex: currentBatchIdx,
+                            pageIndex: completedCount
+                        }
+                    }).catch(() => {});
                 }
-            } catch (err) {
-                log.warn('Background', `[術語萃取] 發生錯誤: ${err.message}`);
             }
-        }, 1500);
-    } else {
-        // [DEBUG] 明確說明為何跳過萃取
-        if (!currentMangaKey) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：currentMangaKey 為空，作品標題可能無法被辨識。`);
-        if (allBatchResults.length === 0) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：allBatchResults 為空，翻譯結果可能格式錯誤。`);
+
+            // 批次間延遲
+            const finalDelay = batchSize > 1 ? requestDelay * 1.5 : requestDelay;
+            if (i + batchSize < images.length) {
+                await new Promise(r => setTimeout(r, finalDelay));
+            }
+        }
+
+        // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護) ──
+        const isIncognitoBatch = await isTabIncognito(sourceTabId);
+        const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
+
+        if (isIncognitoBatch && incognitoPrivacySetting) {
+            log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗翻譯，已自動跳過漫畫術語萃取與詞庫儲存');
+        } else if (currentMangaKey && allBatchResults.length > 0) {
+            log.info('Background', `[術語萃取] 開始分析漫畫譯文，共 ${allBatchResults.length} 組對話...`);
+            setTimeout(async () => {
+                try {
+                    const newTerms = await extractTermsFromTranslation(allBatchResults, { model: modelName });
+                    if (newTerms && newTerms.length > 0) {
+                        const currentEntry = await loadGlossary(currentMangaKey) || { terms: [] };
+                        const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], newTerms);
+                        if (addedCount > 0) {
+                            await saveGlossary(currentMangaKey, {
+                                displayName: currentDisplayName || currentMangaKey,
+                                terms: mergedTerms
+                            });
+                            log.info('Background', `[術語萃取] 作品 "${currentMangaKey}" 新增 ${addedCount} 筆術語。`);
+                        } else {
+                            log.info('Background', `[術語萃取] 分析完成，無新增術語。`);
+                        }
+                    }
+                } catch (err) {
+                    log.warn('Background', `[術語萃取] 發生錯誤: ${err.message}`);
+                }
+            }, 1500);
+        } else {
+            // [DEBUG] 明確說明為何跳過萃取
+            if (!currentMangaKey) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：currentMangaKey 為空，作品標題可能無法被辨識。`);
+            if (allBatchResults.length === 0) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：allBatchResults 為空，翻譯結果可能格式錯誤。`);
+        }
+
+        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+        if (resultTabId) activeTranslationJobs.delete(resultTabId);
+
+        chrome.tabs.sendMessage(resultTabId, { action: 'batchComplete' }).catch(() => {});
+        broadcastStatus(`✅ 全部 ${images.length} 張翻譯完成！請查看結果頁。`, 'success');
+        // 廣播任務完成，讓 Sidepanel 恢復開始按鈕
+        chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
+        // 修復 Bug #矛盾2：任務完成後重置為 false，而非設為 true
+        // UI 端收到 batchComplete 後自行隱藏停止按鈕，不依賴 isStopping 旗標
+        await state.set('isStopping', false);
+    } finally {
+        swKeepAlive.stop();
     }
-
-    if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-    if (resultTabId) activeTranslationJobs.delete(resultTabId);
-
-    chrome.tabs.sendMessage(resultTabId, { action: 'batchComplete' }).catch(() => {});
-    broadcastStatus(`✅ 全部 ${images.length} 張翻譯完成！請查看結果頁。`, 'success');
-    // 廣播任務完成，讓 Sidepanel 恢復開始按鈕
-    chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
-    // 修復 Bug #矛盾2：任務完成後重置為 false，而非設為 true
-    // UI 端收到 batchComplete 後自行隱藏停止按鈕，不依賴 isStopping 旗標
-    await state.set('isStopping', false);
 }
 
 
