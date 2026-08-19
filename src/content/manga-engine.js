@@ -439,8 +439,22 @@ export function crawlImages() {
             } catch(e) {}
         }
         
-        // 判斷是否在漫畫容器內
+        // 判斷是否在漫畫主閱讀容器內
         const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector));
+
+        // 封面、側欄、標題資訊列與文章頭像容器排除 (如 Rawkuma, Mangakakalot 等頂部小封面)
+        const isInCoverOrHeaderBox = !!(img && img.closest && img.closest(
+            '.headpost, .thumb, .series-thumb, .thumb-series, .post-thumb, .infox, .bdr, .entry-header, .cover, .series-cover, .sidebar, .widget, .manga-info, .series-info, .anime-info, .series-profile'
+        ));
+
+        // 獲取畫面上的實際渲染尺寸 (防止高清大圖被 CSS 縮成小封面時仍被判定為大圖)
+        let renderedWidth = 0;
+        let renderedHeight = 0;
+        if (img && typeof img.getBoundingClientRect === 'function') {
+            const rect = img.getBoundingClientRect();
+            renderedWidth = rect.width || 0;
+            renderedHeight = rect.height || 0;
+        }
 
         // 嚴格尺寸門檻 (漫畫頁面高度普遍 >= 350px, 寬度 >= 250px)
         let isTooSmall = false;
@@ -448,8 +462,10 @@ export function crawlImages() {
             // 漫畫閱讀容器內：排除小於 250x350 的選單小圖示、讚按鈕與 Icon
             isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
         } else {
-            // 容器外：嚴格限制 (排除一般網頁圖示與廣告橫圖)
-            isTooSmall = (width > 0 && width < 500) || (height > 0 && height < 400);
+            // 容器外：嚴格限制 (排除一般網頁圖示、封面縮圖與廣告橫圖)
+            const isNaturalSmall = (width > 0 && width < 500) || (height > 0 && height < 400);
+            const isRenderedSmall = (renderedWidth > 0 && renderedWidth < 300) || (renderedHeight > 0 && renderedHeight < 350);
+            isTooSmall = isNaturalSmall || isRenderedSmall || isInCoverOrHeaderBox;
         }
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
@@ -472,20 +488,29 @@ export function crawlImages() {
         // 父容器特徵排除
         const isInReactionBox = img && img.closest && img.closest('.reactions, .wp-reactions, .post-ratings, .comment-reactions, .emotion-box, .votes, .social-share, .footer-widgets');
 
-        if (!isTooSmall && !isUnloadedJunk && !isJunkUrl && !isSquareReactionIcon && !isInReactionBox && url) {
+        if (!isTooSmall && !isUnloadedJunk && !isJunkUrl && !isSquareReactionIcon && !isInReactionBox && !isInCoverOrHeaderBox && url) {
             if (!url.includes('data:image/svg+xml') && !url.includes('data:image/gif;base64,R0lGOD')) {
                 mangaImages.push({
                     element: img,
                     url: url,
+                    isInMangaContainer,
                     width, height
                 });
             }
         }
     });
 
+    // ── 智慧主閱讀區優先 (Container Domination) ──
+    // 若檢測到主閱讀容器內已有 2 張以上漫畫頁，則直接捨棄所有容器外的雜項外部圖片
+    const containerImages = mangaImages.filter(m => m.isInMangaContainer);
+    let candidatePool = mangaImages;
+    if (containerImages.length >= 2) {
+        candidatePool = containerImages;
+    }
+
     // 智慧型去重與 Canvas 還原圖優先：若存在 Canvas 解密還原圖，優先採用 Canvas 避免被打亂的原始圖檔取代
-    const canvasImages = mangaImages.filter(m => m.isCanvas);
-    let finalImages = mangaImages;
+    const canvasImages = candidatePool.filter(m => m.isCanvas);
+    let finalImages = candidatePool;
     if (canvasImages.length > 0) {
         finalImages = canvasImages;
     }
