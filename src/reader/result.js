@@ -1069,6 +1069,8 @@ function buildCard(item, index) {
     const img = document.createElement('img');
     img.setAttribute('src', item.image);
     img.setAttribute('alt', `Page ${index + 1}`);
+    img.loading = 'lazy';
+    img.decoding = 'async'; // 將圖片解碼移出 UI 主線程，避免百頁長條漫滑動掉幀
     imageWrapper.appendChild(img);
     card.appendChild(imageWrapper);
 

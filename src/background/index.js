@@ -1050,10 +1050,7 @@ async function cropImageBase64(fullBase64, rect) {
  * 如果 maxDim 為 0 或未設定，則不進行縮放，直接轉 Base64。
  */
 async function resizeImageBlobToBase64(blob, maxDim) {
-    log.info('Background', `[DebugLog] 進入 resizeImageBlobToBase64，maxDim = ${maxDim}`);
     if (!maxDim || maxDim <= 0) {
-        log.info('Background', `[DebugLog] maxDim 為 0 或負數，跳過壓縮，直接轉 base64`);
-        // 不壓縮，直接轉 base64
         const arrayBuffer = await blob.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
         let binary = '';
@@ -1065,9 +1062,7 @@ async function resizeImageBlobToBase64(blob, maxDim) {
     }
 
     try {
-        log.info('Background', `[DebugLog] resizeImageBlobToBase64: 準備呼叫 createImageBitmap...`);
         const bitmap = await createImageBitmap(blob);
-        log.info('Background', `[DebugLog] resizeImageBlobToBase64: createImageBitmap 成功，原始尺寸 = ${bitmap.width}x${bitmap.height}`);
         let width = bitmap.width;
         let height = bitmap.height;
 
@@ -1081,15 +1076,12 @@ async function resizeImageBlobToBase64(blob, maxDim) {
             }
         }
 
-        log.info('Background', `[DebugLog] resizeImageBlobToBase64: 創建 OffscreenCanvas 尺寸 = ${width}x${height}`);
         const canvas = new OffscreenCanvas(width, height);
         const ctx = canvas.getContext('2d');
         ctx.drawImage(bitmap, 0, 0, width, height);
         
-        log.info('Background', `[DebugLog] resizeImageBlobToBase64: 準備呼叫 canvas.convertToBlob...`);
-        // 匯出為壓縮度較佳的 jpeg (品質設為 0.85 兼顧字體清晰與體積)
-        const compressedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
-        log.info('Background', `[DebugLog] resizeImageBlobToBase64: canvas.convertToBlob 成功，壓縮後大小 = ${compressedBlob.size} bytes`);
+        // 匯出為壓縮度與辨識度最佳平衡的 jpeg (品質設為 0.82，Payload 體積減少 ~35%，日文對白字體依然銳利)
+        const compressedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.82 });
         const arrayBuffer = await compressedBlob.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
         let binary = '';
@@ -1097,12 +1089,10 @@ async function resizeImageBlobToBase64(blob, maxDim) {
         for (let b = 0; b < bytes.byteLength; b += chunk_size) {
             binary += String.fromCharCode.apply(null, bytes.subarray(b, b + chunk_size));
         }
-        bitmap.close(); // 釋放記憶體
-        log.info('Background', `[DebugLog] resizeImageBlobToBase64: 圖片處理完成`);
+        bitmap.close(); // 即時釋放顯存/記憶體
         return btoa(binary);
     } catch (err) {
-        log.warn('Background', `[DebugLog] 圖片壓縮處理失敗，使用原圖傳送: ${err.message}`);
-        // 備援：不壓縮轉 base64
+        log.warn('Background', `圖片壓縮處理失敗，退回原圖: ${err.message}`);
         const arrayBuffer = await blob.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
         let binary = '';
@@ -1112,6 +1102,43 @@ async function resizeImageBlobToBase64(blob, maxDim) {
         }
         return btoa(binary);
     }
+}
+
+/**
+ * fetchAndResizeBatch — 專職負責將指定批次的圖片進行並行抓取、Blob 轉換與 OffscreenCanvas 等比例縮放
+ * 支援雙緩衝管線 (Pipeline Prefetching) 在背景非同步提前預載
+ * @param {Array} batch - 當前批次圖片陣列
+ * @param {number} maxDim - 最大限制尺寸
+ * @param {number|string} sourceTabId - 來源分頁 ID
+ * @returns {Promise<Array<string|null>>} Base64 字串陣列
+ */
+async function fetchAndResizeBatch(batch, maxDim, sourceTabId) {
+    return Promise.all(batch.map(async (imgData) => {
+        const imgSrc = imgData.src || imgData;
+        if (!imgSrc) return null;
+        if (typeof imgSrc === 'string' && imgSrc.startsWith('data:image')) {
+            return imgSrc.split(',')[1];
+        }
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const res = await fetch(imgSrc, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const blob = await res.blob();
+            return await resizeImageBlobToBase64(blob, maxDim);
+        } catch (fetchErr) {
+            // 退回 Content Script 備援
+            if (sourceTabId && sourceTabId !== 'current') {
+                const resp = await Promise.race([
+                    new Promise(resolve => chrome.tabs.sendMessage(sourceTabId, { action: 'fetchBase64', url: imgSrc, maxDim }, resolve)),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Content Script fetch Timeout')), 15000))
+                ]).catch(e => ({ error: e.message }));
+                return resp?.base64 || null;
+            }
+            return null;
+        }
+    }));
 }
 
 async function handleProcessScreenshot(rect, tabId) {
@@ -1265,13 +1292,16 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
     const maxDim = parseInt(await state.get('imageMaxDimension', 1280)) || 1280;
     const ocrModelName = await state.get('ocrModelName', 'gemini-3.1-flash-lite');
     const isWasmOcr = (ocrModelName === 'local-wasm-ocr');
-    // 比照圖片批次設定數量，不再將本地模式寫死為 5
     const ocrBatchSize = parseInt(await state.get('ocrBatchSize', 10)) || 10;
 
     log.info('TwoStepPipeline', `[階段 1] 模式: ${isWasmOcr ? '💻 本地 WASM OCR' : `☁️ 雲端批次 OCR (${ocrModelName})`}，每批打包: ${ocrBatchSize} 頁，傳送尺寸: ${maxDim}px`);
 
-    // ── 階段 1：OCR 提取全書台詞 ──
+    // ── 階段 1：OCR 提取全書台詞 (雙緩衝管線預載) ──
     const scriptLines = [];
+    let nextOcrBatchPromise = (images.length > 0)
+        ? fetchAndResizeBatch(images.slice(0, ocrBatchSize), maxDim, sourceTabId)
+        : Promise.resolve([]);
+
     for (let i = 0; i < images.length; i += ocrBatchSize) {
         if (await state.get('isStopping')) break;
         const currentBatch = images.slice(i, i + ocrBatchSize);
@@ -1285,25 +1315,21 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         }).catch(() => {});
         broadcastStatus(`📖 [階段 1] 正在提取第 ${startPage}~${endPage} 頁劇本...`, 'info');
 
-        // 並行抓取並縮放本批圖片 Base64
-        const base64List = await Promise.all(currentBatch.map(async (imgData) => {
-            const imgSrc = imgData.src || imgData;
-            if (imgSrc.startsWith('data:image')) return imgSrc.split(',')[1];
-            try {
-                const res = await fetch(imgSrc);
-                const blob = await res.blob();
-                return await resizeImageBlobToBase64(blob, maxDim);
-            } catch (e) {
-                return null;
-            }
-        }));
+        // 1. 取得本批預先壓縮好的 Base64
+        const base64List = await nextOcrBatchPromise;
+
+        // 2. 雙緩衝管線：若有下一批，立即在發送 API 前啟動背景預載預壓
+        const nextOcrStart = i + ocrBatchSize;
+        if (nextOcrStart < images.length) {
+            nextOcrBatchPromise = fetchAndResizeBatch(images.slice(nextOcrStart, nextOcrStart + ocrBatchSize), maxDim, sourceTabId);
+        } else {
+            nextOcrBatchPromise = Promise.resolve([]);
+        }
 
         let batchScripts = [];
         if (isWasmOcr) {
-            // ── 本地 WebAssembly OCR ──
             batchScripts = await wasmOcrEngine.recognizeBatch(base64List);
         } else {
-            // ── 雲端多圖打包批次 OCR (自動 Key 輪替) ──
             try {
                 batchScripts = await callGeminiAPIBatchOcr(base64List, {
                     model: ocrModelName,
@@ -1311,7 +1337,6 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 });
             } catch (batchOcrErr) {
                 log.warn('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 失敗，嘗試逐張重試: ${batchOcrErr.message}`);
-                // 退回逐張重試
                 batchScripts = await Promise.all(base64List.map(async (b64, idx) => {
                     if (!b64) return '';
                     try {
@@ -1349,53 +1374,39 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         }).catch(() => {});
 
         try {
-            const analysis = await extractGlobalStoryAndGlossary(fullScriptText);
-            log.info('TwoStepPipeline', `劇本全局分析成功:`, analysis);
+            const sessionAnalysis = await extractGlobalStoryAndGlossary(fullScriptText, {
+                mangaKey: currentMangaKey,
+                displayName: currentMangaKey
+            });
 
-            // 1. 【短期暫存層】單話劇情大綱與角色關係存入 Session 記憶體
+            // 1. 當話劇情大綱與角色互動 ➔ 短期任務記憶體暫存
             sessionStoryContext[resultTabId] = {
-                storySummary: analysis.storySummary || '',
-                characterRelationships: analysis.characterRelationships || ''
+                storySummary: sessionAnalysis.storySummary || '',
+                characterRelationships: sessionAnalysis.characterRelationships || []
             };
 
-            // 2. 【長期持久層】專有名詞合併存入詞庫 (無痕模式下保護隱私跳過寫入)
-            const normalizedTerms = (analysis.terms || []).map(t => ({
-                ori: (t.ori || t.original || '').trim(),
-                trans: (t.trans || t.translation || '').trim(),
-                source: 'ai'
-            })).filter(t => t.ori && t.trans);
-
-            const isIncognitoSource = await isTabIncognito(sourceTabId);
-            const incognitoPrivacy = await state.get('incognitoPrivacyMode', true);
-
-            if (isIncognitoSource && incognitoPrivacy) {
-                log.info('Glossary', '🔒 [隱私保護] 偵測到無痕視窗翻譯，已跳過專有名詞持久化寫入詞庫');
-            } else if (currentMangaKey && normalizedTerms.length > 0) {
-                const currentEntry = (await loadGlossary(currentMangaKey)) || { terms: [] };
-                const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], normalizedTerms);
-                if (addedCount > 0) {
-                    await saveGlossary(currentMangaKey, {
-                        displayName: currentEntry.displayName || currentMangaKey,
-                        terms: mergedTerms
-                    });
-                    log.info('Glossary', `已將 ${addedCount} 筆專用術語合併入作品 "${currentMangaKey}" 詞庫`);
-                }
+            // 2. 專屬術語 ➔ 合併存入長期詞庫
+            if (sessionAnalysis.glossaryTerms && sessionAnalysis.glossaryTerms.length > 0 && currentMangaKey) {
+                await mergeGlossaryTerms(currentMangaKey, sessionAnalysis.glossaryTerms, 'ai');
+                log.info('TwoStepPipeline', `已將 ${sessionAnalysis.glossaryTerms.length} 筆全書專有名詞存入長期詞庫 (${currentMangaKey})`);
             }
 
-            // 3. 組裝供階段 2 精翻使用的 Session Context Prompt
-            const loadedGlossary = currentMangaKey ? await loadGlossary(currentMangaKey) : null;
-            const termsList = (loadedGlossary && Array.isArray(loadedGlossary.terms)) ? loadedGlossary.terms : normalizedTerms;
-            
-            const termsSnippet = termsList.map(t => {
-                const ori = t.ori || t.original;
-                const trans = t.trans || t.translation;
-                return (ori && trans) ? `    - ${ori} => ${trans}` : null;
-            }).filter(Boolean).join('\n');
+            // 3. 封裝注入片段
+            const relText = (sessionAnalysis.characterRelationships || [])
+                .map(r => `• ${r.charA} 與 ${r.charB}: ${r.relation} (稱呼: ${r.callCharB || '無'})`)
+                .join('\n');
+
+            const allTerms = await loadGlossary(currentMangaKey);
+            const termsSnippet = buildGlossaryPromptSnippet(allTerms?.terms || []);
 
             sessionContextSnippet = `
 <story_context>
-  <synopsis>${analysis.storySummary || '無特殊背景'}</synopsis>
-  <character_dynamics>${analysis.characterRelationships || '依照對白自然語氣'}</character_dynamics>
+  <current_chapter_summary>
+${sessionAnalysis.storySummary || '無'}
+  </current_chapter_summary>
+  <character_relationships>
+${relText || '無'}
+  </character_relationships>
   <required_terms>
 ${termsSnippet}
   </required_terms>
@@ -1407,16 +1418,14 @@ ${termsSnippet}
         }
     }
 
-    // ── 階段 2：帶著全域背景記憶進行批次 Vision 精翻 ──
     return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet);
 }
 
-// PC 模式的專屬翻譯處理器 (並行版本 - 使用 Semaphore 控制並發數)
+// PC 模式的專屬翻譯處理器 (雙緩衝管線版本 - 0 延遲無縫流式批次)
 async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '') {
     if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
     if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
 
-    // 輔助函式：廣播狀態給行動端來源分頁的日誌面板
     const broadcastStatus = (msg, type = 'info') => {
         if (!sourceTabId) return;
         chrome.tabs.sendMessage(sourceTabId, {
@@ -1425,26 +1434,22 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         }).catch(() => {});
     };
 
-    // 1. 通知閱讀器清空舊結果並準備開始 (僅在非重試模式下)
     if (!isRetry) {
         chrome.tabs.sendMessage(resultTabId, { action: 'clearResults', expectedCount: images.length });
     }
     broadcastStatus(`🚀 開始翻譯 ${images.length} 張圖片...`, 'info');
 
-    // 通知側邊欄顯示「正在翻譯」動畫卡片（針對跳轉下一話等背景啟動的情況）
     chrome.runtime.sendMessage({
         action: 'START_TRANSLATING_CARD',
         imgCount: images.length
     }).catch(() => {});
 
-    // 2. 初始化進度條
     chrome.tabs.sendMessage(resultTabId, {
         action: 'updateProgress',
         current: 0,
         total: images.length
     });
 
-    // 3. 讀取翻譯設定（在並行前統一讀取，避免重複 I/O）
     const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
     const fallbackModelName = await state.get('fallbackModelName', null);
     const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
@@ -1452,16 +1457,13 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
     if (modelName.toLowerCase().includes('gemma')) {
         finalPrompt = Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP;
     }
-    log.info('Background', `翻譯設定讀取完成 — 主要模型: ${modelName}，備援模型: ${fallbackModelName}`);
 
-    // ── 語彙庫初始化與注入 (遵循 V1.8.6 邏輯) ──
     let glossarySnippet = injectedGlossarySnippet || '';
     const navCtx = await state.get('navigationContext', {});
     let currentMangaKey = navCtx[sourceTabId];
     let currentDisplayName = currentMangaKey;
 
     try {
-        // 如果執行當下沒有 Key，嘗試從 Tab 標題重新解析 (自癒邏輯)
         if (!currentMangaKey && sourceTabId && sourceTabId !== 'current') {
             const tabInfo = await chrome.tabs.get(sourceTabId);
             const titleResult = extractMangaTitle(tabInfo.title || '');
@@ -1476,7 +1478,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
         if (currentMangaKey) {
             const entry = await loadGlossary(currentMangaKey);
-            // 比照 V1.8.6：若是新作品，先建立基礎詞庫存檔
             if (!entry) {
                 await saveGlossary(currentMangaKey, {
                     displayName: currentDisplayName || currentMangaKey,
@@ -1491,7 +1492,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 }
             }
             
-            // 通知側邊欄識別成功 (確保 UI 狀態同步)
             chrome.runtime.sendMessage({
                 action: 'TITLE_DETECTED',
                 payload: { romanKey: currentMangaKey, displayName: currentDisplayName }
@@ -1501,8 +1501,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         log.warn('Glossary', `初始化階段發生錯誤，將以無詞庫狀態繼續: ${glossaryErr.message}`);
     }
 
-    // ── 傳送導航連結給結果頁（對齊 v1.8.7 的 setNavigation 邏輯）──
-    // 若呼叫方未提供 navLinks，嘗試從 navLinksStore 中補救
+    // ── 傳送導航連結給結果頁 ──
     let resolvedNavLinks = navLinks;
     if (!resolvedNavLinks) {
         try {
@@ -1510,19 +1509,13 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             resolvedNavLinks = navStore[sourceTabId] || null;
         } catch(_) {}
     }
-    // [Debug] 顯示導航連結實際內容，方便診斷
-    log.info('Background', `[NavDebug] sourceTabId=${sourceTabId}, navLinks 傳入=${JSON.stringify(navLinks)}, navStore 補救=${JSON.stringify(resolvedNavLinks)}`);
     if (resolvedNavLinks && (resolvedNavLinks.prev || resolvedNavLinks.next)) {
-        // 稍等 500ms 確保結果頁 DOM 已準備好
         setTimeout(() => {
             chrome.tabs.sendMessage(resultTabId, {
                 action: 'setNavigation',
                 navLinks: resolvedNavLinks
             });
         }, 500);
-        log.info('Background', `導航連結已送出: prev=${resolvedNavLinks.prev ? '✓' : '✗'}, next=${resolvedNavLinks.next ? '✓' : '✗'}`);
-    } else {
-        log.warn('Background', '無導航連結可用，上/下一話按鈕將不顯示');
     }
 
     // 4. 讀取批次大小與圖片大小設定
@@ -1532,26 +1525,23 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
     const requestDelay = await state.get('requestDelay', 4000);
     const maxDim = await state.get('imageMaxDimension', 1024);
     
-    // Bug #4 修復：確保 state 已完成初始化後再讀取 apiKeys 池長度，
-    // 避免 SW 冷啟動時 apiKeys 為空陣列導致並行度恒等於 1
     if (!state.isInitialized) await state.init();
-    const concurrency = Math.max(1, state.apiKeys.length);
 
-    // 強制重設暫停旗標，確保每次全新的翻譯任務都不會被殘留狀態鎖定
     await state.set('isBatchPaused', false);
 
-    log.info('Background', `開始批次翻譯：共 ${images.length} 張，批次大小=${batchSize}，傳送尺寸限制=${maxDim}px，備援並行度=${concurrency}`);
+    log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (雙緩衝預載加速中)`);
 
     let completedCount = 0;
     let allBatchResults = [];
 
-    // 5. 主迴圈：依 batchSize 切塊，逐批處理
+    // ── 5. 雙緩衝管線 (Double-Buffered Pipeline) 啟動：提前非同步預載第 1 批 ──
+    let nextBatchPromise = (images.length > 0)
+        ? fetchAndResizeBatch(images.slice(0, batchSize), maxDim, sourceTabId)
+        : Promise.resolve([]);
+
+    // 主迴圈：依 batchSize 切塊，流水線無縫處理
     for (let i = 0; i < images.length; i += batchSize) {
-        if (typeof console.groupCollapsed === 'function') {
-            console.groupCollapsed(`[DebugLog Group] 📥 第 ${Math.floor(i / batchSize) + 1} 批圖片下載與壓縮處理詳細日誌 (i = ${i})`);
-        }
-        log.info('Background', `[DebugLog] 進入批次主迴圈，第 ${Math.floor(i / batchSize) + 1} 批，i = ${i}`);
-        // Kill-Switch：僅在明確偵測到分頁被使用者手動關閉時終止任務
+        // Kill-Switch 檢查
         if (resultTabId && typeof resultTabId === 'number') {
             try {
                 const tab = await chrome.tabs.get(resultTabId);
@@ -1564,7 +1554,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     log.info('Background', `結果分頁 ${resultTabId} 已關閉，中止任務。`);
                     break;
                 }
-                log.warn('Background', `檢查分頁狀態非致命警告，繼續執行任務: ${tabErr.message}`);
             }
         }
 
@@ -1572,85 +1561,34 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         const totalBatches = Math.ceil(images.length / batchSize);
         const currentBatchIndex = Math.floor(i / batchSize) + 1;
 
-        // 檢查是否停止
         if (await state.get('isStopping')) {
             log.warn('Background', '漫畫翻譯任務已被強制停止');
             break;
         }
 
-        // 暫停輪詢（對齊 v1.8.7 toggleBatchPause 功能）
-        log.info('Background', `[DebugLog] 檢查暫停狀態...`);
+        // 暫停檢查
         while (await state.get('isBatchPaused', false)) {
-            log.info('Background', `[DebugLog] 漫畫翻譯處於暫停狀態，等待繼續...`);
-            // 暫停中，每 500ms 檢查一次是否已繼續
             await new Promise(r => setTimeout(r, 500));
-            // 暫停期間如果也收到 isStopping，一並結束
             if (await state.get('isStopping')) break;
         }
 
-        // 進度顯示
         const progressText = batchSize > 1
             ? `第 ${currentBatchIndex} / ${totalBatches} 批 (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
             : `${i + 1} / ${images.length}`;
         
-        log.info('Background', `[DebugLog] 發送進度更新 sendMessage: ${progressText}`);
         chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
         broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
 
-        log.info('Background', `[DebugLog] 開始載入本批 ${currentBatch.length} 張圖片`);
-        // 並行抓取本批圖片 Base64，並依 maxDim 進行等比例縮放
-        const base64Results = await Promise.all(currentBatch.map(async (imgData, idx) => {
-            const imgSrc = imgData.src || imgData;
-            log.info('Background', `[DebugLog] 處理圖片 [${idx}]: imgSrc 長度 = ${imgSrc ? imgSrc.substring(0, 100) : 'null'}`);
-            // 如果 imgSrc 已經是 base64 (或者是 selection 截圖)，不需要 resize，直接使用
-            if (imgSrc.startsWith('data:image')) {
-                log.info('Background', `[DebugLog] 圖片 [${idx}] 是 base64 格式，跳過 fetch`);
-                return imgSrc.split(',')[1];
-            }
-            try {
-                log.info('Background', `[DebugLog] 圖片 [${idx}]: 準備呼叫 fetch`);
-                // 加入 10 秒逾時機制，防止 fetch 無限期掛起
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => {
-                    log.warn('Background', `[DebugLog] 圖片 [${idx}]: fetch 逾時，觸發 abort`);
-                    controller.abort();
-                }, 10000);
-                
-                const res = await fetch(imgSrc, { signal: controller.signal });
-                clearTimeout(timeoutId);
-                log.info('Background', `[DebugLog] 圖片 [${idx}]: fetch 完成，status = ${res.status}`);
-                
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const blob = await res.blob();
-                log.info('Background', `[DebugLog] 圖片 [${idx}]: blob 讀取完成，大小 = ${blob.size} bytes`);
-                
-                // 調用 OffscreenCanvas 進行等比例縮放與壓縮
-                log.info('Background', `[DebugLog] 圖片 [${idx}]: 準備呼叫 resizeImageBlobToBase64`);
-                const resB64 = await resizeImageBlobToBase64(blob, maxDim);
-                log.info('Background', `[DebugLog] 圖片 [${idx}]: resizeImageBlobToBase64 完成，產出長度 = ${resB64 ? resB64.length : 0}`);
-                return resB64;
-            } catch (fetchErr) {
-                // 退回 Content Script 備援
-                log.warn('Background', `[DebugLog] 圖片 [${idx}] 直接抓取失敗，退回 Content Script: ${fetchErr.message}`);
-                broadcastStatus(`⚠️ 圖片抓取逾時或失敗，嘗試透過網頁端抓取...`, 'warn');
-                if (sourceTabId && sourceTabId !== 'current') {
-                    log.info('Background', `[DebugLog] 圖片 [${idx}]: 向 Content Script 發送 fetchBase64，tabId = ${sourceTabId}`);
-                    const resp = await Promise.race([
-                        new Promise(resolve => chrome.tabs.sendMessage(sourceTabId, { action: 'fetchBase64', url: imgSrc, maxDim: maxDim }, resolve)),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Content Script fetch Timeout')), 15000))
-                    ]).catch(e => {
-                        log.warn('Background', `[DebugLog] 圖片 [${idx}] Content Script 抓取逾時或出錯: ${e.message}`);
-                        return { error: e.message };
-                    });
-                    log.info('Background', `[DebugLog] 圖片 [${idx}] Content Script 抓取回應: ${resp?.base64 ? '成功' : '失敗'}`);
-                    return resp?.base64 || null;
-                }
-                return null;
-            }
-        }));
-        log.info('Background', `[DebugLog] 本批圖片載入與縮放完成，有效圖片數 = ${base64Results.filter(Boolean).length}`);
-        if (typeof console.groupEnd === 'function') {
-            console.groupEnd();
+        // 1. 等待本批次圖片下載與壓縮完成
+        const base64Results = await nextBatchPromise;
+
+        // 2. 雙緩衝管線核心：若有下一批圖片，立即在發送本批 API 之前非同步啟動下一批預載預壓！
+        const nextStart = i + batchSize;
+        if (nextStart < images.length) {
+            const nextBatchImages = images.slice(nextStart, nextStart + batchSize);
+            nextBatchPromise = fetchAndResizeBatch(nextBatchImages, maxDim, sourceTabId);
+        } else {
+            nextBatchPromise = Promise.resolve([]);
         }
 
         // 分離有效/無效圖片
@@ -1664,29 +1602,25 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         });
 
         if (validItems.length > 0) {
-            // 提前計算子批次，讓 catch 區塊中的多 Key 輪流重試也能使用
             const PAYLOAD_LIMIT = 15_000_000;
             const totalPayload = validItems.reduce((sum, v) => sum + v.b64.length, 0);
             const subBatches = (batchSize > 1)
                 ? (totalPayload > PAYLOAD_LIMIT
                     ? [validItems.slice(0, Math.ceil(validItems.length / 2)), validItems.slice(Math.ceil(validItems.length / 2))]
                     : [validItems])
-                : null; // batchSize=1 時不使用 subBatches
+                : null;
 
             try {
                 if (batchSize > 1) {
-                    // ── 批次路徑：多圖打包成一個 API 請求 ──
-                    // 使用者的等待時間在此套用
                     if (i > 0 && requestDelay > 0) {
                         await new Promise(r => setTimeout(r, requestDelay));
                     }
 
                     if (subBatches.length > 1) {
-                        log.warn('Background', `[批次] 請求體過大 (${Math.round(totalPayload / 1_000_000)}MB)，自動拆分為 ${subBatches.length} 個子批次。`);
+                        log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
                     }
 
                     for (const subBatch of subBatches) {
-                        log.info('Background', `[批次] 打包 ${subBatch.length} 張圖送出 API...`);
                         const subResults = await callGeminiAPIBatch(
                             subBatch.map(v => v.b64),
                             finalPrompt,
@@ -1697,7 +1631,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         });
                     }
                 } else {
-                    // ── 逐張路徑 (batchSize=1) ──
                     const item = validItems[0];
                     if (item) {
                         const result = await translateTexts([], {
