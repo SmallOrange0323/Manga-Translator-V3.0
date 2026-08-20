@@ -1486,6 +1486,7 @@ ${termsSnippet}
         } catch (storyErr) {
             log.warn('TwoStepPipeline', `全域劇本分析失敗，退回無劇情背景精翻: ${storyErr.message}`);
         }
+    }
     } finally {
         swKeepAlive.stop();
     }
