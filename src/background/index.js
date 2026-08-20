@@ -161,12 +161,19 @@ async function processNovelQueue() {
 
             let glossarySnippet = '';
             let currentDisplayName = mangaKey;
+            const isIncognitoTask = await isTabIncognito(task.tabId);
+            const incognitoPrivacy = await state.get('incognitoPrivacyMode', true);
+
             if (mangaKey) {
                 const entry = await loadGlossary(mangaKey);
                 if (!entry) {
-                    // 比照漫畫模式：建立初始存檔
-                    await saveGlossary(mangaKey, { displayName: mangaKey, terms: [] });
-                    log.info('Glossary', `為新小說作品 "${mangaKey}" 建立初始詞庫`);
+                    if (isIncognitoTask && incognitoPrivacy) {
+                        log.info('Glossary', `🔒 [隱私保護] 偵測到無痕視窗，已跳過為新小說作品 "${mangaKey}" 建立初始詞庫與雲端同步`);
+                    } else {
+                        // 比照漫畫模式：建立初始存檔
+                        await saveGlossary(mangaKey, { displayName: mangaKey, terms: [] });
+                        log.info('Glossary', `為新小說作品 "${mangaKey}" 建立初始詞庫`);
+                    }
                 } else {
                     currentDisplayName = entry.displayName || mangaKey;
                     if (entry.terms && entry.terms.length > 0) {
@@ -288,10 +295,7 @@ async function processNovelQueue() {
             }
 
             // ── 異步術語萃取 (與漫畫模式對齊) ──
-            const isIncognitoTab = await isTabIncognito(sender?.tab?.id);
-            const incognitoPrivacy = await state.get('incognitoPrivacyMode', true);
-
-            if (isIncognitoTab && incognitoPrivacy) {
+            if (isIncognitoTask && incognitoPrivacy) {
                 log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗，已自動跳過小說術語萃取與詞庫儲存');
             } else if (mangaKey && allTranslatedResults.length > 0) {
                 log.info('Background', `[小說萃取] 開始分析小說譯文，提取關鍵術語...`);
@@ -1549,14 +1553,21 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
         }
 
+        const isIncognitoBatch = await isTabIncognito(sourceTabId);
+        const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
+
         if (currentMangaKey) {
             const entry = await loadGlossary(currentMangaKey);
             if (!entry) {
-                await saveGlossary(currentMangaKey, {
-                    displayName: currentDisplayName || currentMangaKey,
-                    terms: []
-                });
-                log.info('Glossary', `為新作品 "${currentMangaKey}" 建立初始詞庫`);
+                if (isIncognitoBatch && incognitoPrivacySetting) {
+                    log.info('Glossary', `🔒 [隱私保護] 偵測到無痕視窗，已跳過為新作品 "${currentMangaKey}" 建立本機詞庫與雲端同步`);
+                } else {
+                    await saveGlossary(currentMangaKey, {
+                        displayName: currentDisplayName || currentMangaKey,
+                        terms: []
+                    });
+                    log.info('Glossary', `為新作品 "${currentMangaKey}" 建立初始詞庫`);
+                }
             } else {
                 currentDisplayName = entry.displayName || currentMangaKey;
                 if (entry.terms && entry.terms.length > 0) {
