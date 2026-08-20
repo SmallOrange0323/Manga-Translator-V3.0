@@ -57,24 +57,23 @@ export function initMobileMode() {
       }
     }
 
-    /* 懸浮按鈕 (完整正方形和風「漫」字 App 圖示，無多餘圓底) */
+    /* 懸浮按鈕 (純圖示本體作為按鈕，無任何外層白底容器) */
     .trigger-btn {
       position: fixed;
       top: 70%;
       right: 0px;
       width: 44px;
       height: 44px;
-      border-radius: 10px;
-      background: #faf7f2;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+      background: transparent;
+      box-shadow: none;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       z-index: 2147483646;
-      border: 1.5px solid rgba(0, 0, 0, 0.15);
+      border: none;
       padding: 0;
-      overflow: hidden;
+      overflow: visible;
       user-select: none;
       touch-action: none;
       transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
@@ -87,7 +86,9 @@ export function initMobileMode() {
       width: 100%;
       height: 100%;
       object-fit: cover;
-      border-radius: 8px;
+      border-radius: 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+      border: 1px solid rgba(0, 0, 0, 0.1);
       pointer-events: none;
       display: block;
     }
@@ -259,10 +260,10 @@ export function initMobileMode() {
   triggerBtn.className = 'trigger-btn';
   triggerBtn.title = '開啟漫譯控制台';
   
-  // 注入高質感和風「漫」字 App 圖示
+  // 注入高質感和風「漫」字 App 圖示 (滿版作為按鈕本體)
   const iconImg = document.createElement('img');
   iconImg.src = chrome.runtime.getURL('icon128.png');
-  iconImg.style.cssText = 'width: 28px; height: 28px; pointer-events: none; border-radius: 4px;';
+  iconImg.alt = '漫譯';
   triggerBtn.appendChild(iconImg);
 
   shadow.appendChild(overlay);
