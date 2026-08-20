@@ -216,6 +216,22 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // 【新增】行動端頂部專屬「💻 電腦版」按鈕直接切換
+    const mobileToggleDesktopBtn = document.getElementById('mobile-toggle-desktop-btn');
+    if (mobileToggleDesktopBtn) {
+        mobileToggleDesktopBtn.addEventListener('click', () => {
+            sessionStorage.setItem('mt_translated_data', JSON.stringify(translatedData));
+            const overlayHidden = document.getElementById('loading-overlay').classList.contains('hidden');
+            sessionStorage.setItem('mt_translation_complete', overlayHidden ? '1' : '0');
+            sessionStorage.setItem('mt_progress_text', document.getElementById('progress-text').innerText);
+
+            const params = new URLSearchParams(window.location.search);
+            params.set('desktop', '1');
+            params.delete('mobile');
+            window.location.search = params.toString();
+        });
+    }
+
     // [新增] 綁定中止翻譯按鈕
     const stopBtn = document.getElementById('btn-stop-translation');
     if (stopBtn) {

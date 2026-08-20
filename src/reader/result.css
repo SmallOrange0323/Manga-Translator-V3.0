@@ -1472,20 +1472,44 @@ body.mt-mobile-mode {
     }
     .manga-title {
         font-size: 13px;
-        max-width: 90px;
+        max-width: 140px;
         letter-spacing: 0;
     }
     .glossary-seal { display: none !important; }
     .font-scale-stepper { display: none !important; }
+    .font-size-stepper { display: none !important; }
 
-    /* 保留「⋯」更多功能按鈕，提供切換模式與匯出功能 */
+    /* 頂部話數導航列在行動端隱藏 (由下方卡片底部導航接管) */
+    .chapter-nav-bar { display: none !important; }
+
+    /* 右側操作區：直接顯示獨立的「💻 電腦版」按鈕 +「⋯」更多功能 */
     .actions {
         display: flex !important;
         align-items: center;
-        gap: 4px;
+        gap: 6px;
         flex-shrink: 0;
     }
+    .actions #mobile-toggle-desktop-btn {
+        display: inline-flex !important;
+        align-items: center;
+        gap: 3px;
+        padding: 5px 9px;
+        font-size: 11px;
+        font-weight: 700;
+        border-radius: 6px;
+        background: #f4eee1;
+        color: var(--text-sumi);
+        border: 1px solid var(--border-paper);
+        white-space: nowrap;
+        cursor: pointer;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    }
+    .actions #mobile-toggle-desktop-btn:active {
+        background: #e8e0d0;
+        transform: scale(0.96);
+    }
     .actions #retranslate-all-btn,
+    .actions #retranslate-batch-dropdown-btn,
     .actions #batch-dropdown-container,
     .actions .btn-export-text {
         display: none !important;
@@ -1506,17 +1530,6 @@ body.mt-mobile-mode {
         border: 1px solid var(--border-paper);
         border-radius: 8px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-    }
-
-    /* 頂部話數選單輕量收納 */
-    .chapter-nav-bar {
-        flex: 0 0 auto;
-        padding: 2px 4px;
-        gap: 2px;
-    }
-    .nav-btn {
-        padding: 4px 6px;
-        font-size: 11px;
     }
     .chapter-select-btn {
         padding: 4px 6px;
