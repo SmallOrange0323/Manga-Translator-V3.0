@@ -32,6 +32,9 @@ function sendNextNovelBatch() {
 export function initMobileMode() {
   log.info('Content-Mobile', 'Initializing Mobile Overlay Drawer...');
 
+  // 0. 清除可能殘留的舊版本 Shadow DOM 根節點 (防止重載擴充套件時雙重按鈕並存)
+  document.querySelectorAll('#mt-mobile-root').forEach(el => el.remove());
+
   // 1. 建立 Shadow DOM 容器
   const container = document.createElement('div');
   container.id = 'mt-mobile-root';
@@ -251,7 +254,13 @@ export function initMobileMode() {
 
   const triggerBtn = document.createElement('button');
   triggerBtn.className = 'trigger-btn';
-  triggerBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03c1.74-1.94 2.98-4.17 3.71-6.53H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>`;
+  triggerBtn.title = '開啟漫譯控制台';
+  
+  // 注入高質感和風「漫」字 App 圖示
+  const iconImg = document.createElement('img');
+  iconImg.src = chrome.runtime.getURL('icon128.png');
+  iconImg.style.cssText = 'width: 28px; height: 28px; pointer-events: none; border-radius: 4px;';
+  triggerBtn.appendChild(iconImg);
 
   shadow.appendChild(overlay);
   shadow.appendChild(drawer);
@@ -283,43 +292,36 @@ export function initMobileMode() {
     if (images.length === 0) {
       const paragraphs = getNovelParagraphs();
       if (paragraphs.length > 0) {
-        statusText.textContent = `偵測到 ${paragraphs.length} 段小說內容`;
-        grid.innerHTML = `
-          <div style="grid-column: 1/-1; padding: 40px 20px; text-align: center;">
-            <div style="font-size: 48px; margin-bottom: 16px;">📖</div>
-            <div style="color: var(--text-main); margin-bottom: 24px;">這看起來是一篇小說，是否要開始翻譯？</div>
-            <button id="start-novel-btn" style="background: var(--edge-blue); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%;">
-              開始全頁翻譯
-            </button>
-          </div>
-        `;
-        grid.querySelector('#start-novel-btn').onclick = () => {
+        statusText.textContent = `偵測到小說文本 (${paragraphs.length} 段)`;
+        drawer.querySelector('#drawer-submit').textContent = `開始小說翻譯 (${paragraphs.length} 段)`;
+        drawer.querySelector('#drawer-submit').disabled = false;
+        drawer.querySelector('#drawer-submit').onclick = () => {
           toggleDrawer(false);
-          startNovelTranslation();
+          startNovelTranslation(paragraphs);
         };
-      } else {
-        statusText.textContent = '未找到可翻譯內容';
+        return;
       }
-      updateFooter();
+      statusText.textContent = '未找到可翻譯的漫畫圖片或小說文本';
+      drawer.querySelector('#drawer-submit').disabled = true;
       return;
     }
     
-    statusText.textContent = `找到 ${images.length} 張圖片`;
-    
-    // 預設全選
-    selectedIndices.clear();
-    images.forEach((_, i) => selectedIndices.add(i));
-
-    images.forEach((img, i) => {
+    statusText.textContent = `找到 ${images.length} 張圖片 (已過濾雜圖)`;
+    images.forEach((img, idx) => {
       const item = document.createElement('div');
-      item.className = 'img-item selected'; // 預設加上 selected class
-      item.innerHTML = `<img src="${img.src}" loading="lazy" referrerpolicy="no-referrer" style="width:100%; height:100%; object-fit:cover;">`;
+      item.className = 'img-item selected';
+      selectedIndices.add(idx);
+      
+      const imgEl = document.createElement('img');
+      imgEl.src = img.url;
+      item.appendChild(imgEl);
+      
       item.onclick = () => {
-        if (selectedIndices.has(i)) {
-          selectedIndices.delete(i);
+        if (selectedIndices.has(idx)) {
+          selectedIndices.delete(idx);
           item.classList.remove('selected');
         } else {
-          selectedIndices.add(i);
+          selectedIndices.add(idx);
           item.classList.add('selected');
         }
         updateFooter();
@@ -367,10 +369,11 @@ export function initMobileMode() {
     }
   }
 
-  // ── 懸浮按鈕拖曳、自動靠邊與記憶互動 ──
+  // ── 懸浮按鈕拖曳、自動靠邊與記憶互動 (精準 Tap / Drag 區分) ──
   let isDragging = false;
   let hasMoved = false;
   let startX, startY, initialX, initialY;
+  let startTime = 0;
   let dockTimer = null;
 
   // 讀取上次記憶的位置
@@ -413,6 +416,7 @@ export function initMobileMode() {
     hasMoved = false;
     startX = e.clientX;
     startY = e.clientY;
+    startTime = Date.now();
 
     const rect = triggerBtn.getBoundingClientRect();
     initialX = rect.left;
@@ -429,7 +433,7 @@ export function initMobileMode() {
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
 
-    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
+    if (Math.hypot(dx, dy) > 10) {
       hasMoved = true;
     }
 
@@ -452,7 +456,14 @@ export function initMobileMode() {
     isDragging = false;
     triggerBtn.releasePointerCapture(e.pointerId);
 
-    if (hasMoved) {
+    const touchDuration = Date.now() - startTime;
+    const totalDist = Math.hypot(e.clientX - startX, e.clientY - startY);
+
+    // 若位移極小 (防觸控抖動) 或按下時間極短，100% 判定為輕觸點擊 (Tap)
+    if (!hasMoved || totalDist < 12 || touchDuration < 250) {
+      toggleDrawer(true);
+    } else {
+      // 拖曳結束：吸附至左側或右側邊緣並持久化
       const viewportWidth = window.visualViewport?.width || window.innerWidth;
       const viewportHeight = window.visualViewport?.height || window.innerHeight;
       const rect = triggerBtn.getBoundingClientRect();
@@ -470,9 +481,6 @@ export function initMobileMode() {
           mt_fab_position: { side: isLeft ? 'left' : 'right', topPercent }
         });
       } catch (_) {}
-    } else {
-      // 純點擊：開啟控制台抽屜
-      toggleDrawer(true);
     }
 
     resetDockTimer();
