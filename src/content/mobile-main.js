@@ -57,22 +57,22 @@ export function initMobileMode() {
       }
     }
 
-    /* 懸浮按鈕 (純和風「漫」字微縮膠囊，徹底移除舊藍色背景) */
+    /* 懸浮按鈕 (完整正方形和風「漫」字 App 圖示，無多餘圓底) */
     .trigger-btn {
       position: fixed;
       top: 70%;
       right: 0px;
-      width: 48px;
-      height: 48px;
-      border-radius: 50%;
-      background: rgba(28, 25, 23, 0.95);
-      box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      background: #faf7f2;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       z-index: 2147483646;
-      border: 1.5px solid rgba(255, 255, 255, 0.35);
+      border: 1.5px solid rgba(0, 0, 0, 0.15);
       padding: 0;
       overflow: hidden;
       user-select: none;
@@ -87,18 +87,18 @@ export function initMobileMode() {
       width: 100%;
       height: 100%;
       object-fit: cover;
-      border-radius: 50%;
+      border-radius: 8px;
       pointer-events: none;
       display: block;
     }
     /* 自動靠邊微縮樣式 (Docked Mini Tab) */
     .trigger-btn.is-docked[data-side="right"],
     .trigger-btn.is-docked:not([data-side="left"]) {
-      transform: translateX(30px);
+      transform: translateX(26px);
       opacity: 0.5;
     }
     .trigger-btn.is-docked[data-side="left"] {
-      transform: translateX(-30px);
+      transform: translateX(-26px);
       opacity: 0.5;
     }
     .trigger-btn:hover {
@@ -316,7 +316,11 @@ export function initMobileMode() {
       selectedIndices.add(idx);
       
       const imgEl = document.createElement('img');
-      imgEl.src = img.url;
+      const imgUrl = img.src || img.url || '';
+      imgEl.src = imgUrl;
+      imgEl.loading = 'lazy';
+      imgEl.referrerPolicy = 'no-referrer';
+      imgEl.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block;';
       item.appendChild(imgEl);
       
       item.onclick = () => {
