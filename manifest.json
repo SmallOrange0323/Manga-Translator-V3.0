@@ -13,7 +13,8 @@
     "scripting",
     "contextMenus",
     "identity",
-    "downloads"
+    "downloads",
+    "alarms"
   ],
   "oauth2": {
     "client_id": "892014744898-ea2t1djhd9sqs350hb244pifstrlre4q.apps.googleusercontent.com",

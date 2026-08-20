@@ -42,7 +42,9 @@ async function isTabIncognito(tabId) {
     }
 }
 
-// ─── Service Worker 任務保活心跳管理器 (防止 MV3 長時間非同步處理時被 Chrome 誤殺) ───
+// ─── Service Worker 任務保活心跳管理器 (結合 JS 內部定時器 + Chrome 官方 Alarms 雙重保活) ───
+const ALARM_KEEPALIVE_NAME = 'mt_sw_heartbeat_alarm';
+
 class ServiceWorkerKeepAlive {
     constructor() {
         this.timer = null;
@@ -52,26 +54,51 @@ class ServiceWorkerKeepAlive {
     start() {
         this.activeJobs++;
         if (this.timer) return;
-        // 每 15 秒輕量呼叫一次 Chrome Extension API 續命，保持 Service Worker 活躍
+
+        // 1. 內部定時器 (每 15 秒輕量呼叫一次 API 續命)
         this.timer = setInterval(async () => {
             try {
                 await chrome.runtime.getPlatformInfo();
             } catch (_) {}
         }, 15000);
-        log.info('Background', '🛡️ [KeepAlive] Service Worker 保活心跳已啟動');
+
+        // 2. 外部 Chrome 官方鬧鐘 (向瀏覽器核心註冊每 0.5 分鐘 / 30 秒觸發一次的 Morning Call)
+        try {
+            chrome.alarms.create(ALARM_KEEPALIVE_NAME, {
+                periodInMinutes: 0.5
+            });
+        } catch (_) {}
+
+        log.info('Background', '🛡️ [KeepAlive] Service Worker 雙重保活機制已啟動 (內部心跳 + 官方 Alarms)');
     }
 
     stop() {
         this.activeJobs = Math.max(0, this.activeJobs - 1);
-        if (this.activeJobs === 0 && this.timer) {
-            clearInterval(this.timer);
-            this.timer = null;
-            log.info('Background', '🛡️ [KeepAlive] Service Worker 保活心跳已停止');
+        if (this.activeJobs === 0) {
+            if (this.timer) {
+                clearInterval(this.timer);
+                this.timer = null;
+            }
+            try {
+                chrome.alarms.clear(ALARM_KEEPALIVE_NAME);
+            } catch (_) {}
+            log.info('Background', '🛡️ [KeepAlive] Service Worker 雙重保活機制已停止並釋放鬧鐘');
         }
     }
 }
 
 const swKeepAlive = new ServiceWorkerKeepAlive();
+
+// 監聽 Chrome 官方鬧鐘喚醒事件
+if (chrome.alarms && chrome.alarms.onAlarm) {
+    chrome.alarms.onAlarm.addListener(async (alarm) => {
+        if (alarm.name === ALARM_KEEPALIVE_NAME) {
+            try {
+                await chrome.runtime.getPlatformInfo();
+            } catch (_) {}
+        }
+    });
+}
 
 // 當 Service Worker 啟動或重啟時，初次化狀態
 state.init().then(async () => {
@@ -1322,13 +1349,15 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         }).catch(() => {});
     };
 
-    log.info('TwoStepPipeline', `啟動雙階段劇本預讀工作流：共 ${images.length} 張圖片`);
-    broadcastStatus(`📖 [階段 1] 啟動 OCR 提取全書台詞劇本 (共 ${images.length} 頁)...`, 'info');
-    chrome.tabs.sendMessage(resultTabId, {
-        action: 'updateProgress',
-        current: `正在提取全書劇本 (0/${images.length})`,
-        total: images.length
-    });
+    swKeepAlive.start();
+    try {
+        log.info('TwoStepPipeline', `啟動雙階段劇本預讀工作流：共 ${images.length} 張圖片`);
+        broadcastStatus(`📖 [階段 1] 啟動 OCR 提取全書台詞劇本 (共 ${images.length} 頁)...`, 'info');
+        chrome.tabs.sendMessage(resultTabId, {
+            action: 'updateProgress',
+            current: `正在提取全書劇本 (0/${images.length})`,
+            total: images.length
+        });
 
     const maxDim = parseInt(await state.get('imageMaxDimension', 1280)) || 1280;
     const ocrModelName = await state.get('ocrModelName', 'gemini-3.1-flash-lite');
@@ -1457,6 +1486,8 @@ ${termsSnippet}
         } catch (storyErr) {
             log.warn('TwoStepPipeline', `全域劇本分析失敗，退回無劇情背景精翻: ${storyErr.message}`);
         }
+    } finally {
+        swKeepAlive.stop();
     }
 
     return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet);
