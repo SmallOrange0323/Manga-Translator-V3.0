@@ -1403,6 +1403,15 @@ function renderDialogueItems(container, results, item) {
             });
         };
     });
+
+    // 若行動端抽屜處於開啟狀態且更新的正是當前卡片，即時動態同步抽屜內容
+    try {
+        const card = container.closest('.result-card');
+        const drawer = document.getElementById('mt-mobile-drawer');
+        if (card && drawer && drawer.classList.contains('is-open') && typeof window._syncCardToDrawer === 'function') {
+            window._syncCardToDrawer(card);
+        }
+    } catch (_) {}
 }
 
 function createSuccessActionGroup(item, dialoguesContainer) {
@@ -1608,24 +1617,24 @@ function initMobileReader() {
     let currentVisibleCard = null;
 
     // 將指定卡片的翻譯對白同步渲染進全域底部抽屜
-    function syncCardToDrawer(card) {
+    window._syncCardToDrawer = function(card) {
         if (!card || !drawerBody) return;
         const pageNumStr = card.querySelector('.card-page-badge')?.textContent || `P.${currentPage + 1}`;
         if (drawerTitle) drawerTitle.textContent = `📄 ${pageNumStr} 翻譯內容`;
         if (fab) fab.textContent = `📖 查看 ${pageNumStr} 翻譯`;
 
-        // 提取卡片內部的對白清單或對白項目
-        const dialogueList = card.querySelector('.dialogue-list');
+        // 提取卡片內部的對白容器 .dialogues-container
+        const dialoguesContainer = card.querySelector('.dialogues-container');
         drawerBody.innerHTML = '';
 
-        if (dialogueList && dialogueList.children.length > 0) {
-            Array.from(dialogueList.children).forEach(item => {
+        if (dialoguesContainer && dialoguesContainer.children.length > 0) {
+            Array.from(dialoguesContainer.querySelectorAll('.dialogue-item')).forEach(item => {
                 const clone = item.cloneNode(true);
                 // 重新綁定語彙庫按鈕事件
                 const termBtn = clone.querySelector('.save-glossary');
                 if (termBtn) {
-                    const ori = clone.querySelector('.dialogue-ori')?.textContent || '';
-                    const trans = clone.querySelector('.dialogue-trans')?.textContent || '';
+                    const ori = clone.querySelector('.original-text')?.textContent || '';
+                    const trans = clone.querySelector('.translated-text')?.textContent || '';
                     termBtn.onclick = (e) => {
                         e.stopPropagation();
                         showGlossaryModal(ori, trans);
@@ -1639,12 +1648,12 @@ function initMobileReader() {
             emptyHint.textContent = card.classList.contains('is-error') ? '⚠️ 本頁翻譯失敗' : '✨ 本頁無文字或正在翻譯中...';
             drawerBody.appendChild(emptyHint);
         }
-    }
+    };
 
     function openDrawer() {
         const targetCard = currentVisibleCard || resultsContainer.querySelector('.result-card:not(.skeleton-card)');
         if (targetCard) {
-            syncCardToDrawer(targetCard);
+            window._syncCardToDrawer(targetCard);
         }
         if (drawer) drawer.classList.add('is-open');
         if (fab) fab.classList.add('hidden');
@@ -1688,7 +1697,7 @@ function initMobileReader() {
 
                 // 若抽屜處於開啟中，自動無縫刷新為當前可見卡片的翻譯
                 if (drawer && drawer.classList.contains('is-open')) {
-                    syncCardToDrawer(entry.target);
+                    window._syncCardToDrawer(entry.target);
                 }
             }
         });
