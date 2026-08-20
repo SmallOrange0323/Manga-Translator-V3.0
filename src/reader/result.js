@@ -1538,12 +1538,10 @@ function resetNavButtons() {
     });
 }
 
-/* ─── 行動端漫畫閱讀器互動邏輯 ─── */
+/* ─── 行動端漫畫閱讀器互動邏輯 (全域 Bottom Sheet 抽屜) ─── */
 let mobileReaderInitialized = false;
 
 function initMobileReader() {
-    // 優先使用 URL 參數 ?mobile=1 判斷（行動端跳轉時帶入）
-    // 備援：偵測觸控裝置（Android 平板/iPad 不依賴螢幕寬度判斷）
     const hasTouchAndMobileUA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     const urlParams = new URLSearchParams(location.search);
@@ -1566,6 +1564,12 @@ function initMobileReader() {
     mobileReaderInitialized = true;
 
     const resultsContainer = document.getElementById('results-container');
+    const drawer = document.getElementById('mt-mobile-drawer');
+    const drawerTitle = document.getElementById('mt-drawer-title');
+    const drawerBody = document.getElementById('mt-drawer-body');
+    const drawerClose = document.getElementById('mt-drawer-close');
+    const drawerBackdrop = drawer ? drawer.querySelector('.mt-drawer-backdrop') : null;
+
     if (!resultsContainer) return;
 
     // ── 1. 建立進度點列 ──
@@ -1595,7 +1599,81 @@ function initMobileReader() {
         dots.forEach((d, i) => d.classList.toggle('active', i === index));
     }
 
-    // ── 2. Scroll 偵測：自動動態同步當前頁碼 (P.1, P.2...) 與 FAB 按鈕 ──
+    // ── 2. 全域固定 FAB 按鈕 ──
+    const fab = document.createElement('button');
+    fab.id = 'mt-mobile-fab';
+    fab.textContent = '📖 查看 P.1 翻譯';
+    document.body.appendChild(fab);
+
+    let currentVisibleCard = null;
+
+    // 將指定卡片的翻譯對白同步渲染進全域底部抽屜
+    function syncCardToDrawer(card) {
+        if (!card || !drawerBody) return;
+        const pageNumStr = card.querySelector('.card-page-badge')?.textContent || `P.${currentPage + 1}`;
+        if (drawerTitle) drawerTitle.textContent = `📄 ${pageNumStr} 翻譯內容`;
+        if (fab) fab.textContent = `📖 查看 ${pageNumStr} 翻譯`;
+
+        // 提取卡片內部的對白清單或對白項目
+        const dialogueList = card.querySelector('.dialogue-list');
+        drawerBody.innerHTML = '';
+
+        if (dialogueList && dialogueList.children.length > 0) {
+            Array.from(dialogueList.children).forEach(item => {
+                const clone = item.cloneNode(true);
+                // 重新綁定語彙庫按鈕事件
+                const termBtn = clone.querySelector('.save-glossary');
+                if (termBtn) {
+                    const ori = clone.querySelector('.dialogue-ori')?.textContent || '';
+                    const trans = clone.querySelector('.dialogue-trans')?.textContent || '';
+                    termBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        showGlossaryModal(ori, trans);
+                    };
+                }
+                drawerBody.appendChild(clone);
+            });
+        } else {
+            const emptyHint = document.createElement('div');
+            emptyHint.style.cssText = 'padding: 24px; text-align: center; color: #888; font-size: 13px;';
+            emptyHint.textContent = card.classList.contains('is-error') ? '⚠️ 本頁翻譯失敗' : '✨ 本頁無文字或正在翻譯中...';
+            drawerBody.appendChild(emptyHint);
+        }
+    }
+
+    function openDrawer() {
+        const targetCard = currentVisibleCard || resultsContainer.querySelector('.result-card:not(.skeleton-card)');
+        if (targetCard) {
+            syncCardToDrawer(targetCard);
+        }
+        if (drawer) drawer.classList.add('is-open');
+        if (fab) fab.classList.add('hidden');
+    }
+
+    function closeDrawer() {
+        if (drawer) drawer.classList.remove('is-open');
+        if (fab) fab.classList.remove('hidden');
+    }
+
+    // 綁定 FAB 按鈕點擊與觸碰事件 (雙重相容)
+    fab.addEventListener('click', openDrawer);
+    fab.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        openDrawer();
+    });
+
+    if (drawerClose) {
+        drawerClose.addEventListener('click', closeDrawer);
+        drawerClose.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            closeDrawer();
+        });
+    }
+    if (drawerBackdrop) {
+        drawerBackdrop.addEventListener('click', closeDrawer);
+    }
+
+    // ── 3. Scroll 偵測：自動動態同步當前頁碼與抽屜內容 ──
     const scrollObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (!entry.isIntersecting) return;
@@ -1608,99 +1686,29 @@ function initMobileReader() {
                 const pageNumStr = entry.target.querySelector('.card-page-badge')?.textContent || `P.${idx + 1}`;
                 if (fab) fab.textContent = `📖 查看 ${pageNumStr} 翻譯`;
 
-                // 若面板當前正開啟中，自動連動切換至當前可見頁面的翻譯內容
-                const textWrapper = entry.target.querySelector('.card-text-wrapper');
-                const hasAnyOpenPanel = document.querySelector('.card-text-wrapper.is-open');
-                
-                if (hasAnyOpenPanel && textWrapper && !textWrapper.classList.contains('is-open')) {
-                    openPanel(textWrapper);
+                // 若抽屜處於開啟中，自動無縫刷新為當前可見卡片的翻譯
+                if (drawer && drawer.classList.contains('is-open')) {
+                    syncCardToDrawer(entry.target);
                 }
-
-                // 確保其他非當前卡片的面板平滑收起
-                cards.forEach((c, i) => {
-                    if (i !== idx) c.querySelector('.card-text-wrapper')?.classList.remove('is-open');
-                });
             }
         });
     }, { root: resultsContainer, threshold: 0.5 });
 
-    // ── 3. 建立全域固定 FAB 按鈕（position: fixed，不受卡片/容器影響）──
-    const fab = document.createElement('button');
-    fab.id = 'mt-mobile-fab';
-    fab.textContent = '📖 查看翻譯';
-    document.body.appendChild(fab);
-
-    let currentVisibleCard = null;
-
-    const openPanel = (textWrapper) => {
-        // 關閉所有已開啟的面板
-        document.querySelectorAll('.card-text-wrapper.is-open').forEach(w => w.classList.remove('is-open'));
-        textWrapper.scrollTop = 0;  // 每次打開都從頂部開始
-        textWrapper.classList.add('is-open');
-        fab.classList.add('hidden');
-    };
-
-    const closePanel = () => {
-        document.querySelectorAll('.card-text-wrapper.is-open').forEach(w => w.classList.remove('is-open'));
-        fab.classList.remove('hidden');
-    };
-
-    // FAB 點擊：開啟目前可見卡片的翻譯面板
-    fab.addEventListener('click', () => {
-        if (!currentVisibleCard) return;
-        const textWrapper = currentVisibleCard.querySelector('.card-text-wrapper');
-        if (textWrapper) openPanel(textWrapper);
-    });
-
-    // ── 4. 綁定單張卡片（加入面板 header + 捲動區域）──
+    // ── 4. 綁定卡片 Observer ──
     window._bindMobileCard = function(card) {
         if (card.dataset.mobileBound) return;
         card.dataset.mobileBound = '1';
-
-        const textWrapper = card.querySelector('.card-text-wrapper');
-        if (!textWrapper) return;
-
-        // 把 textWrapper 原有的所有子元素移到獨立捲動容器
-        const contentArea = document.createElement('div');
-        contentArea.className = 'mobile-panel-content';
-        while (textWrapper.firstChild) {
-            contentArea.appendChild(textWrapper.firstChild);
-        }
-
-        const pageNumStr = card.querySelector('.card-page-badge')?.textContent || '';
-        const panelHeader = document.createElement('div');
-        panelHeader.className = 'mobile-panel-header';
-        panelHeader.innerHTML = `
-            <div class="mobile-panel-header-row">
-                <span class="mobile-panel-title">📄 ${pageNumStr} 翻譯內容</span>
-                <button class="mobile-close-btn">✕ 收起</button>
-            </div>
-        `;
-
-        // 重組 textWrapper：header → content（分開捲動）
-        textWrapper.appendChild(panelHeader);
-        textWrapper.appendChild(contentArea);
-
-        panelHeader.querySelector('.mobile-close-btn').addEventListener('click', (e) => {
-            e.stopPropagation();
-            closePanel();
-        });
-        panelHeader.querySelector('.mobile-close-btn').addEventListener('touchend', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            closePanel();
-        });
-
         scrollObserver.observe(card);
         rebuildDots();
+        if (!currentVisibleCard) {
+            currentVisibleCard = card;
+        }
     };
 
-    // 對目前已存在的卡片初始化
     resultsContainer.querySelectorAll('.result-card:not(.skeleton-card)').forEach(window._bindMobileCard);
     rebuildDots();
 }
 
-// ── result.js 是 module，執行時 DOMContentLoaded 已觸發，直接呼叫 ──
 initMobileReader();
 
 // ── 【改動3】整批重試功能 ──
