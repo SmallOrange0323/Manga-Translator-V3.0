@@ -1015,22 +1015,22 @@ body.theme-priconne .skeleton-anim {
 }
 
 @media (max-width: 720px) {
-    .result-header {
+    body:not(.mt-mobile-mode) .result-header {
         padding: 12px 16px;
         flex-direction: column;
         align-items: flex-start;
         gap: 10px;
         min-height: auto;
     }
-    .header-left {
+    body:not(.mt-mobile-mode) .header-left {
         flex-wrap: wrap;
         gap: 8px;
         align-items: center;
     }
-    .result-header h1 {
+    body:not(.mt-mobile-mode) .result-header h1 {
         font-size: 16px;
     }
-    .actions {
+    body:not(.mt-mobile-mode) .actions {
         width: 100%;
         flex-wrap: wrap;
         gap: 8px;
@@ -1444,25 +1444,30 @@ body.mt-mobile-mode {
     overflow-x: hidden;
     touch-action: pan-x pan-y;
 
-    /* ── Header：嚴格鎖定 100vw，徹底杜絕橫向溢出與右側空白 ── */
+    /* ── Header：單行水平兩端對齊，左側標題 + 右側電腦版與更多按鈕 ── */
     .result-header {
         flex-shrink: 0;
         width: 100vw;
         max-width: 100vw;
         height: 48px;
         min-height: 48px;
-        padding: 0 10px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
+        padding: 0 12px;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: space-between !important;
         box-sizing: border-box;
         overflow: hidden;
-        gap: 6px;
+        gap: 8px;
     }
     .header-left {
-        flex: 0 1 auto;
+        flex: 1 1 auto;
         min-width: 0;
-        gap: 6px;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        gap: 8px;
+        overflow: hidden;
     }
     .seal-stamp {
         width: 26px;
