@@ -1,10 +1,10 @@
-# 漫譯 V3.1.1 (Manga Translator V3.1.1) 專案交接與進度備忘錄
+# 漫譯 V3.1.2 (Manga Translator V3.1.2) 專案交接與進度備忘錄
 
-**文件生成時間**：2026-08-20  
+**文件生成時間**：2026-08-21  
 **目前 Git 分支**：`feature/prompt-xml-upgrade`  
-**最新版本號**：`V3.1.1`  
+**最新版本號**：`V3.1.2`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已全面升級為 **V3.1.1**。完成【Service Worker 任務保活心跳（Keep-Alive Guardian）】徹底終結 MV3 逾時中斷、【生肉漫畫頂部小封面縮圖精準排除（三重防護）】、【多 API Key 批次輪流重試自癒機制與動態逾時調優】、【日系和紙暖色風設計系統（Noto Serif TC / 5px 框距 / 135朱紅 246翡翠綠跳色）】與【章節導航全鏈路打通】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.1_Store_Package*.zip`。
+**工作區狀態**：已全面升級為 **V3.1.2**。完成全新【行動端體驗三大升級】（結果頁 Header 100vw 嚴格鎖定、全域 Bottom Sheet 翻譯抽屜 100% 滑出與橫向滑動自動同步、宿主網頁「自由拖曳 + 邊緣吸附記憶 + 2秒閒置自動貼邊微縮膠囊」完全體懸浮按鈕），以及【Service Worker 任務保活心跳（Keep-Alive Guardian）】、【生肉漫畫頂部小封面縮圖精準排除（三重防護）】與【多 API Key 批次輪流重試自癒機制】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.2_Store_Package*.zip`。
 
 ---
 
