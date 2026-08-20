@@ -57,7 +57,7 @@ export function initMobileMode() {
       }
     }
 
-    /* 懸浮按鈕 (和風精緻小膠囊) */
+    /* 懸浮按鈕 (純和風「漫」字微縮膠囊，徹底移除舊藍色背景) */
     .trigger-btn {
       position: fixed;
       top: 70%;
@@ -65,42 +65,45 @@ export function initMobileMode() {
       width: 48px;
       height: 48px;
       border-radius: 50%;
-      background: var(--edge-blue);
-      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+      background: rgba(28, 25, 23, 0.95);
+      box-shadow: 0 4px 18px rgba(0,0,0,0.4);
       display: flex;
       align-items: center;
       justify-content: center;
-      cursor: grab;
+      cursor: pointer;
       z-index: 2147483646;
-      border: 1.5px solid rgba(255, 255, 255, 0.3);
+      border: 1.5px solid rgba(255, 255, 255, 0.35);
+      padding: 0;
+      overflow: hidden;
       user-select: none;
       touch-action: none;
       transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
-      opacity: 0.92;
+      opacity: 0.95;
     }
     .trigger-btn:active {
-      cursor: grabbing;
       transform: scale(0.92);
+    }
+    .trigger-btn img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 50%;
+      pointer-events: none;
+      display: block;
     }
     /* 自動靠邊微縮樣式 (Docked Mini Tab) */
     .trigger-btn.is-docked[data-side="right"],
     .trigger-btn.is-docked:not([data-side="left"]) {
       transform: translateX(30px);
-      opacity: 0.45;
+      opacity: 0.5;
     }
     .trigger-btn.is-docked[data-side="left"] {
       transform: translateX(-30px);
-      opacity: 0.45;
+      opacity: 0.5;
     }
     .trigger-btn:hover {
       opacity: 1;
       transform: translateX(0) scale(1.05);
-    }
-    .trigger-btn svg {
-      width: 24px;
-      height: 24px;
-      fill: white;
-      pointer-events: none;
     }
 
     /* 抽屜面板背景遮罩 */
@@ -369,11 +372,9 @@ export function initMobileMode() {
     }
   }
 
-  // ── 懸浮按鈕拖曳、自動靠邊與記憶互動 (精準 Tap / Drag 區分) ──
-  let isDragging = false;
-  let hasMoved = false;
-  let startX, startY, initialX, initialY;
-  let startTime = 0;
+  // ── 懸浮按鈕拖曳、自動靠邊與記憶互動 (三重事件保障 Tap 100% 響應) ──
+  let isDragMoved = false;
+  let startX = 0, startY = 0, initialX = 0, initialY = 0;
   let dockTimer = null;
 
   // 讀取上次記憶的位置
@@ -403,41 +404,34 @@ export function initMobileMode() {
     triggerBtn.classList.remove('is-docked');
     clearTimeout(dockTimer);
     dockTimer = setTimeout(() => {
-      if (!isDragging) {
-        triggerBtn.classList.add('is-docked');
-      }
+      triggerBtn.classList.add('is-docked');
     }, 2000);
   };
 
   resetDockTimer();
 
   triggerBtn.onpointerdown = (e) => {
-    isDragging = true;
-    hasMoved = false;
+    isDragMoved = false;
     startX = e.clientX;
     startY = e.clientY;
-    startTime = Date.now();
 
     const rect = triggerBtn.getBoundingClientRect();
     initialX = rect.left;
     initialY = rect.top;
 
-    triggerBtn.setPointerCapture(e.pointerId);
     triggerBtn.classList.remove('is-docked');
     clearTimeout(dockTimer);
   };
 
   triggerBtn.onpointermove = (e) => {
-    if (!isDragging) return;
+    if (e.buttons !== 1 && e.pointerType === 'mouse') return;
+    if (startX === 0 && startY === 0) return;
 
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
 
-    if (Math.hypot(dx, dy) > 10) {
-      hasMoved = true;
-    }
-
-    if (hasMoved) {
+    if (Math.hypot(dx, dy) > 15) {
+      isDragMoved = true;
       const viewportWidth = window.visualViewport?.width || window.innerWidth;
       const viewportHeight = window.visualViewport?.height || window.innerHeight;
 
@@ -452,17 +446,7 @@ export function initMobileMode() {
   };
 
   triggerBtn.onpointerup = (e) => {
-    if (!isDragging) return;
-    isDragging = false;
-    triggerBtn.releasePointerCapture(e.pointerId);
-
-    const touchDuration = Date.now() - startTime;
-    const totalDist = Math.hypot(e.clientX - startX, e.clientY - startY);
-
-    // 若位移極小 (防觸控抖動) 或按下時間極短，100% 判定為輕觸點擊 (Tap)
-    if (!hasMoved || totalDist < 12 || touchDuration < 250) {
-      toggleDrawer(true);
-    } else {
+    if (isDragMoved) {
       // 拖曳結束：吸附至左側或右側邊緣並持久化
       const viewportWidth = window.visualViewport?.width || window.innerWidth;
       const viewportHeight = window.visualViewport?.height || window.innerHeight;
@@ -481,14 +465,19 @@ export function initMobileMode() {
           mt_fab_position: { side: isLeft ? 'left' : 'right', topPercent }
         });
       } catch (_) {}
-    }
 
+      setTimeout(() => { isDragMoved = false; }, 100);
+    }
+    startX = 0;
+    startY = 0;
     resetDockTimer();
   };
 
-  triggerBtn.onpointercancel = () => {
-    isDragging = false;
-    resetDockTimer();
+  // 點擊觸發 (原生 click 與 touchend 雙重保證)
+  triggerBtn.onclick = (e) => {
+    if (isDragMoved) return;
+    log.info('Content-Mobile', '點擊懸浮球，開啟控制台抽屜...');
+    toggleDrawer(true);
   };
 
   // 事件綁定
