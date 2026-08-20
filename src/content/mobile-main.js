@@ -54,26 +54,51 @@ export function initMobileMode() {
       }
     }
 
-    /* 懸浮按鈕 */
+    /* 懸浮按鈕 (和風精緻小膠囊) */
     .trigger-btn {
       position: fixed;
-      bottom: 24px;
-      right: 24px;
-      width: 56px;
-      height: 56px;
-      border-radius: 28px;
+      top: 70%;
+      right: 0px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
       background: var(--edge-blue);
-      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
       display: flex;
       align-items: center;
       justify-content: center;
-      cursor: pointer;
+      cursor: grab;
       z-index: 2147483646;
-      border: none;
-      transition: transform 0.2s;
+      border: 1.5px solid rgba(255, 255, 255, 0.3);
+      user-select: none;
+      touch-action: none;
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
+      opacity: 0.92;
     }
-    .trigger-btn:active { transform: scale(0.9); }
-    .trigger-btn svg { width: 28px; height: 28px; fill: white; }
+    .trigger-btn:active {
+      cursor: grabbing;
+      transform: scale(0.92);
+    }
+    /* 自動靠邊微縮樣式 (Docked Mini Tab) */
+    .trigger-btn.is-docked[data-side="right"],
+    .trigger-btn.is-docked:not([data-side="left"]) {
+      transform: translateX(30px);
+      opacity: 0.45;
+    }
+    .trigger-btn.is-docked[data-side="left"] {
+      transform: translateX(-30px);
+      opacity: 0.45;
+    }
+    .trigger-btn:hover {
+      opacity: 1;
+      transform: translateX(0) scale(1.05);
+    }
+    .trigger-btn svg {
+      width: 24px;
+      height: 24px;
+      fill: white;
+      pointer-events: none;
+    }
 
     /* 抽屜面板背景遮罩 */
     .drawer-overlay {
@@ -342,8 +367,123 @@ export function initMobileMode() {
     }
   }
 
+  // ── 懸浮按鈕拖曳、自動靠邊與記憶互動 ──
+  let isDragging = false;
+  let hasMoved = false;
+  let startX, startY, initialX, initialY;
+  let dockTimer = null;
+
+  // 讀取上次記憶的位置
+  try {
+    chrome.storage.local.get(['mt_fab_position'], (res) => {
+      const pos = res?.mt_fab_position;
+      if (pos && typeof pos.topPercent === 'number') {
+        const viewportHeight = window.visualViewport?.height || window.innerHeight;
+        const targetTop = Math.max(50, Math.min(viewportHeight - 100, (viewportHeight * pos.topPercent) / 100));
+        triggerBtn.style.top = `${targetTop}px`;
+        triggerBtn.style.bottom = 'auto';
+
+        if (pos.side === 'left') {
+          triggerBtn.style.left = '0px';
+          triggerBtn.style.right = 'auto';
+          triggerBtn.dataset.side = 'left';
+        } else {
+          triggerBtn.style.right = '0px';
+          triggerBtn.style.left = 'auto';
+          triggerBtn.dataset.side = 'right';
+        }
+      }
+    });
+  } catch (_) {}
+
+  const resetDockTimer = () => {
+    triggerBtn.classList.remove('is-docked');
+    clearTimeout(dockTimer);
+    dockTimer = setTimeout(() => {
+      if (!isDragging) {
+        triggerBtn.classList.add('is-docked');
+      }
+    }, 2000);
+  };
+
+  resetDockTimer();
+
+  triggerBtn.onpointerdown = (e) => {
+    isDragging = true;
+    hasMoved = false;
+    startX = e.clientX;
+    startY = e.clientY;
+
+    const rect = triggerBtn.getBoundingClientRect();
+    initialX = rect.left;
+    initialY = rect.top;
+
+    triggerBtn.setPointerCapture(e.pointerId);
+    triggerBtn.classList.remove('is-docked');
+    clearTimeout(dockTimer);
+  };
+
+  triggerBtn.onpointermove = (e) => {
+    if (!isDragging) return;
+
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
+      hasMoved = true;
+    }
+
+    if (hasMoved) {
+      const viewportWidth = window.visualViewport?.width || window.innerWidth;
+      const viewportHeight = window.visualViewport?.height || window.innerHeight;
+
+      const newX = Math.max(0, Math.min(viewportWidth - 50, initialX + dx));
+      const newY = Math.max(20, Math.min(viewportHeight - 70, initialY + dy));
+
+      triggerBtn.style.left = `${newX}px`;
+      triggerBtn.style.top = `${newY}px`;
+      triggerBtn.style.right = 'auto';
+      triggerBtn.style.bottom = 'auto';
+    }
+  };
+
+  triggerBtn.onpointerup = (e) => {
+    if (!isDragging) return;
+    isDragging = false;
+    triggerBtn.releasePointerCapture(e.pointerId);
+
+    if (hasMoved) {
+      const viewportWidth = window.visualViewport?.width || window.innerWidth;
+      const viewportHeight = window.visualViewport?.height || window.innerHeight;
+      const rect = triggerBtn.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+
+      const isLeft = centerX < viewportWidth / 2;
+      triggerBtn.dataset.side = isLeft ? 'left' : 'right';
+
+      triggerBtn.style.left = isLeft ? '0px' : 'auto';
+      triggerBtn.style.right = isLeft ? 'auto' : '0px';
+
+      const topPercent = Math.round((rect.top / viewportHeight) * 100);
+      try {
+        chrome.storage.local.set({
+          mt_fab_position: { side: isLeft ? 'left' : 'right', topPercent }
+        });
+      } catch (_) {}
+    } else {
+      // 純點擊：開啟控制台抽屜
+      toggleDrawer(true);
+    }
+
+    resetDockTimer();
+  };
+
+  triggerBtn.onpointercancel = () => {
+    isDragging = false;
+    resetDockTimer();
+  };
+
   // 事件綁定
-  triggerBtn.onclick = () => toggleDrawer(true);
   overlay.onclick = () => toggleDrawer(false);
   drawer.querySelector('.close-btn').onclick = () => toggleDrawer(false);
   drawer.querySelector('#select-all-btn').onclick = selectAll;
