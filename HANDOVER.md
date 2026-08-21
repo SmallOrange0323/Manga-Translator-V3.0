@@ -4,7 +4,7 @@
 **目前 Git 分支**：`feature/prompt-xml-upgrade`  
 **最新版本號**：`V3.1.2`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已全面升級為 **V3.1.2**。完成全新【行動端體驗三大升級】（結果頁 Header 100vw 嚴格鎖定、全域 Bottom Sheet 翻譯抽屜 100% 滑出與橫向滑動自動同步、宿主網頁「自由拖曳 + 邊緣吸附記憶 + 2秒閒置自動貼邊微縮膠囊」完全體懸浮按鈕），以及【Service Worker 任務保活心跳（Keep-Alive Guardian）】、【生肉漫畫頂部小封面縮圖精準排除（三重防護）】與【多 API Key 批次輪流重試自癒機制】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.2_Store_Package*.zip`。
+**工作區狀態**：已全面升級為 **V3.1.2**。完成【4 大經典字型即時切換系統（宋體/圓體/源石黑體/楷體）+ 偏好持久化記憶】、【極簡純粹導航列（上一話/下一話）】、【Google OAuth 2.0 雙平台通用 Client ID 配置打通（完美解決 Edge 商店正式版與 Chrome 本機版同步）】、【行動端體驗三大升級】與【Chrome Alarms 雙重保活心跳】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.2_Store_Package*.zip`。
 
 ---
 
