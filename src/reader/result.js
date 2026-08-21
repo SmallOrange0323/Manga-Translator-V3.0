@@ -56,28 +56,54 @@ function applyFontScale(scale) {
     chrome.storage.local.set({ mt_font_scale: currentFontScale });
 }
 
-function initFontSizeControl() {
-    chrome.storage.local.get(['mt_font_scale'], (res) => {
+// ─── 4 大黃金字型即時切換系統 (宋體 / 圓體 / 源石黑體 / 楷體) ───
+const FONT_MAP = {
+    serif: 'var(--font-serif)',
+    maru: 'var(--font-maru)',
+    gensen: 'var(--font-gensen)',
+    kai: 'var(--font-kai)'
+};
+
+function applyFontFamily(fontKey) {
+    const targetFont = FONT_MAP[fontKey] || FONT_MAP.serif;
+    document.documentElement.style.setProperty('--font-trans', targetFont);
+    const selectEl = document.getElementById('font-family-select');
+    if (selectEl && selectEl.value !== fontKey) {
+        selectEl.value = fontKey;
+    }
+    chrome.storage.local.set({ mt_font_family: fontKey });
+}
+
+function initFontControls() {
+    // 1. 初始化字體大小
+    chrome.storage.local.get(['mt_font_scale', 'mt_font_family'], (res) => {
         if (res && res.mt_font_scale) {
             applyFontScale(res.mt_font_scale);
         } else {
             applyFontScale(100);
         }
+        // 2. 初始化字型風格
+        if (res && res.mt_font_family) {
+            applyFontFamily(res.mt_font_family);
+        } else {
+            applyFontFamily('serif');
+        }
     });
 
     const decBtn = document.getElementById('font-decrease-btn');
     const incBtn = document.getElementById('font-increase-btn');
-    if (decBtn) {
-        decBtn.onclick = () => applyFontScale(currentFontScale - 10);
-    }
-    if (incBtn) {
-        incBtn.onclick = () => applyFontScale(currentFontScale + 10);
+    if (decBtn) decBtn.onclick = () => applyFontScale(currentFontScale - 10);
+    if (incBtn) incBtn.onclick = () => applyFontScale(currentFontScale + 10);
+
+    const fontSelect = document.getElementById('font-family-select');
+    if (fontSelect) {
+        fontSelect.onchange = (e) => applyFontFamily(e.target.value);
     }
 }
 
 // Initial load: Pull navigation links from background
 document.addEventListener('DOMContentLoaded', () => {
-    initFontSizeControl();
+    initFontControls();
 
     // 加載主題
     chrome.storage.local.get(['mt_theme'], (result) => {
@@ -767,46 +793,6 @@ function updateNavUI(navLinks) {
             prevBtn.style.opacity = '0.4';
             prevBtn.disabled = true;
         }
-    }
-
-    // 頂部中央：目前話數與章節下拉選單 (智慧提取 fallback，確保永不為空)
-    let displayChapter = currentChapter;
-    if (!displayChapter) {
-        const titleText = document.getElementById('manga-title-display')?.textContent || '';
-        const titleMatch = titleText.match(/Chapter\s*([\d\.]+)/i) || titleText.match(/第\s*([\d\.]+)\s*話/i) || titleText.match(/(\d+[\.\d]*)/);
-        if (titleMatch && titleMatch[1]) {
-            displayChapter = `Chapter ${titleMatch[1]}`;
-        } else {
-            const urlMatch = location.href.match(/chapter[_-]?([\d\.]+)/i);
-            displayChapter = urlMatch && urlMatch[1] ? `Chapter ${urlMatch[1]}` : '章節選單';
-        }
-    }
-    if (currentText) {
-        currentText.textContent = displayChapter;
-    }
-
-    if (chapterMenu && Array.isArray(chapterList) && chapterList.length > 0) {
-        chapterMenu.innerHTML = '';
-        chapterList.forEach(ch => {
-            const item = document.createElement('button');
-            item.className = 'dropdown-item';
-            item.textContent = ch.title || ch.url;
-            if (ch.current || (displayChapter && ch.title && ch.title.includes(displayChapter))) {
-                item.style.fontWeight = 'bold';
-                item.style.color = 'var(--accent-vermilion)';
-                item.textContent = `✓ ${ch.title || ch.url}`;
-            }
-            item.onclick = () => {
-                chapterMenu.style.display = 'none';
-                sendNavigateMessageWithRetry({
-                    url: ch.url,
-                    tabId: sourceTabId,
-                    mangaKey: activeMangaKey,
-                    mobile: urlParams.get('mobile') === '1'
-                }, item, ch.title || '選定章節');
-            };
-            chapterMenu.appendChild(item);
-        });
     }
 
     // 頂部中央：下一話

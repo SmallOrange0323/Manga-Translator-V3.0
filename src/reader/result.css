@@ -13,9 +13,13 @@
     --accent-amber: #a2682a;          /* 琥珀茶色 */
     --accent-pine: #23a566;           /* 更加明亮青翠的若竹翡翠綠 */
     --shadow-paper: 0 4px 20px rgba(60, 50, 40, 0.05), 0 1px 3px rgba(60, 50, 40, 0.04);
-    --font-serif: 'Noto Serif TC', serif;
-    --font-sans: 'Noto Sans TC', -apple-system, system-ui, sans-serif;
+    --font-serif: 'Noto Serif TC', 'Songti TC', 'SimSun', serif;
+    --font-maru: 'Zen Maru Gothic', 'M PLUS Rounded 1c', 'Hiragino Maru Gothic Pro', sans-serif;
+    --font-gensen: 'GenSenGothic', 'GenSenGothic TW', '源石黑體', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+    --font-kai: 'DFKai-SB', 'BiauKai', 'Kaiti TC', 'STKaiti', serif;
+    --font-sans: 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', -apple-system, system-ui, sans-serif;
     --font-jp: 'Noto Sans JP', var(--font-sans);
+    --font-trans: var(--font-serif);  /* 動態全域可切換譯文字型 */
     --radius-paper: 8px;
     --transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -168,6 +172,31 @@ body {
 }
 .chapter-select-btn:hover {
     background: #a33129;
+}
+
+/* ─── 頂部和風字型選單 ─── */
+.font-family-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.font-select-washi {
+    font-family: var(--font-trans, var(--font-serif));
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-sumi);
+    background: var(--bg-page);
+    border: 1px solid var(--border-paper);
+    border-radius: 6px;
+    padding: 5px 8px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(60, 50, 40, 0.04);
+    outline: none;
+    transition: all var(--transition);
+}
+.font-select-washi:hover, .font-select-washi:focus {
+    border-color: var(--accent-vermilion);
+    background: var(--bg-card);
 }
 
 /* ─── 頂部字體縮放調節器 ─── */
@@ -465,9 +494,9 @@ body {
     gap: 2px;
 }
 
-/* 中文譯文：典雅宋體，動態字號 */
+/* 中文譯文：支援即時字型切換，動態字號 */
 .translated-text {
-    font-family: var(--font-serif);
+    font-family: var(--font-trans, var(--font-serif));
     font-size: var(--zh-font-size, 17.5px);
     font-weight: 700;
     color: #1a1715;

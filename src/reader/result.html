@@ -6,7 +6,8 @@
     <title>漫譯 — 批次翻譯結果</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;600;700;900&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;600;700;900&family=Noto+Sans+TC:wght@400;500;700&family=Zen+Maru+Gothic:wght@500;700;900&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gensen-gothic@1.0.0/dist/gensen-gothic.css">
     <link rel="stylesheet" href="result.css">
 </head>
 <body>
@@ -22,21 +23,12 @@
             </div>
         </div>
 
-        <!-- 正中央：上一話 / 當前話數下拉 / 下一話 導航列 -->
+        <!-- 正中央：上一話 / 下一話 導航列 (極簡純粹版) -->
         <div id="chapter-nav-bar" class="chapter-nav-bar">
-            <button id="nav-prev-chapter-btn" class="nav-btn">
+            <button id="nav-prev-chapter-btn" class="nav-btn" title="切換至上一話">
                 <span>‹</span> 上一話
             </button>
-            
-            <div class="dropdown" style="position:relative;">
-                <button id="chapter-dropdown-btn" class="nav-btn chapter-select-btn">
-                    <span id="current-chapter-text">章節選單</span> ▾
-                </button>
-                <div id="chapter-dropdown-menu" class="dropdown-menu" style="display:none; min-width:200px; left:50%; transform:translateX(-50%);">
-                </div>
-            </div>
-
-            <button id="nav-next-chapter-btn" class="nav-btn">
+            <button id="nav-next-chapter-btn" class="nav-btn" title="切換至下一話">
                 下一話 <span>›</span>
             </button>
         </div>
@@ -45,6 +37,16 @@
         <div class="actions">
             <!-- 行動端直覺外露切換電腦版按鈕 -->
             <button id="mobile-toggle-desktop-btn" class="btn-washi" title="切換為電腦版閱讀器" style="display:none;">💻 電腦版</button>
+
+            <!-- 🔤 字型即時切換選單 -->
+            <div class="font-family-wrapper" title="切換對白字型風格">
+                <select id="font-family-select" class="font-select-washi">
+                    <option value="serif">🌸 典雅宋體</option>
+                    <option value="maru">🍡 日漫圓體</option>
+                    <option value="gensen">🪨 源石黑體</option>
+                    <option value="kai">📜 古典楷體</option>
+                </select>
+            </div>
 
             <!-- 字體大小即時調節器 -->
             <div class="font-size-stepper" title="調整對白字體大小">
