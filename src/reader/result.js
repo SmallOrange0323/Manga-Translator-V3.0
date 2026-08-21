@@ -726,11 +726,15 @@ function isSafeUrl(url) {
     return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
 
-function sendNavigateMessageWithRetry(payload, btn, label) {
+function sendNavigateMessageWithRetry(payload, btns, label) {
     let responded = false;
-    btn.disabled = true;
-    btn.classList.add('is-navigating');
-    btn.innerHTML = `正在跳轉至 ${label}...`;
+    const btnList = Array.isArray(btns) ? btns.filter(Boolean) : [btns].filter(Boolean);
+    
+    btnList.forEach(b => {
+        b.disabled = true;
+        b.classList.add('is-navigating');
+        b.innerHTML = `正在跳轉至 ${label}...`;
+    });
 
     const doSend = () => {
         chrome.runtime.sendMessage({ 
@@ -770,9 +774,31 @@ function updateNavUI(navLinks) {
     const safePrev = isSafeUrl(prev) ? prev : null;
     const safeNext = isSafeUrl(next) ? next : null;
 
-    // 頂部導航欄永遠顯示，提供沉浸追漫體驗
+    // 頂部導航欄與底部導航欄顯示控制
     if (navBar) navBar.style.display = 'inline-flex';
     if (footer) footer.style.display = 'flex';
+
+    // 上一話動作處理函式
+    const handlePrevNavigation = () => {
+        if (!safePrev) return;
+        sendNavigateMessageWithRetry({
+            url: safePrev,
+            tabId: sourceTabId,
+            mangaKey: activeMangaKey,
+            mobile: urlParams.get('mobile') === '1'
+        }, [prevBtn, footerPrevBtn], '上一話');
+    };
+
+    // 下一話動作處理函式
+    const handleNextNavigation = () => {
+        if (!safeNext) return;
+        sendNavigateMessageWithRetry({
+            url: safeNext,
+            tabId: sourceTabId,
+            mangaKey: activeMangaKey,
+            mobile: urlParams.get('mobile') === '1'
+        }, [nextBtn, footerNextBtn], '下一話');
+    };
 
     // 頂部中央：上一話
     if (prevBtn) {
@@ -780,14 +806,7 @@ function updateNavUI(navLinks) {
             prevBtn.style.display = 'inline-flex';
             prevBtn.style.opacity = '1';
             prevBtn.disabled = false;
-            prevBtn.onclick = () => {
-                sendNavigateMessageWithRetry({
-                    url: safePrev,
-                    tabId: sourceTabId,
-                    mangaKey: activeMangaKey,
-                    mobile: urlParams.get('mobile') === '1'
-                }, prevBtn, '上一話');
-            };
+            prevBtn.onclick = handlePrevNavigation;
             prevBtn.title = safePrev;
         } else {
             prevBtn.style.opacity = '0.4';
@@ -801,14 +820,7 @@ function updateNavUI(navLinks) {
             nextBtn.style.display = 'inline-flex';
             nextBtn.style.opacity = '1';
             nextBtn.disabled = false;
-            nextBtn.onclick = () => {
-                sendNavigateMessageWithRetry({
-                    url: safeNext,
-                    tabId: sourceTabId,
-                    mangaKey: activeMangaKey,
-                    mobile: urlParams.get('mobile') === '1'
-                }, nextBtn, '下一話');
-            };
+            nextBtn.onclick = handleNextNavigation;
             nextBtn.title = safeNext;
         } else {
             nextBtn.style.opacity = '0.4';
@@ -816,14 +828,27 @@ function updateNavUI(navLinks) {
         }
     }
 
-    // 底部導航相容
-    if (safePrev && footerPrevBtn) {
-        footerPrevBtn.style.display = 'inline-flex';
-        footerPrevBtn.onclick = () => prevBtn && prevBtn.click();
+    // 底部導航：直接綁定相同動作，不走脆性的 DOM 代理點擊
+    if (footerPrevBtn) {
+        if (safePrev) {
+            footerPrevBtn.style.display = 'inline-flex';
+            footerPrevBtn.disabled = false;
+            footerPrevBtn.onclick = handlePrevNavigation;
+            footerPrevBtn.title = safePrev;
+        } else {
+            footerPrevBtn.style.display = 'none';
+        }
     }
-    if (safeNext && footerNextBtn) {
-        footerNextBtn.style.display = 'inline-flex';
-        footerNextBtn.onclick = () => nextBtn && nextBtn.click();
+
+    if (footerNextBtn) {
+        if (safeNext) {
+            footerNextBtn.style.display = 'inline-flex';
+            footerNextBtn.disabled = false;
+            footerNextBtn.onclick = handleNextNavigation;
+            footerNextBtn.title = safeNext;
+        } else {
+            footerNextBtn.style.display = 'none';
+        }
     }
 }
 

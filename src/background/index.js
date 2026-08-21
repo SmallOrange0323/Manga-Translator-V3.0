@@ -963,16 +963,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'navigateAndTranslate') {
       const { url, tabId, mangaKey, mobile } = message;
-      if (!url || !tabId) { sendResponse({ status: 'error' }); return false; }
-      // 儲存 resultTabId（發送訊息的分頁），讓 onUpdated 知道要通知哪個結果頁
+      if (!url) { sendResponse({ status: 'error' }); return false; }
+      
       const resultTabId = sender.tab?.id || null;
-      state.set('pendingAutoTranslate', { tabId, resultTabId, mangaKey: mangaKey || null, mobile: !!mobile }).then(() => {
-          chrome.tabs.update(tabId, { url }, () => {
-              if (chrome.runtime.lastError) {
-                  console.warn('[Background] navigateAndTranslate failed:', chrome.runtime.lastError.message);
+      log.info('Navigation', `[跳轉] 收到跳轉請求: ${url} (來源分頁: ${tabId})`);
+
+      const setupNavigation = async () => {
+          let targetTabId = tabId;
+          
+          // 驗證分頁是否存在
+          let tabExists = false;
+          if (targetTabId) {
+              try {
+                  const existing = await chrome.tabs.get(targetTabId);
+                  if (existing) tabExists = true;
+              } catch (_) {}
+          }
+
+          if (tabExists) {
+              await state.set('pendingAutoTranslate', { tabId: targetTabId, resultTabId, mangaKey: mangaKey || null, mobile: !!mobile });
+              chrome.tabs.update(targetTabId, { url }, () => {
+                  if (chrome.runtime.lastError) {
+                      log.warn('Navigation', `navigateAndTranslate update 失敗: ${chrome.runtime.lastError.message}`);
+                  }
+              });
+          } else {
+              // 若原分頁已不存在，自動建立後台新分頁加載新章節
+              log.info('Navigation', `原宿主分頁已不存在，自動開啟新分頁載入新話數...`);
+              const newTab = await chrome.tabs.create({ url, active: false });
+              targetTabId = newTab.id;
+              await state.set('pendingAutoTranslate', { tabId: targetTabId, resultTabId, mangaKey: mangaKey || null, mobile: !!mobile });
+          }
+
+          // ── 3.5秒超時保險機制 ──
+          // 防止某些漫畫網站第三方廣告卡住 status==='complete' 導致無法觸發 onUpdated
+          setTimeout(async () => {
+              const pending = await state.get('pendingAutoTranslate', null);
+              if (pending && pending.tabId === targetTabId) {
+                  log.info('Navigation', `[超時保險] 目標分頁 onUpdated 逾時未觸發 complete，主動啟動抓圖接力翻譯...`);
+                  await state.set('pendingAutoTranslate', null);
+                  autoStartBatchWithRetry(targetTabId, pending.resultTabId, pending.mangaKey, pending.mobile);
               }
-          });
+          }, 3500);
+      };
+
+      setupNavigation().catch(err => {
+          log.error('Navigation', `跳轉處理發生異常: ${err.message}`);
       });
+
       sendResponse({ status: 'navigating' });
       return false;
   }
