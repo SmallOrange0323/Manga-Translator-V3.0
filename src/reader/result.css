@@ -1360,7 +1360,7 @@ body.theme-priconne .skeleton-anim {
 }
 
 .mt-term-trans {
-    font-family: var(--font-serif);
+    font-family: var(--font-trans, var(--font-serif));
     font-weight: 700;
     color: var(--text-sumi);
     white-space: nowrap;

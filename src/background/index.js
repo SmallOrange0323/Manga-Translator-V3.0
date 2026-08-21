@@ -1973,8 +1973,21 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }, 1200);
 });
 
-// 3. 垃圾回收：當分頁關閉時，清除該分頁的小說模式狀態與相關 context
+// 3. 垃圾回收：當分頁關閉時，清除該分頁的小說模式狀態、進行中任務與相關 context
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  // 清理記憶體中的翻譯中任務與保活計數
+  if (activeTranslationJobs.has(tabId)) {
+    const job = activeTranslationJobs.get(tabId);
+    if (job) {
+      activeTranslationJobs.delete(job.sourceTabId);
+      activeTranslationJobs.delete(job.resultTabId);
+    }
+    activeTranslationJobs.delete(tabId);
+    swKeepAlive.stop();
+  }
+  delete sessionStoryContext[tabId];
+  delete lastNovelUrlByTab[tabId];
+
   // 1. 清除小說模式狀態
   await state.update('novelModeTabs', (current = {}) => {
     const next = { ...current };

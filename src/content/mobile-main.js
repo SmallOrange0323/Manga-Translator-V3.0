@@ -478,6 +478,9 @@ export function initMobileMode() {
     resetDockTimer();
   };
 
+  // 處理手勢異常中斷 (如收到電話或滑出視窗)
+  triggerBtn.onpointercancel = triggerBtn.onpointerup;
+
   // 點擊觸發 (原生 click 與 touchend 雙重保證)
   triggerBtn.onclick = (e) => {
     if (isDragMoved) return;
