@@ -364,13 +364,12 @@ export function crawlImages() {
     // ── 3. 廣用 DOM 與 Canvas 閱讀器容器掃描 (全方位 Lazy 屬性大滿貫) ──
     const imgs = Array.from(document.querySelectorAll('img, canvas, svg image, div[style*="background"], div[class*="page"]'));
     
-    // 生肉網站與日本電子漫畫閱讀器常見容器
+    // 生肉網站與日本電子漫畫閱讀器常見核心容器
     const MANGA_CONTAINERS = [
-        '.ts-main-image', '.reading-content', '#readerarea', '.manga-image', 
-        '.page-break', '.blocks-gallery-item', '.js-page-image', '.viewer-page', 
-        '.page-container', '[class*="page-image"]', '[id*="reader"]',
-        '.reader-content', '.chap-content', '.viewer-cnt', '[class*="reader"]',
-        '[class*="chapter"]', '[id*="chapter"]', '.container-chapter', '.chapter-content'
+        '#list-imga', '#readerarea', '.reading-content', '.ts-main-image', 
+        '.manga-image', '.page-break', '.blocks-gallery-item', '.js-page-image', 
+        '.viewer-page', '.page-container', '[class*="page-image"]',
+        '.chap-content', '.viewer-cnt', '#reader', '.readerarea'
     ];
 
     imgs.forEach(img => {
@@ -382,7 +381,7 @@ export function crawlImages() {
         const lazyAttrs = [
             'data-src', 'data-lazy-src', 'data-original', 'data-src-img', 'data-url', 
             'data-page-src', 'data-full-url', 'data-cdn', 'data-image', 'data-img', 
-            'data-path', 'data-file', 'data-image-src', 'data-bg', 'data-actual-src'
+            'data-path', 'data-file', 'data-image-src', 'data-bg', 'data-actual-src', 'data-aload'
         ];
         
         let dataSrc = null;
@@ -440,14 +439,24 @@ export function crawlImages() {
         }
         
         // 判斷是否在漫畫主閱讀容器內
-        const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector));
+        const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector)) || (img.classList && img.classList.contains('chapter-img'));
 
-        // 封面、側欄、標題資訊列與文章頭像容器排除 (如 Rawkuma, Mangakakalot 等頂部小封面)
-        const isInCoverOrHeaderBox = !!(img && img.closest && img.closest(
-            '.headpost, .thumb, .series-thumb, .thumb-series, .post-thumb, .infox, .bdr, .entry-header, .cover, .series-cover, .sidebar, .widget, .manga-info, .series-info, .anime-info, .series-profile'
+        // 徹底排除無效雜項容器 (驗證碼、模態框、登入框、麵包屑、導航列、頂部封面、側邊欄)
+        const isInJunkBox = !!(img && img.closest && img.closest(
+            '.modal, #login, #register, #forgot_password, #modal_baoloi, .modal-dialog, ' +
+            '.form-signin, .captcha, .chance-captcha, .breadcrumb, ol.breadcrumb, ' +
+            'nav, #header, #header_menu, .navbar, .headroom, .rd_sidebar, ' +
+            '.headpost, .thumb, .series-thumb, .thumb-series, .post-thumb, .infox, .bdr, ' +
+            '.entry-header, .cover, .series-cover, .sidebar, .widget, .manga-info, .series-info, ' +
+            '.anime-info, .series-profile, .reactions, .wp-reactions, .post-ratings, .comment-reactions, ' +
+            '.emotion-box, .votes, .social-share, .footer-widgets'
         ));
 
-        // 獲取畫面上的實際渲染尺寸 (防止高清大圖被 CSS 縮成小封面時仍被判定為大圖)
+        // 排除被 CSS 隱藏或 class="hide" 的非閱讀區圖片
+        const isHidden = (img.classList && (img.classList.contains('hide') || img.classList.contains('hidden'))) ||
+                         (img.style && (img.style.display === 'none' || img.style.visibility === 'hidden'));
+
+        // 獲取畫面上的實際渲染尺寸
         let renderedWidth = 0;
         let renderedHeight = 0;
         if (img && typeof img.getBoundingClientRect === 'function') {
@@ -459,36 +468,36 @@ export function crawlImages() {
         // 嚴格尺寸門檻 (漫畫頁面高度普遍 >= 350px, 寬度 >= 250px)
         let isTooSmall = false;
         if (isInMangaContainer) {
-            // 漫畫閱讀容器內：排除小於 250x350 的選單小圖示、讚按鈕與 Icon
+            // 漫畫閱讀容器內：排除小於 250x350 的小圖示
             isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
         } else {
-            // 容器外：嚴格限制 (排除一般網頁圖示、封面縮圖與廣告橫圖)
+            // 容器外：嚴格限制
             const isNaturalSmall = (width > 0 && width < 500) || (height > 0 && height < 400);
             const isRenderedSmall = (renderedWidth > 0 && renderedWidth < 300) || (renderedHeight > 0 && renderedHeight < 350);
-            isTooSmall = isNaturalSmall || isRenderedSmall || isInCoverOrHeaderBox;
+            isTooSmall = isNaturalSmall || isRenderedSmall || isInJunkBox || isHidden;
         }
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
         
-        // 垃圾關鍵字大滿貫 (徹底排除選單、頭像、社群、評分、反應表情包與按鈕等雜訊圖)
+        // 垃圾關鍵字大滿貫 (徹底排除選單、加載轉輪、驗證碼、頭像、評分圖標)
         const junkKeywords = [
-            'emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction',
+            'chance-load', 'captcha', 'lzloader', 'lzloader1', 'loader', 'spin', 'spinner',
+            'loading', 'placeholder', 'emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction',
             'thumb', 'small', 'widget', 'social', 'badge', 'ad-', 'comment',
-            'loading', 'placeholder', 'footer', 'header', 'nav', 'share', 'profile',
-            'upvote', 'downvote', 'funny', 'love', 'surprised', 'angry', 'vote', 'rating',
-            'emoticon', 'stickers', 'smilies', 'dislike', 'thumbs-up', 'thumbs-down',
-            'wp-reactions', 'post-ratings', 'emotion'
+            'footer', 'header', 'nav', 'share', 'profile', 'upvote', 'downvote',
+            'funny', 'love', 'surprised', 'angry', 'vote', 'rating', 'emoticon', 'stickers',
+            'smilies', 'dislike', 'thumbs-up', 'thumbs-down', 'wp-reactions', 'post-ratings', 'emotion'
         ];
         const isJunkUrl = junkKeywords.some(key => url && url.toLowerCase().includes(key));
         
-        // 正方形表情/評分圖標特徵排除 (如 512x512, 256x256, 128x128 等小於 600px 的 1:1 圖標)
+        // 排除小於 800px 的 GIF 動畫加載圖 (漫畫正頁絕非小 GIF)
+        const isGifLoader = url && url.toLowerCase().includes('.gif') && (width < 800 || height < 800 || isJunkUrl);
+
+        // 正方形表情/評分圖標特徵排除
         const isSquareReactionIcon = /(?:512x512|256x256|128x128|64x64|48x48|96x96|150x150|300x300)/i.test(url || '') || 
                                      (width > 0 && height > 0 && width <= 600 && height <= 600 && Math.abs(width - height) < 10 && isJunkUrl);
 
-        // 父容器特徵排除
-        const isInReactionBox = img && img.closest && img.closest('.reactions, .wp-reactions, .post-ratings, .comment-reactions, .emotion-box, .votes, .social-share, .footer-widgets');
-
-        if (!isTooSmall && !isUnloadedJunk && !isJunkUrl && !isSquareReactionIcon && !isInReactionBox && !isInCoverOrHeaderBox && url) {
+        if (!isTooSmall && !isUnloadedJunk && !isJunkUrl && !isGifLoader && !isSquareReactionIcon && !isInJunkBox && !isHidden && url) {
             if (!url.includes('data:image/svg+xml') && !url.includes('data:image/gif;base64,R0lGOD')) {
                 mangaImages.push({
                     element: img,
