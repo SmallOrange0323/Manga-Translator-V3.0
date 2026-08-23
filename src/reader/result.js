@@ -300,7 +300,8 @@ document.addEventListener('DOMContentLoaded', () => {
             chrome.runtime.sendMessage({
                 action: 'RETRANSLATE_ALL_BATCH',
                 images: images,
-                sourceTabId: sourceTabId
+                sourceTabId: sourceTabId,
+                mangaKey: activeMangaKey
             }, (response) => {
                 if (response?.status !== 'retrying') {
                     alert('重新翻譯請求失敗：' + (response?.error || '未知錯誤'));
@@ -334,7 +335,8 @@ document.addEventListener('DOMContentLoaded', () => {
             chrome.runtime.sendMessage({
                 action: 'RETRY_FAILED_BATCH',
                 images: images,
-                sourceTabId: sourceTabId
+                sourceTabId: sourceTabId,
+                mangaKey: activeMangaKey
             }, (response) => {
                 if (response?.status !== 'retrying') {
                     alert('批次重翻請求失敗：' + (response?.error || '未知錯誤'));
@@ -1038,7 +1040,8 @@ function getOrCreateBatchSection(batchIndex) {
                 action: 'RETRY_FAILED_BATCH',
                 images: batchImages,
                 targetBatchIndex: batchIndex,
-                sourceTabId: sourceTabId
+                sourceTabId: sourceTabId,
+                mangaKey: activeMangaKey
             }, (response) => {
                 if (response?.status !== 'retrying') {
                     alert('批次重翻失敗: ' + (response?.error || '未知錯誤'));

@@ -1086,45 +1086,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true; // 非同步
   }
 
-  // ── 改動3：整批重試 / 指定批次重翻 — 一鍵重試圖片（不開新分頁） ──
+  // ── 整批重試 / 指定批次重翻 — 一鍵重試圖片（不開新分頁） ──
   if (message.action === 'RETRY_FAILED_BATCH') {
-      const { images, sourceTabId: retrySourceTabId, targetBatchIndex } = message;
-      // resultTabId 優先使用 message 帶來的值，若為 null 則以 sender（result 頁自身）作為回傳目標
+      const { images, sourceTabId: retrySourceTabId, targetBatchIndex, mangaKey } = message;
       const retryResultTabId = message.resultTabId || sender.tab?.id;
       if (!images || images.length === 0 || !retryResultTabId) {
           sendResponse({ status: 'error', error: '缺少圖片清單或結果分頁 ID' });
           return false;
       }
-      // 重置停止旗標
       state.set('isStopping', false);
-      // 直接以現有 resultTabId 啟動批次翻譯（不建立新分頁），並標記為重試 (isRetry = true)，且帶上 targetBatchIndex
-      processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, true, targetBatchIndex);
-      log.info('Background', `[重試批次] 收到 ${images.length} 張圖片，重翻指定批次 #${targetBatchIndex !== undefined ? targetBatchIndex + 1 : '全'}... (resultTabId: ${retryResultTabId})`);
+      processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, true, targetBatchIndex, '', mangaKey || null);
+      log.info('Background', `[重試批次] 收到 ${images.length} 張圖片，重翻指定批次 #${targetBatchIndex !== undefined ? targetBatchIndex + 1 : '全'} (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
       sendResponse({ status: 'retrying' });
       return false;
   }
 
   // ── 批次重翻整個作品/整批 ──
   if (message.action === 'RETRANSLATE_ALL_BATCH') {
-      const { images, sourceTabId: retrySourceTabId } = message;
+      const { images, sourceTabId: retrySourceTabId, mangaKey } = message;
       const retryResultTabId = message.resultTabId || sender.tab?.id;
       if (!images || images.length === 0 || !retryResultTabId) {
           sendResponse({ status: 'error', error: '缺少圖片清單或結果分頁 ID' });
           return false;
       }
 
-      // 先停止當前可能正在運作的任何任務
       state.set('isStopping', true);
 
-      // 延遲一點點時間（例如 300ms），讓前一次的 loop 退出
       setTimeout(async () => {
-          // 重置停止與暫停旗標
           await state.set('isStopping', false);
           await state.set('isBatchPaused', false);
 
-          log.info('Background', `[重翻批次] 收到 ${images.length} 張圖片，開始重新翻譯... (resultTabId: ${retryResultTabId})`);
-          // 直接以現有 resultTabId 啟動批次翻譯，isRetry = false，這會清空結果頁面並重頭開始
-          dispatchMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, false);
+          log.info('Background', `[重翻批次] 收到 ${images.length} 張圖片，開始重新翻譯 (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
+          dispatchMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, false, null, mangaKey || null);
       }, 300);
 
       sendResponse({ status: 'retrying' });
@@ -1361,13 +1354,13 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
  * - one-step: 一條龍模式 (每批圖片直接送 Vision 直譯，極速、零等待)
  * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
  */
-async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
+async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
     const mode = await state.get('translationMode', 'one-step');
-    log.info('Background', `[任務派發] 當前模式: ${mode}，圖片數: ${images.length}，是否重試: ${isRetry}`);
+    log.info('Background', `[任務派發] 當前模式: ${mode}，圖片數: ${images.length}，是否重試: ${isRetry}，指定作品Key: ${customMangaKey || '無'}`);
     if (mode === 'two-step' && !isRetry) {
-        return processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex);
+        return processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey);
     } else {
-        return processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex);
+        return processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey);
     }
 }
 
@@ -1379,7 +1372,7 @@ async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, na
  *           - 專屬術語 ➔ 合併存入長期詞庫 (saveGlossary)
  * 階段 2：組合 sessionContextSnippet，呼叫 Vision 精翻輸出
  */
-async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null) {
+async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
     if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'two-step' });
     if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'two-step' });
 
@@ -1475,7 +1468,7 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
     let sessionContextSnippet = '';
     const navCtx = await state.get('navigationContext', {});
     chrome.tabs.sendMessage(resultTabId, { action: 'clearResults', expectedCount: images.length }).catch(() => {});
-    const currentMangaKey = navCtx[sourceTabId];
+    const currentMangaKey = customMangaKey || navCtx[sourceTabId];
 
     if (fullScriptText.trim().length > 20) {
         broadcastStatus(`✨ [階段 1.5] 通讀全篇劇本，分析當話劇情大綱與人物關係...`, 'info');
@@ -1533,11 +1526,11 @@ ${termsSnippet}
         swKeepAlive.stop();
     }
 
-    return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet);
+    return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet, customMangaKey);
 }
 
 // PC 模式的專屬翻譯處理器 (雙緩衝管線版本 - 0 延遲無縫流式批次)
-async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '') {
+async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '', customMangaKey = null) {
     if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
     if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
 
@@ -1575,7 +1568,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
     let glossarySnippet = injectedGlossarySnippet || '';
     const navCtx = await state.get('navigationContext', {});
-    let currentMangaKey = navCtx[sourceTabId];
+    let currentMangaKey = customMangaKey || navCtx[sourceTabId] || navCtx[resultTabId];
     let currentDisplayName = currentMangaKey;
 
     try {
@@ -1610,7 +1603,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 currentDisplayName = entry.displayName || currentMangaKey;
                 if (entry.terms && entry.terms.length > 0) {
                     glossarySnippet = buildGlossaryPromptSnippet(entry.terms);
-                    log.info('Glossary', `套用詞庫 "${currentMangaKey}"，共 ${entry.terms.length} 筆術語`);
+                    log.info('Glossary', `✅ [詞庫生效] 已成功為批次翻譯載入 "${currentDisplayName}" 詞庫，共 ${entry.terms.length} 筆強制定名：\n` + entry.terms.map(t => `  • 原文: "${t.ori}" ➔ 強制譯名: "${t.trans}"`).join('\n'));
+                } else {
+                    log.info('Glossary', `ℹ️ [詞庫狀態] 作品 "${currentDisplayName}" 目前詞庫為空 (0 詞)`);
                 }
             }
             
@@ -1618,6 +1613,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 action: 'TITLE_DETECTED',
                 payload: { romanKey: currentMangaKey, displayName: currentDisplayName }
             }).catch(() => {});
+        } else {
+            log.warn('Glossary', `⚠️ [詞庫警告] 未找到當前作品 Key，本次翻譯未套用任何專屬詞庫`);
         }
     } catch (glossaryErr) {
         log.warn('Glossary', `初始化階段發生錯誤，將以無詞庫狀態繼續: ${glossaryErr.message}`);

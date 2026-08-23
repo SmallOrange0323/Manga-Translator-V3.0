@@ -291,10 +291,18 @@ export async function importGlossaryTerms(mangaKey, terms) {
 }
 
 /**
- * 生成 Prompt 注入片段
+ * 生成 Prompt 注入片段 (強約束 XML / 列表格式，確保 LLM 100% 遵守指定譯名)
  */
 export function buildGlossaryPromptSnippet(terms) {
     if (!terms || terms.length === 0) return '';
-    const pairs = terms.map(t => `${t.ori}→${t.trans}`).join('、');
-    return `\n\n【專屬名詞對照表 - 絕對遵守】以下術語請嚴格使用指定譯名，不可更改：${pairs}`;
+    const formattedList = terms
+        .filter(t => t && t.ori && t.trans)
+        .map(t => `• 原文: "${t.ori}" ➔ 強制譯名: "${t.trans}"`)
+        .join('\n');
+
+    return `
+【最高優先級 - 專屬名詞與人名強制定名表 (CRITICAL GLOSSARY OVERRIDE)】
+遇到以下日文詞彙/人名時，你【必須 100% 強制使用】指定的繁體中文譯名，嚴禁擅自意譯、音譯或替換為其他名稱：
+${formattedList}
+`;
 }
