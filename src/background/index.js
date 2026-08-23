@@ -2107,9 +2107,20 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
         log.info('Background', `[AutoBatch] 確認 content script 注入狀態...`);
         await ensureContentScriptInjected(tabId);
 
-        const crawlResult = await sendMessageWithRetry(tabId, { action: 'crawlImages' });
+        // 輪詢等待生肉網站非同步/AJAX 圖片加載完畢 (最多等待 8 次 × 800ms = 6.4 秒)
+        let crawlResult = null;
+        for (let attempt = 1; attempt <= 8; attempt++) {
+            crawlResult = await sendMessageWithRetry(tabId, { action: 'crawlImages' });
+            if (crawlResult && Array.isArray(crawlResult.images) && crawlResult.images.length > 0) {
+                log.info('Background', `[AutoBatch] 第 ${attempt} 次抓圖成功，獲取 ${crawlResult.images.length} 張圖片！`);
+                break;
+            }
+            log.info('Background', `[AutoBatch] 第 ${attempt}/8 次抓圖尚未發現圖片 (生肉頁面非同步載入中)，等待重試...`);
+            await new Promise(r => setTimeout(r, 800));
+        }
+
         if (!crawlResult || !crawlResult.images || crawlResult.images.length === 0) {
-            log.warn('Background', '[AutoBatch] 接力翻譯：抓圖結果為空，中止');
+            log.warn('Background', '[AutoBatch] 接力翻譯：多次輪詢後抓圖結果仍為空，中止');
             return;
         }
 
