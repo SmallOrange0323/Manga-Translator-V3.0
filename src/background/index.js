@@ -2107,16 +2107,37 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
         log.info('Background', `[AutoBatch] 確認 content script 注入狀態...`);
         await ensureContentScriptInjected(tabId);
 
-        // 輪詢等待生肉網站非同步/AJAX 圖片加載完畢 (最多等待 8 次 × 800ms = 6.4 秒)
+        // 輪詢等待生肉網站非同步/AJAX 圖片加載完畢並達到穩定狀態 (防止只抓到剛載入的前幾張)
+        let lastCount = 0;
+        let stableCountMatches = 0;
         let crawlResult = null;
-        for (let attempt = 1; attempt <= 8; attempt++) {
-            crawlResult = await sendMessageWithRetry(tabId, { action: 'crawlImages' });
-            if (crawlResult && Array.isArray(crawlResult.images) && crawlResult.images.length > 0) {
-                log.info('Background', `[AutoBatch] 第 ${attempt} 次抓圖成功，獲取 ${crawlResult.images.length} 張圖片！`);
-                break;
+
+        for (let attempt = 1; attempt <= 12; attempt++) {
+            const res = await sendMessageWithRetry(tabId, { action: 'crawlImages' });
+            const currentImages = res?.images || [];
+            const count = currentImages.length;
+
+            if (count > 0) {
+                if (count === lastCount) {
+                    stableCountMatches++;
+                    // 連續 2 次數量不變，確認所有圖片已完全注入！
+                    if (stableCountMatches >= 2 || (count >= 15 && stableCountMatches >= 1)) {
+                        crawlResult = res;
+                        log.info('Background', `[AutoBatch] 圖片數量已完全穩定：共獲取 ${count} 張圖片！(檢測嘗試 ${attempt} 次)`);
+                        break;
+                    }
+                } else {
+                    // 圖片數量持續增長中 (例如 3 ➔ 8 ➔ 12)，重置穩定次數，繼續等待下一輪
+                    stableCountMatches = 0;
+                    lastCount = count;
+                    log.info('Background', `[AutoBatch] 偵測到生肉圖片動態注入中 (當前 ${count} 張)，等待全部加載完畢...`);
+                }
+            } else {
+                log.info('Background', `[AutoBatch] 第 ${attempt}/12 次抓圖尚未發現圖片，等待頁面渲染...`);
             }
-            log.info('Background', `[AutoBatch] 第 ${attempt}/8 次抓圖尚未發現圖片 (生肉頁面非同步載入中)，等待重試...`);
-            await new Promise(r => setTimeout(r, 800));
+
+            crawlResult = res;
+            await new Promise(r => setTimeout(r, 600));
         }
 
         if (!crawlResult || !crawlResult.images || crawlResult.images.length === 0) {
