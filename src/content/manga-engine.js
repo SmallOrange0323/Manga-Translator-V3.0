@@ -273,6 +273,25 @@ function tryReconstructScrambledDOM(containerEl) {
     return null;
 }
 
+/**
+ * 智慧極速預滾動：瞬間分段模擬向下滾動觸發頁面所有 IntersectionObserver 與 Scroll-based 懶載入
+ */
+export async function triggerLazyScroll() {
+    try {
+        const totalHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 3000);
+        const winHeight = window.innerHeight || 800;
+        
+        // 快速分段觸發滾動事件
+        for (let y = winHeight; y <= totalHeight; y += winHeight * 1.5) {
+            window.scrollTo(0, y);
+            window.dispatchEvent(new Event('scroll'));
+        }
+        // 滾動回原位
+        window.scrollTo(0, 0);
+        await new Promise(r => setTimeout(r, 120));
+    } catch(e) {}
+}
+
 export function crawlImages() {
     let mangaImages = [];
 

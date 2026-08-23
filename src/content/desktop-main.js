@@ -1,6 +1,6 @@
 import { state } from '../utils/state.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
-import { toggleSelectionMode, crawlImages } from './manga-engine.js';
+import { toggleSelectionMode, crawlImages, triggerLazyScroll } from './manga-engine.js';
 import { log } from '../utils/logger.js';
 
 // 本地小說批次翻譯拉取佇列
@@ -64,11 +64,14 @@ export function initDesktopMode() {
     }
 
     if (request.action === 'crawlImages') {
-        const results = crawlImages();
-        sendResponse({ 
-            images: results.images, 
-            navLinks: results.navLinks 
+        triggerLazyScroll().then(() => {
+            const results = crawlImages();
+            sendResponse({ 
+                images: results.images, 
+                navLinks: results.navLinks 
+            });
         });
+        return true; // 非同步響應
     }
 
     if (request.action === 'fetchBase64') {

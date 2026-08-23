@@ -1,6 +1,6 @@
 import { log } from '../utils/logger.js';
 import { state } from '../utils/state.js';
-import { crawlImages } from './manga-engine.js';
+import { crawlImages, triggerLazyScroll } from './manga-engine.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
 
 // 本地小說批次翻譯拉取佇列
@@ -548,12 +548,14 @@ export function initMobileMode() {
     }
 
     if (request.action === 'crawlImages') {
-        const results = crawlImages();
-        sendResponse({ 
-            images: results.images, 
-            navLinks: results.navLinks 
+        triggerLazyScroll().then(() => {
+            const results = crawlImages();
+            sendResponse({ 
+                images: results.images, 
+                navLinks: results.navLinks 
+            });
         });
-        return false;
+        return true; // 非同步
     }
 
     // [新增] 接收背景廣播的 API 狀態訊息，顯示在行動端日誌面板
