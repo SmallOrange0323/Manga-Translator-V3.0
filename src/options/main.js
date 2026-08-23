@@ -1,6 +1,6 @@
 // src/options/main.js
 import { state } from '../utils/state.js';
-import { loadGlossary, saveGlossary, GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
+import { loadGlossary, saveGlossary, deduplicateGlossaries, GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
 import * as Constants from '../utils/constants.js';
 import { getAuthToken, performBiDirectionalSync } from '../utils/sync.js';
 
@@ -531,7 +531,17 @@ async function refreshGlossaryList() {
 
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        const glossaries = data[GLOSSARY_STORAGE_KEY] || {};
+        let glossaries = data[GLOSSARY_STORAGE_KEY] || {};
+        
+        // 自動執行全局去重合併
+        const deduplicated = deduplicateGlossaries(glossaries);
+        if (Object.keys(deduplicated).length !== Object.keys(glossaries).length) {
+            glossaries = deduplicated;
+            chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: glossaries }).catch(() => {});
+        } else {
+            glossaries = deduplicated;
+        }
+
         const keys = Object.keys(glossaries).sort((a, b) => (glossaries[b].lastUsed || 0) - (glossaries[a].lastUsed || 0));
 
         if (keys.length === 0) {

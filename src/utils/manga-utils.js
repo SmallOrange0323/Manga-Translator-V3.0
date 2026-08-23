@@ -1,3 +1,24 @@
+function toCleanTitleCase(str) {
+    if (!str || typeof str !== 'string') return '';
+    // 若包含日文/中文，直接返回清洗後的字串
+    if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(str)) {
+        return str.replace(/\s+/g, ' ').trim();
+    }
+    // 純英數/羅馬拼音：標準化為工整的 Title Case (如 "KAMIGAMI NO..." ➔ "Kamigami no...")
+    const minorWords = new Set(['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'of', 'in', 'no', 'de', 'to', 'wa', 'ga', 'ni', 'o', 'wo']);
+    return str
+        .toLowerCase()
+        .replace(/[\-_]+/g, ' ')
+        .split(/\s+/)
+        .map((w, idx) => {
+            if (!w) return '';
+            if (idx > 0 && minorWords.has(w)) return w;
+            return w.charAt(0).toUpperCase() + w.slice(1);
+        })
+        .join(' ')
+        .trim();
+}
+
 /**
  * 從網頁標題字串中解析作品識別碼。
  * 支援標題格式：
@@ -23,7 +44,7 @@ export function extractMangaTitle(titleStr) {
   );
   if (match) {
     const rawJP = match[1].trim();
-    const roman = match[2] ? match[2].trim() : rawJP;
+    const roman = match[2] ? toCleanTitleCase(match[2].trim()) : rawJP;
     return {
       displayName: rawJP,
       rawJapanese: rawJP,
@@ -34,14 +55,14 @@ export function extractMangaTitle(titleStr) {
   // 模式 2：純日文或中日混排
   const jpMatch = str.match(/^([\u3040-\u30FF\u4E00-\u9FFF\s]{2,})?(?:\s+(?:第|話|话|Ch|EP|Vol|v\.)[\s.]*\d+|\s+\d+)/i);
   if (jpMatch && jpMatch[1]) {
-    const name = jpMatch[1].trim();
+    const name = jpMatch[1].replace(/\s+/g, ' ').trim();
     return { displayName: name, rawJapanese: name, romanKey: name };
   }
 
   // 模式 3：純英文/羅馬拼音
   const enMatch = str.match(/^([A-Za-z0-9][A-Za-z0-9\s:!'\-\(\)]{3,})?(?:\s+(?:Chapter|Chap|Cheapter|Ch|EP|Vol|v\.|episode|ep\.)[\s.]*\d+|\s+\d+)/i);
   if (enMatch && enMatch[1]) {
-    const name = enMatch[1].trim();
+    const name = toCleanTitleCase(enMatch[1]);
     return { displayName: name, rawJapanese: null, romanKey: name };
   }
 
@@ -53,6 +74,7 @@ export function extractMangaTitle(titleStr) {
       name = name.replace(/\s+(?:Chapter|Chap|Ch|EP|Vol|v\.|ep|episode)[\s.]*\d+.*$/i, '');
       name = name.replace(/\s+\d+\s*$/g, '');
       name = name.replace(/\s*\([^)]*$/, '');
+      name = toCleanTitleCase(name);
       if (name.length >= 2) {
           return { displayName: name, rawJapanese: null, romanKey: name };
       }

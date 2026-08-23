@@ -15,7 +15,98 @@ export const GLOSSARY_STORAGE_KEY = 'mangaGlossaries';
 export const GLOSSARY_MAX_TERMS = 500;
 
 /**
- * 讀取指定作品的詞庫
+ * 作品 Key 歸一化：轉小寫、去除多餘標點符號與多餘空白
+ * 例如 "KAMIGAMI NO KAGO..." 與 "Kamigami No Kago..." 歸一化後皆為 "kamigami no kago"
+ */
+export function normalizeMangaKey(str) {
+    if (!str || typeof str !== 'string') return '';
+    return str
+        .toLowerCase()
+        .replace(/[\-_:!?'"()（）\[\]【】／/\\.,~～]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * 智慧查找既有詞庫 Key (精確匹配 ➔ 歸一化匹配 ➔ 前綴包含匹配)
+ */
+export function findExistingGlossaryKey(allGlossaries, mangaKey) {
+    if (!mangaKey || !allGlossaries) return null;
+    if (allGlossaries[mangaKey]) return mangaKey;
+
+    const targetNorm = normalizeMangaKey(mangaKey);
+    if (!targetNorm) return null;
+
+    const keys = Object.keys(allGlossaries);
+
+    // 1. 歸一化完全匹配 (忽略大小寫、標點與多餘空格)
+    for (const key of keys) {
+        if (normalizeMangaKey(key) === targetNorm) {
+            return key;
+        }
+    }
+
+    // 2. 前綴包含匹配 (例如 "Kamigami no Kago de Seisan Kakumei" 與 "Kamigami no Kago de Seisan Kakumei 15")
+    for (const key of keys) {
+        const keyNorm = normalizeMangaKey(key);
+        if (keyNorm.length >= 8 && targetNorm.length >= 8) {
+            if (keyNorm.startsWith(targetNorm) || targetNorm.startsWith(keyNorm)) {
+                return key;
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 自動合併歷史累積的重複大小寫詞庫 (Auto Deduplicate & Merge)
+ */
+export function deduplicateGlossaries(allGlossaries) {
+    if (!allGlossaries || typeof allGlossaries !== 'object') return {};
+    const deduplicated = {};
+    const normMap = new Map(); // normKey -> canonicalKey
+
+    for (const [key, entry] of Object.entries(allGlossaries)) {
+        if (!entry) continue;
+        const normKey = normalizeMangaKey(key);
+        if (!normKey) continue;
+
+        if (!normMap.has(normKey)) {
+            // 新的分組：選定當前 key 作為代表
+            normMap.set(normKey, key);
+            deduplicated[key] = {
+                displayName: entry.displayName || key,
+                rawJapanese: entry.rawJapanese || null,
+                romanKey: entry.romanKey || key,
+                terms: Array.isArray(entry.terms) ? [...entry.terms] : [],
+                lastUsed: entry.lastUsed || Date.now()
+            };
+        } else {
+            // 已存在相同作品：進行條目深度合併與去重
+            const canonicalKey = normMap.get(normKey);
+            const target = deduplicated[canonicalKey];
+            
+            // 優先挑選首字母大寫或包含日文的漂亮名稱
+            if (entry.displayName && (!target.displayName || entry.displayName.length > target.displayName.length)) {
+                target.displayName = entry.displayName;
+            }
+            if (entry.rawJapanese && !target.rawJapanese) {
+                target.rawJapanese = entry.rawJapanese;
+            }
+
+            // 合併詞彙條目 (保留使用者手動詞彙)
+            const { terms: mergedTerms } = mergeGlossaryTerms(target.terms, entry.terms || []);
+            target.terms = mergedTerms;
+            target.lastUsed = Math.max(target.lastUsed || 0, entry.lastUsed || 0);
+        }
+    }
+
+    return deduplicated;
+}
+
+/**
+ * 讀取指定作品的詞庫 (支援大小寫不敏感歸一化比對)
  * @param {string} mangaKey 
  * @returns {Promise<Object|null>}
  */
@@ -23,8 +114,13 @@ export async function loadGlossary(mangaKey) {
     if (!mangaKey) return null;
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        const all = data[GLOSSARY_STORAGE_KEY] || {};
-        return all[mangaKey] || null;
+        let all = data[GLOSSARY_STORAGE_KEY] || {};
+
+        const matchedKey = findExistingGlossaryKey(all, mangaKey);
+        if (matchedKey && all[matchedKey]) {
+            return all[matchedKey];
+        }
+        return null;
     } catch (e) {
         log.warn('Glossary', `讀取失敗: ${e.message}`);
         return null;
@@ -32,7 +128,7 @@ export async function loadGlossary(mangaKey) {
 }
 
 /**
- * 儲存詞庫並執行上限修剪
+ * 儲存詞庫 (自動匹配既有同名作品進行覆蓋合併，絕不產生大小寫重複項)
  * @param {string} mangaKey 
  * @param {Object} glossaryEntry 
  */
@@ -40,7 +136,13 @@ export async function saveGlossary(mangaKey, glossaryEntry) {
     if (!mangaKey || !glossaryEntry) return;
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        const all = data[GLOSSARY_STORAGE_KEY] || {};
+        let all = data[GLOSSARY_STORAGE_KEY] || {};
+
+        // 自動執行全局去重合併
+        all = deduplicateGlossaries(all);
+
+        // 智慧尋找既有 Key
+        const targetKey = findExistingGlossaryKey(all, mangaKey) || mangaKey;
 
         // 執行 500 詞上限修剪
         let terms = glossaryEntry.terms || [];
@@ -53,22 +155,27 @@ export async function saveGlossary(mangaKey, glossaryEntry) {
             log.info('Glossary', `詞庫已修剪至 ${terms.length} 詞 (保留全部使用者條目)`);
         }
 
-        const oldEntry = all[mangaKey] || {};
-        all[mangaKey] = {
-            displayName: oldEntry.displayName || glossaryEntry.displayName || mangaKey,
+        const oldEntry = all[targetKey] || {};
+        all[targetKey] = {
+            displayName: glossaryEntry.displayName || oldEntry.displayName || targetKey,
             rawJapanese: glossaryEntry.rawJapanese || oldEntry.rawJapanese || null,
-            romanKey: glossaryEntry.romanKey || oldEntry.romanKey || mangaKey,
+            romanKey: glossaryEntry.romanKey || oldEntry.romanKey || targetKey,
             terms,
             lastUsed: Date.now()
         };
 
+        // 若本次使用的 targetKey 與傳入的不同，清理舊的不同格式 key
+        if (targetKey !== mangaKey && all[mangaKey]) {
+            delete all[mangaKey];
+        }
+
         await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-        log.info('Glossary', `已儲存作品 "${mangaKey}" 詞庫，共 ${terms.length} 詞`);
+        log.info('Glossary', `已儲存作品 "${targetKey}" 詞庫，共 ${terms.length} 詞`);
         
         // 通知 UI 更新
         chrome.runtime.sendMessage({ 
             action: 'GLOSSARY_UPDATED', 
-            payload: { mangaKey, termCount: terms.length } 
+            payload: { mangaKey: targetKey, termCount: terms.length } 
         }).catch(() => {});
 
     } catch (e) {
@@ -126,7 +233,8 @@ export async function deleteGlossaryTerm(mangaKey, oriText) {
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
         const all = data[GLOSSARY_STORAGE_KEY] || {};
-        const entry = all[mangaKey];
+        const targetKey = findExistingGlossaryKey(all, mangaKey) || mangaKey;
+        const entry = all[targetKey];
         
         if (!entry || !entry.terms) return { success: false, message: '找不到該作品的詞庫' };
         
@@ -138,12 +246,12 @@ export async function deleteGlossaryTerm(mangaKey, oriText) {
         }
         
         await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-        log.info('Glossary', `已從 "${mangaKey}" 刪除詞條: ${oriText}`);
+        log.info('Glossary', `已從 "${targetKey}" 刪除詞條: ${oriText}`);
         
         // 通知 UI 更新
         chrome.runtime.sendMessage({ 
             action: 'GLOSSARY_UPDATED', 
-            payload: { mangaKey, termCount: entry.terms.length } 
+            payload: { mangaKey: targetKey, termCount: entry.terms.length } 
         }).catch(() => {});
         
         return { success: true, termCount: entry.terms.length };
@@ -163,7 +271,8 @@ export async function deleteMultipleGlossaryTerms(mangaKey, oriTexts) {
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
         const all = data[GLOSSARY_STORAGE_KEY] || {};
-        const entry = all[mangaKey];
+        const targetKey = findExistingGlossaryKey(all, mangaKey) || mangaKey;
+        const entry = all[targetKey];
         
         if (!entry || !entry.terms) return { success: false, message: '找不到該作品的詞庫' };
         
@@ -175,12 +284,12 @@ export async function deleteMultipleGlossaryTerms(mangaKey, oriTexts) {
         const deletedCount = originalLength - entry.terms.length;
         
         await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-        log.info('Glossary', `已從 "${mangaKey}" 批次刪除 ${deletedCount} 筆詞條`);
+        log.info('Glossary', `已從 "${targetKey}" 批次刪除 ${deletedCount} 筆詞條`);
         
         // 通知 UI 更新
         chrome.runtime.sendMessage({ 
             action: 'GLOSSARY_UPDATED', 
-            payload: { mangaKey, termCount: entry.terms.length } 
+            payload: { mangaKey: targetKey, termCount: entry.terms.length } 
         }).catch(() => {});
         
         return { success: true, deletedCount, termCount: entry.terms.length };
@@ -199,17 +308,18 @@ export async function deleteGlossary(mangaKey) {
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
         const all = data[GLOSSARY_STORAGE_KEY] || {};
+        const targetKey = findExistingGlossaryKey(all, mangaKey) || mangaKey;
         
-        if (!all[mangaKey]) return { success: false, message: '找不到該作品的詞庫' };
+        if (!all[targetKey]) return { success: false, message: '找不到該作品的詞庫' };
         
-        delete all[mangaKey];
+        delete all[targetKey];
         await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-        log.info('Glossary', `已刪除作品 "${mangaKey}" 的完整詞庫`);
+        log.info('Glossary', `已刪除作品 "${targetKey}" 的完整詞庫`);
         
         // 通知 UI 更新
         chrome.runtime.sendMessage({ 
             action: 'GLOSSARY_UPDATED', 
-            payload: { mangaKey, termCount: 0 } 
+            payload: { mangaKey: targetKey, deleted: true } 
         }).catch(() => {});
         
         return { success: true };
@@ -220,7 +330,7 @@ export async function deleteGlossary(mangaKey) {
 }
 
 /**
- * 更新作品詞庫的顯示名稱
+ * 更新作品詞庫的顯示名稱 (DisplayName)
  * @param {string} mangaKey 
  * @param {string} newDisplayName 
  */
@@ -229,14 +339,13 @@ export async function updateGlossaryDisplayName(mangaKey, newDisplayName) {
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
         const all = data[GLOSSARY_STORAGE_KEY] || {};
-        const entry = all[mangaKey];
+        const targetKey = findExistingGlossaryKey(all, mangaKey) || mangaKey;
         
-        if (!entry) return { success: false, message: '找不到該作品的詞庫' };
+        if (!all[targetKey]) return { success: false, message: '找不到該作品的詞庫' };
         
-        entry.displayName = newDisplayName.trim();
+        all[targetKey].displayName = newDisplayName.trim();
         await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-        log.info('Glossary', `已更新 "${mangaKey}" 的顯示名稱為: ${newDisplayName}`);
-        
+        log.info('Glossary', `已更新 "${targetKey}" 的顯示名稱為: ${newDisplayName}`);
         return { success: true };
     } catch (e) {
         log.warn('Glossary', `更新名稱失敗: ${e.message}`);
@@ -245,42 +354,62 @@ export async function updateGlossaryDisplayName(mangaKey, newDisplayName) {
 }
 
 /**
- * 匯入術語列表
+ * 匯入外部術語到指定作品
  * @param {string} mangaKey 
- * @param {Array} terms 
+ * @param {Array<{ori: string, trans: string}>} terms 
  */
 export async function importGlossaryTerms(mangaKey, terms) {
-    if (!mangaKey || !Array.isArray(terms)) return { success: false, message: '參數錯誤' };
+    if (!mangaKey || !Array.isArray(terms)) return { success: false, error: '參數錯誤' };
     try {
         const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        const all = data[GLOSSARY_STORAGE_KEY] || {};
-        const entry = all[mangaKey] || { terms: [] };
+        let all = data[GLOSSARY_STORAGE_KEY] || {};
+        all = deduplicateGlossaries(all);
+        const targetKey = findExistingGlossaryKey(all, mangaKey) || mangaKey;
         
-        const existingOriSet = new Set(entry.terms.map(t => t.ori.toLowerCase().trim()));
+        const entry = all[targetKey] || {
+            displayName: targetKey,
+            terms: [],
+            lastUsed: Date.now()
+        };
+
+        const existingTerms = entry.terms || [];
+        const existingMap = new Map();
+        existingTerms.forEach(t => existingMap.set(t.ori.toLowerCase().trim(), t));
+
         let addedCount = 0;
-        
-        for (const term of terms) {
-            if (!term.ori || !term.trans) continue;
-            const oriKey = term.ori.toLowerCase().trim();
-            if (existingOriSet.has(oriKey)) continue;
-            
-            entry.terms.push({
-                ori: term.ori.trim(),
-                trans: term.trans.trim(),
-                source: 'user',
-                createdAt: Date.now()
-            });
-            existingOriSet.add(oriKey);
-            addedCount++;
+        for (const item of terms) {
+            if (!item.ori || !item.trans) continue;
+            const oriKey = item.ori.toLowerCase().trim();
+            if (existingMap.has(oriKey)) {
+                // 若已存在但為 AI 產生的，使用者匯入可升級為 user 權威
+                const exist = existingMap.get(oriKey);
+                if (exist.source === 'ai') {
+                    exist.trans = item.trans.trim();
+                    exist.source = 'user';
+                }
+            } else {
+                existingTerms.push({
+                    ori: item.ori.trim(),
+                    trans: item.trans.trim(),
+                    source: 'user',
+                    createdAt: Date.now()
+                });
+                existingMap.set(oriKey, true);
+                addedCount++;
+            }
         }
-        
-        all[mangaKey] = entry;
+
+        entry.terms = existingTerms;
+        entry.lastUsed = Date.now();
+        all[targetKey] = entry;
+
         await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
+        log.info('Glossary', `成功匯入 ${addedCount} 筆術語至 "${targetKey}"`);
         
         // 通知 UI 更新
         chrome.runtime.sendMessage({ 
             action: 'GLOSSARY_UPDATED', 
-            payload: { mangaKey, termCount: entry.terms.length } 
+            payload: { mangaKey: targetKey, termCount: entry.terms.length } 
         }).catch(() => {});
         
         return { success: true, addedCount, termCount: entry.terms.length };

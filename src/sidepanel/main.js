@@ -1,6 +1,7 @@
 import { state } from '../utils/state.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import { LOADING_GIF_FILENAME, RUNNING_ANIMS, STANDING_ASSETS, PRICONNE_LOADING_SPRITES } from '../utils/constants.js';
+import { deduplicateGlossaries, GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
 
 console.log('[Manga Translator V3] Classic Sidepanel Initialized');
 
@@ -159,8 +160,18 @@ chrome.tabs.onActivated.addListener(() => {
 // 填充下拉選單
 async function populateGlossaryDropdown() {
     try {
-        const data = await chrome.storage.local.get(['mangaGlossaries']);
-        const all = data.mangaGlossaries || {};
+        const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
+        let all = data[GLOSSARY_STORAGE_KEY] || {};
+        
+        // 自動執行全局去重合併
+        const deduplicated = deduplicateGlossaries(all);
+        if (Object.keys(deduplicated).length !== Object.keys(all).length) {
+            all = deduplicated;
+            chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all }).catch(() => {});
+        } else {
+            all = deduplicated;
+        }
+
         const keys = Object.keys(all).sort((a, b) => {
             const timeA = all[a].lastUsed || 0;
             const timeB = all[b].lastUsed || 0;
