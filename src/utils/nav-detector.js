@@ -8,29 +8,72 @@ export function detectNavigationLinks() {
     // 取得當前頁面 URL 並標準化 (移除 hash 與末端斜線)
     const currentUrl = window.location.href.split('#')[0].replace(/\/$/, '');
 
-    // 1. 嘗試從 <select> 下拉選單中獲取章節列表與當前選中項 (常見於 Rawkuma, MangaDex, Madara 等漫畫網站)
-    const chapterSelects = document.querySelectorAll('select#chapter, select#select-chapter, select.chapter-select, select[name="chapter"]');
+    // 1. 嘗試從 <select> 下拉選單中獲取章節列表與當前選中項 (相容 Rawkuma, Jestful, MangaDex, Madara 等漫畫網站)
+    const chapterSelects = document.querySelectorAll(
+        'select#chapter, select#select-chapter, select.chapter-select, select[name*="chapter"], select[id*="chapter"], .select-chapter select, .chapter-select select, .chapter_select select, #klist-chss select, select.form-control'
+    );
+
     chapterSelects.forEach(select => {
-        if (select && select.options && select.options.length > 0) {
+        if (select && select.options && select.options.length >= 2) {
             const list = [];
+            let selectedIdx = -1;
+
             for (let i = 0; i < select.options.length; i++) {
                 const opt = select.options[i];
-                const optUrl = opt.value && (opt.value.startsWith('http') || opt.value.startsWith('/')) ? opt.value : '';
+                const optVal = (opt.value || '').trim();
+                const optText = opt.text.trim();
+                if (!optVal && !optText) continue;
+
+                let optUrl = '';
+                if (optVal && (optVal.startsWith('http') || optVal.startsWith('/') || optVal.includes('.html') || optVal.includes('chapter'))) {
+                    optUrl = optVal.startsWith('http') ? optVal : new URL(optVal, window.location.href).href;
+                }
+
                 const isSelected = opt.selected || opt.hasAttribute('selected') || (optUrl && currentUrl.includes(optUrl));
-                const title = opt.text.trim();
-                if (isSelected && !nav.currentChapter) {
-                    nav.currentChapter = title;
+                if (isSelected) {
+                    selectedIdx = list.length;
+                    if (!nav.currentChapter) nav.currentChapter = optText;
                 }
-                if (optUrl) {
-                    list.push({
-                        title: title,
-                        url: optUrl.startsWith('http') ? optUrl : new URL(optUrl, window.location.href).href,
-                        current: isSelected
-                    });
-                }
+
+                list.push({
+                    title: optText,
+                    url: optUrl,
+                    current: isSelected
+                });
             }
+
             if (list.length > 0 && nav.chapterList.length === 0) {
                 nav.chapterList = list;
+            }
+
+            // 智慧推導上一話 / 下一話連結 (若當前為倒序或正序)
+            if (selectedIdx !== -1 && list.length >= 2) {
+                // 判斷章節排列順序 (抽取數字比對第 0 項與最後一項)
+                const getChapNum = (t) => {
+                    const m = (t || '').match(/[\d\.]+/);
+                    return m ? parseFloat(m[0]) : 0;
+                };
+                const firstNum = getChapNum(list[0].title);
+                const lastNum = getChapNum(list[list.length - 1].title);
+                const isDescending = firstNum >= lastNum; // 倒序：最新話在最前
+
+                if (isDescending) {
+                    // 倒序：上方 (idx - 1) 是下一話(較新)，下方 (idx + 1) 是上一話(較舊)
+                    if (selectedIdx > 0 && list[selectedIdx - 1].url) {
+                        nav.next = list[selectedIdx - 1].url;
+                    }
+                    if (selectedIdx < list.length - 1 && list[selectedIdx + 1].url) {
+                        nav.prev = list[selectedIdx + 1].url;
+                    }
+                } else {
+                    // 正序：下方 (idx + 1) 是下一話(較新)，上方 (idx - 1) 是上一話(較舊)
+                    if (selectedIdx < list.length - 1 && list[selectedIdx + 1].url) {
+                        nav.next = list[selectedIdx + 1].url;
+                    }
+                    if (selectedIdx > 0 && list[selectedIdx - 1].url) {
+                        nav.prev = list[selectedIdx - 1].url;
+                    }
+                }
             }
         }
     });
@@ -76,14 +119,14 @@ export function detectNavigationLinks() {
             nav.prev = href;
         }
 
-        // 關鍵字匹配（text + title + aria-label）
+        // 關鍵字匹配（text + title + aria-label + class）
         const text = (a.innerText || a.title || a.getAttribute('aria-label') || '').trim();
-        if (!text || text.length > 30) return;
-
-        if (!nav.next && nextRegex.test(text)) {
+        const className = (a.className || '').toLowerCase();
+        
+        if (!nav.next && (nextRegex.test(text) || className.includes('next'))) {
             nav.next = href;
         }
-        if (!nav.prev && prevRegex.test(text)) {
+        if (!nav.prev && (prevRegex.test(text) || className.includes('prev'))) {
             nav.prev = href;
         }
     });
