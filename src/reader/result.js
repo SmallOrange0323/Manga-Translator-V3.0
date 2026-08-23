@@ -1135,7 +1135,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 更新 sourceTabId（新章節的 tabId）
         if (request.sourceTabId) sourceTabId = request.sourceTabId;
 
-        // 隱藏舊導航、清除翻譯完成 overlay
+        // 立即重置導航按鈕狀態 (移除 "正在跳轉至 下一話..." 載入字樣)
+        resetNavButtons();
+        if (request.navLinks) {
+            updateNavUI(request.navLinks);
+        }
+
+        // 隱藏舊導航、開啟翻譯進度 overlay
         const footer = document.getElementById('nav-footer');
         if (footer) footer.style.display = 'none';
         const overlay = document.getElementById('loading-overlay');
@@ -1145,9 +1151,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 更新語彙庫 key
         if (request.mangaKey) activeMangaKey = request.mangaKey;
 
-        // 告訴 Background 確認收到（讓它繼續呼叫 processMangaBatchPCMode）
+        // 告訴 Background 確認收到
         sendResponse({ ready: true });
-        return true; // 非同步
+        return false;
     }
     return false;
 });
@@ -1553,28 +1559,41 @@ document.getElementById('export-txt-btn').addEventListener('click', () => {
     });
 });
 
-/** 重置導航按鈕狀態，用於逾時保險或任務完成 */
+/** 重置導航按鈕狀態，用於跳轉完成、逾時保險或任務結束 */
 function resetNavButtons() {
-    const btns = [
-        document.getElementById('prev-btn'),
-        document.getElementById('prev-btn-top'),
-        document.getElementById('next-btn'),
-        document.getElementById('next-btn-top')
-    ];
-    btns.forEach(btn => {
-        if (!btn) return;
-        btn.disabled = false;
-        btn.classList.remove('is-navigating');
-        if (btn.id.includes('prev')) {
-            btn.innerHTML = btn.id.includes('top') 
-                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg> 上一話`
-                : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg> 上一話`;
-        } else {
-            btn.innerHTML = btn.id.includes('top')
-                ? `下一話 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`
-                : `下一話 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>`;
-        }
-    });
+    const topPrev = document.getElementById('nav-prev-chapter-btn');
+    const topNext = document.getElementById('nav-next-chapter-btn');
+    const bottomPrev = document.getElementById('prev-btn');
+    const bottomNext = document.getElementById('next-btn');
+
+    if (topPrev) {
+        topPrev.disabled = false;
+        topPrev.classList.remove('is-navigating');
+        topPrev.innerHTML = `<span>‹</span> 上一話`;
+    }
+    if (topNext) {
+        topNext.disabled = false;
+        topNext.classList.remove('is-navigating');
+        topNext.innerHTML = `下一話 <span>›</span>`;
+    }
+    if (bottomPrev) {
+        bottomPrev.disabled = false;
+        bottomPrev.classList.remove('is-navigating');
+        bottomPrev.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+            </svg>
+            上一話`;
+    }
+    if (bottomNext) {
+        bottomNext.disabled = false;
+        bottomNext.classList.remove('is-navigating');
+        bottomNext.innerHTML = `
+            下一話
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>`;
+    }
 }
 
 /* ─── 行動端漫畫閱讀器互動邏輯 (全域 Bottom Sheet 抽屜) ─── */
