@@ -542,10 +542,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               chrome.tabs.update(sourceTabId, { url: nextUrl }).catch(() => {});
           }
 
-          // 若當前話已完全預翻好，立即啟動下下一話預翻 (鏈式接力)
-          if (data.isDone && data.navLinks?.next && typeof data.navLinks.next === 'string') {
-              startPretranslateNextChapter(data.navLinks.next, sourceTabId, resultTabId).catch(err => {
-                  log.warn('Background', `[跨話連續追漫] 鏈式預翻下下一話失敗: ${err.message}`);
+          // 讀者已進入本話，為即將到來的下下一話啟動單話預翻 (深度始終保持為 1)
+          if (data.navLinks?.next && typeof data.navLinks.next === 'string') {
+              startPretranslateNextChapter(data.navLinks.next, sourceTabId, null).catch(err => {
+                  log.warn('Background', `[跨話連續追漫] 預翻下下一話失敗: ${err.message}`);
               });
           }
 
@@ -1536,14 +1536,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     jobData.inProgress = false;
     jobData.isDone = true;
     jobData.usedModelName = modelName;
-    log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命！`);
-
-    // 若讀者已在觀看當前話，立即啟動下下一話的背景預翻 (鏈式接力)
-    if (jobData.associatedResultTabId && jobData.navLinks?.next && typeof jobData.navLinks.next === 'string') {
-        startPretranslateNextChapter(jobData.navLinks.next, jobData.sourceTabId, jobData.associatedResultTabId).catch(err => {
-            log.warn('Background', `[跨話連續追漫] 鏈式預翻下下一話失敗: ${err.message}`);
-        });
-    }
+    log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命 (單話緩衝休眠中)！`);
 }
 
 /**
