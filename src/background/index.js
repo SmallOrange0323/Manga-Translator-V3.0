@@ -511,49 +511,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'CHECK_PRETRANSLATED_CHAPTER') {
       const { nextUrl } = message.payload || {};
-      const data = pretranslatedChaptersMap.get(nextUrl);
-      if (data) {
-          sendResponse({
-              exists: true,
-              isDone: data.isDone,
-              inProgress: data.inProgress,
-              count: data.results?.length || 0,
-              total: data.images?.length || 0,
-              data: data.isDone ? data : null
-          });
-      } else {
-          sendResponse({ exists: false });
-      }
-      return false;
+      (async () => {
+          let data = pretranslatedChaptersMap.get(nextUrl);
+          if (!data) {
+              data = await getPretranslatedChapterFromStorage(nextUrl);
+              if (data) pretranslatedChaptersMap.set(nextUrl, data);
+          }
+          if (data) {
+              sendResponse({
+                  exists: true,
+                  isDone: data.isDone,
+                  inProgress: data.inProgress,
+                  count: data.results?.length || 0,
+                  total: data.images?.length || 0,
+                  data: data.isDone ? data : null
+              });
+          } else {
+              sendResponse({ exists: false });
+          }
+      })();
+      return true; // 保持異步通道
   }
 
   if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER') {
       const { nextUrl, sourceTabId } = message.payload || {};
       const resultTabId = message.payload?.resultTabId || sender.tab?.id;
-      const data = pretranslatedChaptersMap.get(nextUrl);
-      if (data && (data.isDone || (data.inProgress && data.results?.length > 0))) {
-          log.info('Background', `[跨話連續追漫] 讀者進入下一話 (${nextUrl})，消費預翻成果 (已完成 ${data.results.length}/${data.images?.length || '?'} 頁)！`);
-          
-          // 若預翻仍在進行中，將接收結果頁綁定為當前 resultTabId
-          data.associatedResultTabId = resultTabId;
-
-          // 靜默更新生肉分頁網址（保持進度同步）
-          if (sourceTabId && typeof sourceTabId === 'number') {
-              chrome.tabs.update(sourceTabId, { url: nextUrl }).catch(() => {});
+      (async () => {
+          let data = pretranslatedChaptersMap.get(nextUrl);
+          if (!data) {
+              data = await getPretranslatedChapterFromStorage(nextUrl);
+              if (data) pretranslatedChaptersMap.set(nextUrl, data);
           }
+          if (data && (data.isDone || (data.inProgress && data.results?.length > 0))) {
+              log.info('Background', `[跨話連續追漫] 讀者進入下一話 (${nextUrl})，消費預翻成果 (已完成 ${data.results.length}/${data.images?.length || '?'} 頁)！`);
+              
+              // 若預翻仍在進行中，將接收結果頁綁定為當前 resultTabId
+              data.associatedResultTabId = resultTabId;
 
-          // 讀者已進入本話，為即將到來的下下一話啟動單話預翻 (深度始終保持為 1)
-          if (data.navLinks?.next && typeof data.navLinks.next === 'string') {
-              startPretranslateNextChapter(data.navLinks.next, sourceTabId, null).catch(err => {
-                  log.warn('Background', `[跨話連續追漫] 預翻下下一話失敗: ${err.message}`);
-              });
+              // 靜默更新生肉分頁網址（保持進度同步）
+              if (sourceTabId && typeof sourceTabId === 'number') {
+                  chrome.tabs.update(sourceTabId, { url: nextUrl }).catch(() => {});
+              }
+
+              // 讀者已進入本話，為即將到來的下下一話啟動單話預翻 (深度始終保持為 1)
+              if (data.navLinks?.next && typeof data.navLinks.next === 'string') {
+                  startPretranslateNextChapter(data.navLinks.next, sourceTabId, null).catch(err => {
+                      log.warn('Background', `[跨話連續追漫] 預翻下下一話失敗: ${err.message}`);
+                  });
+              }
+
+              sendResponse({ success: true, data });
+          } else {
+              sendResponse({ success: false, data: null });
           }
-
-          sendResponse({ success: true, data });
-      } else {
-          sendResponse({ success: false, data: null });
-      }
-      return false;
+      })();
+      return true; // 保持異步通道
   }
 
   if (message.action === 'START_MANGA_BATCH_PC_MODE') {
@@ -1257,6 +1269,31 @@ async function resizeImageBlobToBase64(blob, maxDim) {
 // ── 跨話無縫連續追漫：預翻快取池與任務控制器 ──
 const pretranslatedChaptersMap = new Map(); // key: chapterUrl, value: { url, images, results, navLinks, usedModelName, isDone, inProgress, error, associatedResultTabId, sourceTabId }
 let activePretranslateJob = null;
+const PRETRANS_STORAGE_KEY = 'mt_pretranslated_chapters_cache';
+
+async function savePretranslatedChapterToStorage(url, data) {
+    try {
+        const stored = await state.get(PRETRANS_STORAGE_KEY, {});
+        // 只保留最新 2 話快取，防止佔滿 storage 配額
+        const keys = Object.keys(stored);
+        if (keys.length >= 3) {
+            delete stored[keys[0]];
+        }
+        stored[url] = data;
+        await state.set(PRETRANS_STORAGE_KEY, stored);
+    } catch (e) {
+        log.warn('Background', `預翻資料持久化寫入失敗: ${e.message}`);
+    }
+}
+
+async function getPretranslatedChapterFromStorage(url) {
+    try {
+        const stored = await state.get(PRETRANS_STORAGE_KEY, {});
+        return stored[url] || null;
+    } catch (_) {
+        return null;
+    }
+}
 
 /**
  * crawlChapterImagesAndNav — 在背景靜默抓取下一話 HTML，並提取漫畫圖片清單與下下一話導航連結
@@ -1384,7 +1421,7 @@ async function crawlChapterImagesAndNav(chapterUrl) {
 }
 
 /**
- * startPretranslateNextChapter — 啟動下一話的背景靜默預翻 (嚴格單話佇列)
+ * startPretranslateNextChapter — 啟動下一話的背景靜默預翻 (嚴格單話佇列 + SW保活)
  */
 async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     if (!nextUrl || typeof nextUrl !== 'string') return;
@@ -1420,123 +1457,129 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     activePretranslateJob = jobData;
 
     log.info('Background', `[跨話連續追漫] 🚀 開始在背景靜默預翻下一話: ${nextUrl} (每批 ${batchSize} 頁)`);
+    swKeepAlive.start();
 
-    // 1. 抓取圖片與導航
-    const crawlData = await crawlChapterImagesAndNav(nextUrl);
-    if (!crawlData.images || crawlData.images.length === 0) {
-        log.warn('Background', `[跨話連續追漫] 未能在 ${nextUrl} 靜默解析出圖片，預翻中止`);
-        jobData.inProgress = false;
-        jobData.error = '無法獲取圖片';
-        return;
-    }
-
-    jobData.images = crawlData.images;
-    jobData.navLinks = crawlData.navLinks;
-    log.info('Background', `[跨話連續追漫] 成功抓取下一話 ${crawlData.images.length} 張圖片，下下一話連結: ${crawlData.navLinks?.next || '無'}`);
-
-    // 2. 依序執行批次翻譯
-    const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
-    const isGemmaMode = modelName.toLowerCase().includes('gemma');
-    const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
-    const finalPrompt = isGemmaMode ? Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP : customPrompt;
-    const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
-    const requestDelay = await state.get('requestDelay', 4000);
-    const mangaKey = await state.get('currentMangaKey', '');
-    const glossarySnippet = await buildGlossaryPromptSnippet(mangaKey);
-
-    const images = crawlData.images;
-
-    for (let i = 0; i < images.length; i += batchSize) {
-        if (jobData.isCancelled) {
-            log.info('Background', `[跨話連續追漫] 任務已被取消，停止預翻`);
-            break;
+    try {
+        // 1. 抓取圖片與導航
+        const crawlData = await crawlChapterImagesAndNav(nextUrl);
+        if (!crawlData.images || crawlData.images.length === 0) {
+            log.warn('Background', `[跨話連續追漫] 未能在 ${nextUrl} 靜默解析出圖片，預翻中止`);
+            jobData.inProgress = false;
+            jobData.error = '無法獲取圖片';
+            return;
         }
 
-        const currentBatch = images.slice(i, i + batchSize);
-        const base64List = await fetchAndResizeBatch(currentBatch, maxDim, sourceTabId);
+        jobData.images = crawlData.images;
+        jobData.navLinks = crawlData.navLinks;
+        log.info('Background', `[跨話連續追漫] 成功抓取下一話 ${crawlData.images.length} 張圖片，下下一話連結: ${crawlData.navLinks?.next || '無'}`);
 
-        const validItems = base64List
-            .map((b64, idx) => ({ b64, originalIdx: idx }))
-            .filter(item => typeof item.b64 === 'string' && item.b64);
+        // 2. 依序執行批次翻譯
+        const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
+        const isGemmaMode = modelName.toLowerCase().includes('gemma');
+        const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
+        const finalPrompt = isGemmaMode ? Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP : customPrompt;
+        const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
+        const requestDelay = await state.get('requestDelay', 4000);
+        const mangaKey = await state.get('currentMangaKey', '');
+        const glossarySnippet = await buildGlossaryPromptSnippet(mangaKey);
 
-        if (validItems.length > 0) {
-            const PAYLOAD_LIMIT = 15_000_000;
-            const totalPayload = validItems.reduce((sum, v) => sum + v.b64.length, 0);
-            const subBatches = (batchSize > 1)
-                ? (totalPayload > PAYLOAD_LIMIT
-                    ? [validItems.slice(0, Math.ceil(validItems.length / 2)), validItems.slice(Math.ceil(validItems.length / 2))]
-                    : [validItems])
-                : [validItems];
+        const images = crawlData.images;
 
-            let batchSuccess = false;
-            const allPageResults = Array(currentBatch.length).fill(null);
+        for (let i = 0; i < images.length; i += batchSize) {
+            if (jobData.isCancelled) {
+                log.info('Background', `[跨話連續追漫] 任務已被取消，停止預翻`);
+                break;
+            }
 
-            // 多 Key 輪換與 503 / 429 自癒重試
-            const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
+            const currentBatch = images.slice(i, i + batchSize);
+            const base64List = await fetchAndResizeBatch(currentBatch, maxDim, sourceTabId);
 
-            for (let ki = 0; ki < candidateKeys.length; ki++) {
-                const targetKey = candidateKeys[ki];
-                const keyAlias = state.getApiKeyAlias(targetKey);
+            const validItems = base64List
+                .map((b64, idx) => ({ b64, originalIdx: idx }))
+                .filter(item => typeof item.b64 === 'string' && item.b64);
 
-                try {
-                    for (const subBatch of subBatches) {
-                        const subResults = await callGeminiAPIBatch(
-                            subBatch.map(v => v.b64),
-                            finalPrompt,
-                            glossarySnippet,
-                            targetKey
-                        );
-                        subBatch.forEach((item, k) => {
-                            allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
-                        });
+            if (validItems.length > 0) {
+                const PAYLOAD_LIMIT = 15_000_000;
+                const totalPayload = validItems.reduce((sum, v) => sum + v.b64.length, 0);
+                const subBatches = (batchSize > 1)
+                    ? (totalPayload > PAYLOAD_LIMIT
+                        ? [validItems.slice(0, Math.ceil(validItems.length / 2)), validItems.slice(Math.ceil(validItems.length / 2))]
+                        : [validItems])
+                    : [validItems];
+
+                let batchSuccess = false;
+                const allPageResults = Array(currentBatch.length).fill(null);
+
+                // 多 Key 輪換與 503 / 429 自癒重試
+                const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
+
+                for (let ki = 0; ki < candidateKeys.length; ki++) {
+                    const targetKey = candidateKeys[ki];
+                    const keyAlias = state.getApiKeyAlias(targetKey);
+
+                    try {
+                        for (const subBatch of subBatches) {
+                            const subResults = await callGeminiAPIBatch(
+                                subBatch.map(v => v.b64),
+                                finalPrompt,
+                                glossarySnippet,
+                                targetKey
+                            );
+                            subBatch.forEach((item, k) => {
+                                allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
+                            });
+                        }
+
+                        batchSuccess = true;
+                        break;
+                    } catch (batchKeyErr) {
+                        log.warn('Background', `[跨話連續追漫] Key ${ki + 1} (${keyAlias}) 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key...`);
+                        // 若為 503 / 429 暫時錯誤，稍等 1.5 秒退避
+                        if (batchKeyErr.message && (batchKeyErr.message.includes('503') || batchKeyErr.message.includes('429') || batchKeyErr.message.includes('Deadline expired'))) {
+                            await new Promise(r => setTimeout(r, 1500));
+                        }
                     }
+                }
 
-                    batchSuccess = true;
-                    break;
-                } catch (batchKeyErr) {
-                    log.warn('Background', `[跨話連續追漫] Key ${ki + 1} (${keyAlias}) 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key...`);
-                    // 若為 503 / 429 暫時錯誤，稍等 1.5 秒退避
-                    if (batchKeyErr.message && (batchKeyErr.message.includes('503') || batchKeyErr.message.includes('429') || batchKeyErr.message.includes('Deadline expired'))) {
-                        await new Promise(r => setTimeout(r, 1500));
-                    }
+                for (let j = 0; j < currentBatch.length; j++) {
+                    const res = allPageResults[j] || { results: [] };
+                    const b64 = base64List[j];
+                    jobData.results.push({
+                        image: currentBatch[j],
+                        cachedBase64: (typeof b64 === 'string' && b64.length > 50) ? `data:image/jpeg;base64,${b64}` : null,
+                        results: res.results || [],
+                        error: res.error || null,
+                        isProhibited: res.isProhibited || false,
+                        usedModelName: modelName
+                    });
+                }
+
+                // 若讀者已切換至本話，即時串流推送本批翻譯結果至結果頁
+                if (jobData.associatedResultTabId) {
+                    const batchResults = jobData.results.slice(i, i + currentBatch.length);
+                    chrome.tabs.sendMessage(jobData.associatedResultTabId, {
+                        action: 'batchComplete',
+                        batchIndex: Math.floor(i / batchSize),
+                        totalBatches: Math.ceil(images.length / batchSize),
+                        batchResults: batchResults,
+                        isLastBatch: (i + batchSize >= images.length)
+                    }).catch(() => {});
                 }
             }
 
-            for (let j = 0; j < currentBatch.length; j++) {
-                const res = allPageResults[j] || { results: [] };
-                const b64 = base64List[j];
-                jobData.results.push({
-                    image: currentBatch[j],
-                    cachedBase64: (typeof b64 === 'string' && b64.length > 50) ? `data:image/jpeg;base64,${b64}` : null,
-                    results: res.results || [],
-                    error: res.error || null,
-                    isProhibited: res.isProhibited || false,
-                    usedModelName: modelName
-                });
-            }
-
-            // 若讀者已切換至本話，即時串流推送本批翻譯結果至結果頁
-            if (jobData.associatedResultTabId) {
-                const batchResults = jobData.results.slice(i, i + currentBatch.length);
-                chrome.tabs.sendMessage(jobData.associatedResultTabId, {
-                    action: 'batchComplete',
-                    batchIndex: Math.floor(i / batchSize),
-                    totalBatches: Math.ceil(images.length / batchSize),
-                    batchResults: batchResults,
-                    isLastBatch: (i + batchSize >= images.length)
-                }).catch(() => {});
+            if (i + batchSize < images.length) {
+                await new Promise(r => setTimeout(r, requestDelay));
             }
         }
 
-        if (i + batchSize < images.length) {
-            await new Promise(r => setTimeout(r, requestDelay));
-        }
+        jobData.inProgress = false;
+        jobData.isDone = true;
+        jobData.usedModelName = modelName;
+        await savePretranslatedChapterToStorage(nextUrl, jobData);
+        log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已寫入 Storage 持久化快取 (單話緩衝休眠中)！`);
+    } finally {
+        swKeepAlive.stop();
     }
-
-    jobData.inProgress = false;
-    jobData.isDone = true;
-    jobData.usedModelName = modelName;
-    log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命 (單話緩衝休眠中)！`);
 }
 
 /**
