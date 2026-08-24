@@ -911,6 +911,36 @@ function updateNavUI(navLinks) {
             footerNextBtn.style.display = 'none';
         }
     }
+
+    // 檢查下一話預翻狀態並更新徽章
+    const pretransBadge = document.getElementById('nav-pretranslate-badge');
+    if (safeNext && pretransBadge) {
+        const checkBadgeStatus = () => {
+            chrome.runtime.sendMessage({
+                action: 'CHECK_PRETRANSLATED_CHAPTER',
+                payload: { nextUrl: safeNext }
+            }, (resp) => {
+                if (resp && resp.exists) {
+                    if (resp.isDone) {
+                        pretransBadge.style.display = 'inline-block';
+                        pretransBadge.textContent = '⚡已預翻';
+                        pretransBadge.style.background = '#4CAF50';
+                        if (footerNextBtn) footerNextBtn.title = `${safeNext} (已預翻完成，點擊秒開)`;
+                    } else if (resp.inProgress) {
+                        pretransBadge.style.display = 'inline-block';
+                        pretransBadge.textContent = `⏳預翻中 (${resp.count}/${resp.total || '?'})`;
+                        pretransBadge.style.background = '#ff9800';
+                        setTimeout(checkBadgeStatus, 3000);
+                    }
+                } else {
+                    pretransBadge.style.display = 'none';
+                }
+            });
+        };
+        checkBadgeStatus();
+    } else if (pretransBadge) {
+        pretransBadge.style.display = 'none';
+    }
 }
 
 let placeholdersCreated = false;

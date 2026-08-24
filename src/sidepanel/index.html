@@ -92,6 +92,13 @@
                     <span class="mt-slider"></span>
                 </label>
             </div>
+            <div style="display: flex; align-items: center; gap: 5px;" title="連續追漫：看當前話時，自動在背景提前預翻下一話">
+                <span style="font-size: 11px; font-weight: 700; color: #444;">連漫</span>
+                <label class="mt-switch">
+                    <input type="checkbox" id="mt-auto-pretranslate-toggle" checked>
+                    <span class="mt-slider"></span>
+                </label>
+            </div>
             <button id="mt-novel-retry-all-btn" style="display: none; background: #fff0f5; border: 1px solid #ffb6c1; color: #ff1493; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold; margin-left: auto;">
                 🔄 重試失敗
             </button>
@@ -122,6 +129,10 @@
             <button id="mt-select-all-btn" class="mt-icon-btn" style="flex: 1; justify-content: center; font-size: 13px;">取消全選</button>
             <button id="mt-back-btn" class="mt-icon-btn" style="flex: 1; justify-content: center; font-size: 13px; color: #666;">返回</button>
         </div>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--theme-text-secondary); margin-bottom: 8px; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="mt-auto-pretranslate-batch-chk" checked style="cursor: pointer;">
+            <span>⚡ 自動預翻下一話 (連續追漫)</span>
+        </label>
         <button id="mt-stream-read-btn" style="display: none; width: 100%; margin-bottom: 8px; background: #28a745; color: white; padding: 8px; border-radius: 8px; font-weight: bold; border: none; cursor: pointer; align-items: center; justify-content: center; gap: 8px; font-size: 13px;">
             📖 串聯流式閱讀
         </button>

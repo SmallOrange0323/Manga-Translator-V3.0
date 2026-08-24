@@ -250,6 +250,10 @@ export function initMobileMode() {
       <div class="image-grid" id="drawer-grid"></div>
     </div>
     <div class="drawer-footer">
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-main); margin-bottom:8px; cursor:pointer; user-select:none;">
+        <input type="checkbox" id="drawer-pretranslate-chk" checked style="cursor:pointer;">
+        <span>⚡ 連續追漫 (背景自動預翻下一話)</span>
+      </label>
       <button class="primary-btn" id="drawer-submit" disabled>開始翻譯 (0)</button>
       <button class="log-toggle" id="log-toggle-btn">▸ 顯示 API 狀態日誌</button>
       <div class="log-panel" id="api-log-panel"></div>
@@ -493,6 +497,18 @@ export function initMobileMode() {
   drawer.querySelector('.close-btn').onclick = () => toggleDrawer(false);
   drawer.querySelector('#select-all-btn').onclick = selectAll;
   drawer.querySelector('#deselect-all-btn').onclick = deselectAll;
+
+  // 連續追漫 (自動預翻下一話) 狀態同步
+  const pretransChk = drawer.querySelector('#drawer-pretranslate-chk');
+  if (pretransChk) {
+    state.get('autoPretranslateNextChapter', true).then(val => {
+      pretransChk.checked = (val !== false);
+    });
+    pretransChk.onchange = async () => {
+      await state.set('autoPretranslateNextChapter', pretransChk.checked);
+      log.info('Content-Mobile', `[行動端] 連續追漫開關: ${pretransChk.checked ? '開啟' : '關閉'}`);
+    };
+  }
   
   drawer.querySelector('#drawer-submit').onclick = () => {
     const selected = Array.from(selectedIndices).map(i => foundImages[i]);

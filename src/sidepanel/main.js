@@ -916,6 +916,35 @@ if (globalGlossaryToggle) {
     });
 }
 
+// ── 連續追漫 (自動預翻下一話) 開關綁定 ──
+const autoPretranslateToggle = document.getElementById('mt-auto-pretranslate-toggle');
+const autoPretranslateBatchChk = document.getElementById('mt-auto-pretranslate-batch-chk');
+
+async function syncAutoPretranslateUI() {
+    const isEnabled = await state.get('autoPretranslateNextChapter', true);
+    if (autoPretranslateToggle) autoPretranslateToggle.checked = (isEnabled !== false);
+    if (autoPretranslateBatchChk) autoPretranslateBatchChk.checked = (isEnabled !== false);
+}
+
+if (autoPretranslateToggle) {
+    syncAutoPretranslateUI();
+    autoPretranslateToggle.addEventListener('change', async () => {
+        const val = autoPretranslateToggle.checked;
+        await state.set('autoPretranslateNextChapter', val);
+        if (autoPretranslateBatchChk) autoPretranslateBatchChk.checked = val;
+        console.log('[Sidepanel] 連續追漫 (自動預翻下一話):', val ? '啟用' : '停用');
+    });
+}
+
+if (autoPretranslateBatchChk) {
+    autoPretranslateBatchChk.addEventListener('change', async () => {
+        const val = autoPretranslateBatchChk.checked;
+        await state.set('autoPretranslateNextChapter', val);
+        if (autoPretranslateToggle) autoPretranslateToggle.checked = val;
+        console.log('[Sidepanel] 批次控制區連續追漫:', val ? '啟用' : '停用');
+    });
+}
+
 if (novelRetryAllBtn) {
     novelRetryAllBtn.onclick = () => {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
