@@ -528,18 +528,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER') {
-      const { nextUrl, sourceTabId, resultTabId } = message.payload || {};
+      const { nextUrl, sourceTabId } = message.payload || {};
+      const resultTabId = message.payload?.resultTabId || sender.tab?.id;
       const data = pretranslatedChaptersMap.get(nextUrl);
-      if (data && data.isDone) {
-          log.info('Background', `[跨話連續追漫] 讀者已進入下一話 (${nextUrl})，消費預翻資料並啟動下下一話預翻！`);
+      if (data && (data.isDone || (data.inProgress && data.results?.length > 0))) {
+          log.info('Background', `[跨話連續追漫] 讀者進入下一話 (${nextUrl})，消費預翻成果 (已完成 ${data.results.length}/${data.images?.length || '?'} 頁)！`);
           
+          // 若預翻仍在進行中，將接收結果頁綁定為當前 resultTabId
+          data.associatedResultTabId = resultTabId;
+
           // 靜默更新生肉分頁網址（保持進度同步）
           if (sourceTabId && typeof sourceTabId === 'number') {
               chrome.tabs.update(sourceTabId, { url: nextUrl }).catch(() => {});
           }
 
-          // 啟動下下一話的預翻 (鏈式接力)
-          if (data.navLinks?.next && typeof data.navLinks.next === 'string') {
+          // 若當前話已完全預翻好，立即啟動下下一話預翻 (鏈式接力)
+          if (data.isDone && data.navLinks?.next && typeof data.navLinks.next === 'string') {
               startPretranslateNextChapter(data.navLinks.next, sourceTabId, resultTabId).catch(err => {
                   log.warn('Background', `[跨話連續追漫] 鏈式預翻下下一話失敗: ${err.message}`);
               });
@@ -1484,6 +1488,18 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
                     });
                 }
             }
+
+            // 若讀者已切換至本話，即時串流推送本批翻譯結果至結果頁
+            if (jobData.associatedResultTabId) {
+                const batchResults = jobData.results.slice(i, i + currentBatch.length);
+                chrome.tabs.sendMessage(jobData.associatedResultTabId, {
+                    action: 'batchComplete',
+                    batchIndex: Math.floor(i / batchSize),
+                    totalBatches: Math.ceil(images.length / batchSize),
+                    batchResults: batchResults,
+                    isLastBatch: (i + batchSize >= images.length)
+                }).catch(() => {});
+            }
         }
 
         if (i + batchSize < images.length) {
@@ -1495,6 +1511,13 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     jobData.isDone = true;
     jobData.usedModelName = modelName;
     log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命！`);
+
+    // 若讀者已在觀看當前話，立即啟動下下一話的背景預翻 (鏈式接力)
+    if (jobData.associatedResultTabId && jobData.navLinks?.next && typeof jobData.navLinks.next === 'string') {
+        startPretranslateNextChapter(jobData.navLinks.next, jobData.sourceTabId, jobData.associatedResultTabId).catch(err => {
+            log.warn('Background', `[跨話連續追漫] 鏈式預翻下下一話失敗: ${err.message}`);
+        });
+    }
 }
 
 /**
