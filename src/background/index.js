@@ -1848,13 +1848,23 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 const currentBatchIdx = (targetBatchIndex !== null && targetBatchIndex !== undefined) 
                     ? targetBatchIndex 
                     : Math.floor(i / batchSize);
-                if (!res || res.error) {
-                    broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${res?.error || '無回應'}`, 'error');
+                // 檢測本批次是否觸發了模型內容安全審查
+                const hasProhibitedInBatch = allPageResults.some(r => r?.isProhibited || (r?.error && (r.error.includes('SAFETY') || r.error.includes('BLOCKLIST') || r.error.includes('Prohibited') || r.error.includes('過濾器'))));
+
+                const isErr = !res || res.error || (res.results && res.results.length === 0 && hasProhibitedInBatch);
+                if (isErr) {
+                    const isFirstInBatch = (j === 0);
+                    const isItemProhibited = res?.isProhibited || (res?.error && (res.error.includes('SAFETY') || res.error.includes('BLOCKLIST') || res.error.includes('Prohibited') || res.error.includes('過濾器'))) || hasProhibitedInBatch;
+                    const errorMsg = res?.error || (isItemProhibited ? '觸發 Google AI 安全性過濾器 (Prohibited Content)，模型拒絕翻譯' : '翻譯失敗或無回應');
+
+                    broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${errorMsg}`, 'error');
                     chrome.tabs.sendMessage(resultTabId, {
                         action: 'appendResult',
                         data: { 
                             image: imgSrc, 
-                            error: res?.error || '翻譯失敗或無回應',
+                            error: errorMsg,
+                            isProhibited: isItemProhibited,
+                            isBatchFirstProhibited: isFirstInBatch && isItemProhibited,
                             batchIndex: currentBatchIdx,
                             pageIndex: completedCount
                         }

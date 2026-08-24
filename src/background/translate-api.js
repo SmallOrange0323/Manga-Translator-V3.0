@@ -222,8 +222,11 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
                 const rawText = candidate?.content?.parts?.[0]?.text || '';
 
                 if (!rawText) {
-                    if (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST') {
-                        throw new Error(`觸發 Google 安全性過濾器 (finishReason: ${finishReason})，即將切換備援模型重試`);
+                    if (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT') {
+                        const err = new Error(`觸發 Google AI 安全性過濾器 (finishReason: ${finishReason})，模型拒絕翻譯 (Prohibited Content)`);
+                        err.isProhibited = true;
+                        err.finishReason = finishReason;
+                        throw err;
                     }
                     throw new Error(`API 回傳為空 (finishReason: ${finishReason || 'UNKNOWN'})`);
                 }
@@ -512,8 +515,19 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
         }
 
         const json = await response.json();
-        const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-        const cleanStr = sanitizeJsonForParsing(rawText);
+        const candidate = json.candidates?.[0];
+        const finishReason = candidate?.finishReason;
+        const rawText = candidate?.content?.parts?.[0]?.text || '';
+
+        if (!rawText && (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT')) {
+            log.warn('TranslateAPI', `[批次] 觸發模型安全審查過濾 (finishReason: ${finishReason})`);
+            const err = new Error(`觸發 Google AI 安全性審查過濾 (finishReason: ${finishReason})，模型拒絕翻譯 (Prohibited Content)`);
+            err.isProhibited = true;
+            err.finishReason = finishReason;
+            throw err;
+        }
+
+        const cleanStr = sanitizeJsonForParsing(rawText || '{}');
         let data;
         try {
             data = JSON.parse(cleanStr);

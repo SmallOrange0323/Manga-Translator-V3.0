@@ -1232,22 +1232,47 @@ function buildCard(item, index) {
     const textWrapper = document.createElement('div');
     textWrapper.className = 'card-text-wrapper';
 
-    // 翻譯失敗：顯示錯誤訊息 + 再次翻譯按鈕
+    // 翻譯失敗 / 觸發模型審查拒絕：顯示專屬警示與重試按鈕
     if (item.error) {
-        card.classList.add('is-error');
+        const isProhibited = item.isProhibited || (typeof item.error === 'string' && (item.error.includes('SAFETY') || item.error.includes('BLOCKLIST') || item.error.includes('Prohibited') || item.error.includes('過濾器') || item.error.includes('拒絕')));
+        
+        if (isProhibited) {
+            card.classList.add('is-prohibited');
+        } else {
+            card.classList.add('is-error');
+        }
 
         const errorGroup = document.createElement('div');
         errorGroup.className = 'text-group';
 
-        const errorLabel = document.createElement('div');
-        errorLabel.className = 'text-label text-label--error';
-        errorLabel.textContent = '翻譯失敗';
-        errorGroup.appendChild(errorLabel);
+        if (isProhibited && item.isBatchFirstProhibited) {
+            // 整批翻譯第一張圖片：渲染醒目的 Prohibited 專屬警示橫幅
+            const prohibitedBanner = document.createElement('div');
+            prohibitedBanner.className = 'prohibited-banner';
+            prohibitedBanner.innerHTML = `
+                <div class="prohibited-header">
+                    <span>🚫 AI 模型內容審查拒絕</span>
+                    <span class="prohibited-badge">Prohibited</span>
+                </div>
+                <div class="prohibited-desc">
+                    此批次漫畫畫面或台詞觸發了 Google AI 安全性過濾器 (SAFETY / BLOCKLIST)，模型直接拒絕翻譯本批內容。
+                </div>
+                <div class="prohibited-tip">
+                    💡 <strong>解鎖建議：</strong>您可點擊下方按鈕重新嘗試單張翻譯，或在選項頁開啟「📖 雙階段劇本預讀模式」（先抽文字再翻譯）即可 100% 避開圖片視覺審查！
+                </div>
+            `;
+            errorGroup.appendChild(prohibitedBanner);
+        } else {
+            const errorLabel = document.createElement('div');
+            errorLabel.className = isProhibited ? 'text-label text-label--prohibited' : 'text-label text-label--error';
+            errorLabel.textContent = isProhibited ? '🚫 內容審查受限 (Prohibited)' : '翻譯失敗';
+            errorGroup.appendChild(errorLabel);
 
-        const errorMsg = document.createElement('div');
-        errorMsg.className = 'error-message';
-        errorMsg.textContent = item.error;
-        errorGroup.appendChild(errorMsg);
+            const errorMsg = document.createElement('div');
+            errorMsg.className = 'error-message';
+            errorMsg.textContent = item.error;
+            errorGroup.appendChild(errorMsg);
+        }
 
         const retryBtn = document.createElement('button');
         retryBtn.className = 'btn-retry';
@@ -1255,8 +1280,9 @@ function buildCard(item, index) {
         retryBtn.addEventListener('click', () => {
             retryBtn.disabled = true;
             retryBtn.textContent = '翻譯中...';
-            card.classList.remove('is-error');
-            errorMsg.textContent = '正在重新呼叫 API...';
+            card.classList.remove('is-error', 'is-prohibited');
+            const targetErrorMsg = errorGroup.querySelector('.error-message');
+            if (targetErrorMsg) targetErrorMsg.textContent = '正在重新呼叫 API...';
 
             chrome.runtime.sendMessage({ 
                 action: "retranslateImage", 
