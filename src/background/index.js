@@ -1460,33 +1460,57 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             .filter(item => typeof item.b64 === 'string' && item.b64);
 
         if (validItems.length > 0) {
-            try {
-                const subResults = await callGeminiAPIBatch(
-                    validItems.map(v => v.b64),
-                    finalPrompt,
-                    glossarySnippet,
-                    null
-                );
-                
-                for (let j = 0; j < currentBatch.length; j++) {
-                    const res = subResults[j] || { results: [] };
-                    jobData.results.push({
-                        image: currentBatch[j],
-                        results: res.results || [],
-                        error: res.error || null,
-                        isProhibited: res.isProhibited || false,
-                        usedModelName: modelName
-                    });
+            const PAYLOAD_LIMIT = 15_000_000;
+            const totalPayload = validItems.reduce((sum, v) => sum + v.b64.length, 0);
+            const subBatches = (batchSize > 1)
+                ? (totalPayload > PAYLOAD_LIMIT
+                    ? [validItems.slice(0, Math.ceil(validItems.length / 2)), validItems.slice(Math.ceil(validItems.length / 2))]
+                    : [validItems])
+                : [validItems];
+
+            let batchSuccess = false;
+            const allPageResults = Array(currentBatch.length).fill(null);
+
+            // 多 Key 輪換與 503 / 429 自癒重試
+            const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
+
+            for (let ki = 0; ki < candidateKeys.length; ki++) {
+                const targetKey = candidateKeys[ki];
+                const keyAlias = state.getApiKeyAlias(targetKey);
+
+                try {
+                    for (const subBatch of subBatches) {
+                        const subResults = await callGeminiAPIBatch(
+                            subBatch.map(v => v.b64),
+                            finalPrompt,
+                            glossarySnippet,
+                            targetKey
+                        );
+                        subBatch.forEach((item, k) => {
+                            allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
+                        });
+                    }
+
+                    batchSuccess = true;
+                    break;
+                } catch (batchKeyErr) {
+                    log.warn('Background', `[跨話連續追漫] Key ${ki + 1} (${keyAlias}) 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key...`);
+                    // 若為 503 / 429 暫時錯誤，稍等 1.5 秒退避
+                    if (batchKeyErr.message && (batchKeyErr.message.includes('503') || batchKeyErr.message.includes('429') || batchKeyErr.message.includes('Deadline expired'))) {
+                        await new Promise(r => setTimeout(r, 1500));
+                    }
                 }
-            } catch (apiErr) {
-                log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤: ${apiErr.message}`);
-                for (let j = 0; j < currentBatch.length; j++) {
-                    jobData.results.push({
-                        image: currentBatch[j],
-                        error: apiErr.message,
-                        usedModelName: modelName
-                    });
-                }
+            }
+
+            for (let j = 0; j < currentBatch.length; j++) {
+                const res = allPageResults[j] || { results: [] };
+                jobData.results.push({
+                    image: currentBatch[j],
+                    results: res.results || [],
+                    error: res.error || null,
+                    isProhibited: res.isProhibited || false,
+                    usedModelName: modelName
+                });
             }
 
             // 若讀者已切換至本話，即時串流推送本批翻譯結果至結果頁
