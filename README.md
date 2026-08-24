@@ -1,18 +1,25 @@
-# 漫譯 V3.1.4 (Manga Translator V3.1.4) 🎌
+# 漫譯 V3.1.5 (Manga Translator V3.1.5) 🎌
 
-![Version](https://img.shields.io/badge/version-3.1.4-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.1.5-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.1.4** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
-支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
+**漫譯 V3.1.5** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
+支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
 
 ---
 
 ## 🌟 核心功能特色 (Key Features)
 
-### 🔤 1. 4 大經典字型即時切換系統（所見即所得）
+### ⚡ 1. 跨話無縫連續追漫 (Seamless Next-Chapter Pipeline)
+* **背景自動預翻**：當讀者在閱讀當前話時，系統已在背景靜默將下一話翻譯就緒。
+* **0 毫秒 SPA 原地秒開**：點擊「下一話 ➔」時，畫面不重整、不閃爍，瞬間平滑展開已翻好內容，並鏈式啟動下下一話預翻，享受無縫暢讀到底的極致追漫感！
+* **精準生命週期管理**：預翻快取與當前閱讀分頁共存亡，分頁關閉瞬間自動釋放所有快取，零記憶體殘留。
+
+---
+
+### 🔤 2. 4 大經典字型即時切換系統（所見即所得）
 * **0 毫秒極速切換**：在結果頁右上角自由切換 4 大經典風格字型，文字瞬間全局變換：
   * 🌸 **典雅宋體** (`Noto Serif TC` / 思源宋體) —— 文藝古風、戀愛、旁白與心聲
   * 🍡 **日漫圓體** (`Zen Maru Gothic` / 萌系圓體) —— 日常搞笑、校園喜劇（最貼近日漫原版對白感！）
@@ -22,7 +29,7 @@
 
 ---
 
-### 📱 2. 行動端 (Edge Android) 旗艦級體驗
+### 📱 3. 行動端 (Edge Android) 旗艦級體驗
 * **100vw 單頁精準橫向滑動 (Horizontal Scroll-Snap)**：專為行動裝置打造，左右滑動時精準逐頁切換，享受如翻閱實體漫畫般的絲滑手感。
 * **全域 Bottom Sheet 翻譯抽屜**：隨時由下往上滑出，直覺瀏覽當頁所有對話，橫向滑動卡片時抽屜內容自動同步切換。
 * **智慧懸浮按鈕 (FAB)**：滿版和風「漫」字按鈕，支援自由拖曳、邊緣智慧吸附記憶與閒置自動靠邊微縮。

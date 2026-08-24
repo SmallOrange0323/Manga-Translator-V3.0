@@ -82,6 +82,7 @@ async function initGeneralSettings() {
         ['imageMaxDimension', 1024],
         ['ocrModelName', 'gemma-4-26b-a4b-it'],
         ['enableTaiwanLocalization', true],
+        ['autoPretranslateNextChapter', true],
         ['incognitoPrivacyMode', true]
     ];
 
@@ -288,6 +289,9 @@ function setupEventHandlers() {
 
             const twLocalization = document.getElementById('enableTaiwanLocalization');
             if(twLocalization) await state.set('enableTaiwanLocalization', twLocalization.checked);
+
+            const autoPretrans = document.getElementById('autoPretranslateNextChapter');
+            if(autoPretrans) await state.set('autoPretranslateNextChapter', autoPretrans.checked);
 
             const googleEmailEl = document.getElementById('googleAccountEmail');
             if (googleEmailEl) {

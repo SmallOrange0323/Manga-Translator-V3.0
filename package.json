@@ -1,7 +1,7 @@
 {
   "name": "manga-translator-v3",
-  "version": "3.1.4",
-  "description": "Manga Translator V3.1.4 - Washi Style & Chapter Navigator",
+  "version": "3.1.5",
+  "description": "Manga Translator V3.1.5 - Seamless Next-Chapter Pipeline & Washi Reader",
   "type": "module",
   "scripts": {
     "dev": "vite",

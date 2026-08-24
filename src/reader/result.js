@@ -762,6 +762,43 @@ function sendNavigateMessageWithRetry(payload, btns, label) {
     setTimeout(resetNavButtons, 10000);
 }
 
+function renderPretranslatedChapter(chapterData) {
+    console.log('[SPA] 命中跨話預翻快取，正在進行原地無縫換話...', chapterData);
+    
+    // 1. 清空舊卡片資料與批次容器
+    container.innerHTML = '';
+    translatedData.length = 0;
+    batchSections.clear();
+    const batchMenu = document.getElementById('batch-dropdown-menu');
+    if (batchMenu) batchMenu.innerHTML = '';
+
+    // 2. 逐一渲染已預翻好的卡片
+    const results = chapterData.results || [];
+    results.forEach((item, idx) => {
+        translatedData.push(item);
+        const batchIdx = Math.floor(idx / 5);
+        const targetGrid = getOrCreateBatchSection(batchIdx);
+        const card = buildCard(item, idx);
+        targetGrid.appendChild(card);
+    });
+
+    updateBatchDropdownMenu();
+
+    // 3. 更新進度與導航 UI
+    const progressEl = document.getElementById('progress-text');
+    if (progressEl) progressEl.textContent = `✅ 全話 ${results.length} 頁已就緒 (預翻秒開)`;
+    
+    if (chapterData.navLinks) {
+        updateNavUI(chapterData.navLinks);
+    }
+
+    // 4. 滾動條平滑移回最頂部
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // 5. 恢復按鈕狀態
+    resetNavButtons();
+}
+
 function updateNavUI(navLinks) {
     const { prev, next, currentChapter, chapterList } = navLinks || {};
     const navBar = document.getElementById('chapter-nav-bar');
@@ -791,15 +828,37 @@ function updateNavUI(navLinks) {
         }, [prevBtn, footerPrevBtn], '上一話');
     };
 
-    // 下一話動作處理函式
+    // 下一話動作處理函式 (優先消費已預翻成果，實現 0ms SPA 原地秒開)
     const handleNextNavigation = () => {
         if (!safeNext) return;
-        sendNavigateMessageWithRetry({
-            url: safeNext,
-            tabId: sourceTabId,
-            mangaKey: activeMangaKey,
-            mobile: urlParams.get('mobile') === '1'
-        }, [nextBtn, footerNextBtn], '下一話');
+
+        [nextBtn, footerNextBtn].filter(Boolean).forEach(b => {
+            b.disabled = true;
+            b.classList.add('is-navigating');
+            b.innerHTML = `正在進入下一話...`;
+        });
+
+        // 嘗試向 Background 請求預翻好的成果
+        chrome.runtime.sendMessage({
+            action: 'CONSUME_PRETRANSLATED_CHAPTER',
+            payload: {
+                nextUrl: safeNext,
+                sourceTabId,
+                resultTabId: null
+            }
+        }, (response) => {
+            if (response && response.success && response.data) {
+                renderPretranslatedChapter(response.data);
+            } else {
+                // 快取未命中：退回生肉分頁跳轉
+                sendNavigateMessageWithRetry({
+                    url: safeNext,
+                    tabId: sourceTabId,
+                    mangaKey: activeMangaKey,
+                    mobile: urlParams.get('mobile') === '1'
+                }, [nextBtn, footerNextBtn], '下一話');
+            }
+        });
     };
 
     // 頂部中央：上一話
