@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxbSJ/RZr3GkCCyIcbENBAFQWL91p2Sl2REChKSUIW/pyJhup+VI/jl3ShXFprfbABqkZ6fywwRivXva3sc2Ceh2jizXPvRBMOutnrteXq5BLjtSA8tX4IrDQKUwR+RRer6pJW6xLHcdRNLeOf4ZmeDM711EBnzCSwB2jnKMG5yZOrcjPpkGAxiqvt0kXMFLEhCtdv7QZ+BURd85sBgg3/ZWa7LtzA1TD59Zd30WDRk1Y/4NUA5RZDAd+bt7Iq7M3ik/wmvOicnnYxNcpzHvLzMF55+pVXSAWhc3a76x0rZn2H+u6Tf56VhiPkSDXkEkp4EKLSvPVtqSGyG1MWY1SawIDAQAB",
-  "name": "Manga Translator V3.1.3",
-  "version": "3.1.3",
+  "name": "Manga Translator V3.1.4",
+  "version": "3.1.4",
   "description": "Modernized Manga Translator with Washi Style & Chapter Navigator",
   "incognito": "split",
   "permissions": [
