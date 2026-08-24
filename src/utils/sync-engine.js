@@ -60,7 +60,7 @@ class SyncEngine {
       try {
         token = await getAuthToken(false);
       } catch (tokenErr) {
-        log.warn('SyncEngine', '背景靜默獲取 Token 失敗，可能需重新手動授權:', tokenErr.message);
+        log.info('SyncEngine', '背景靜默獲取 Token 暫不可用 (需於設定頁手動點擊授權)，跳過本次背景自動同步');
         return; // 背景不強行彈出視窗打擾使用者
       }
 

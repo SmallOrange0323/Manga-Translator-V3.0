@@ -37,8 +37,15 @@ function runWebAuthFlow(interactive = true) {
         const err = chrome.runtime.lastError;
         if (err) {
           const errMsg = err.message || '';
-          log.warn('GoogleSync', 'WebAuthFlow 視窗建立失敗，嘗試行動端新分頁降級授權:', errMsg);
-          if (errMsg.includes('browser window') || errMsg.includes("Couldn't create") || interactive) {
+          
+          // 靜默模式 (interactive: false) 下，若需要使用者互動，屬於正常預期結果，直接返回
+          if (!interactive && (errMsg.includes('User interaction required') || errMsg.includes('interaction_required') || errMsg.includes('Authorization page could not be loaded'))) {
+            reject(new Error('User interaction required'));
+            return;
+          }
+
+          log.warn('GoogleSync', 'WebAuthFlow 互動授權異常，嘗試行動端新分頁降級授權:', errMsg);
+          if (interactive && (errMsg.includes('browser window') || errMsg.includes("Couldn't create") || errMsg.includes('User interaction required'))) {
             runMobileTabAuth(authUrl, redirectUri).then(resolve).catch(reject);
             return;
           }
