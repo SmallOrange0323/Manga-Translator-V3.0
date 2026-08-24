@@ -1422,11 +1422,13 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
 
     // 2. 依序執行批次翻譯
     const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
+    const isGemmaMode = modelName.toLowerCase().includes('gemma');
+    const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
+    const finalPrompt = isGemmaMode ? Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP : customPrompt;
     const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
     const requestDelay = await state.get('requestDelay', 4000);
     const mangaKey = await state.get('currentMangaKey', '');
     const glossarySnippet = await buildGlossaryPromptSnippet(mangaKey);
-    const finalPrompt = await buildFinalMangaPrompt();
 
     const images = crawlData.images;
 
