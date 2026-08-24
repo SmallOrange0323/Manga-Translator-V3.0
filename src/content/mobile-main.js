@@ -2,6 +2,7 @@ import { log } from '../utils/logger.js';
 import { state } from '../utils/state.js';
 import { crawlImages, triggerLazyScroll } from './manga-engine.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
+import { extractMangaMetadata } from './n-e-extractor.js';
 
 // 本地小說批次翻譯拉取佇列
 let novelBatchQueue = [];
@@ -250,6 +251,9 @@ export function initMobileMode() {
       <div class="image-grid" id="drawer-grid"></div>
     </div>
     <div class="drawer-footer">
+      <button class="primary-btn" id="drawer-stream-btn" style="display:none; background: linear-gradient(135deg, #34c759, #30b04a); margin-bottom: 8px; box-shadow: 0 2px 8px rgba(52,199,89,0.3);">
+        ⚡ 啟動串聯流式閱讀 (N網/E網專屬)
+      </button>
       <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-main); margin-bottom:8px; cursor:pointer; user-select:none;">
         <input type="checkbox" id="drawer-pretranslate-chk" checked style="cursor:pointer;">
         <span>⚡ 連續追漫 (背景自動預翻下一話)</span>
@@ -340,6 +344,53 @@ export function initMobileMode() {
       };
       grid.appendChild(item);
     });
+
+    // 偵測是否為 N網/E網 詳情頁，若是則顯示「⚡ 啟動串聯流式閱讀」綠色按鈕
+    const streamBtn = drawer.querySelector('#drawer-stream-btn');
+    if (streamBtn) {
+      const curUrl = window.location.href;
+      const isNE = curUrl.includes('nhentai.net') || curUrl.includes('e-hentai.org') || curUrl.includes('exhentai.org');
+      if (isNE) {
+        streamBtn.style.display = 'block';
+        streamBtn.onclick = async () => {
+          streamBtn.disabled = true;
+          const origText = streamBtn.textContent;
+          streamBtn.textContent = '⏳ 正在讀取 N/E 媒體庫...';
+
+          const unlockTimer = setTimeout(() => {
+            streamBtn.disabled = false;
+            streamBtn.textContent = origText;
+          }, 5000);
+
+          try {
+            const isNH = curUrl.includes('nhentai.net');
+            const isEH = curUrl.includes('e-hentai.org') || curUrl.includes('exhentai.org');
+            const meta = await extractMangaMetadata(isNH, isEH);
+            clearTimeout(unlockTimer);
+            streamBtn.disabled = false;
+            streamBtn.textContent = origText;
+
+            if (!meta) {
+              alert('❌ 無法觸發串流閱讀：請確認您正處於 N網或 E網 的漫畫詳情首頁！');
+              return;
+            }
+
+            await chrome.storage.local.set({ mt_current_stream: meta });
+            const readerUrl = chrome.runtime.getURL('src/reader/stream-reader.html');
+            window.open(readerUrl, '_blank');
+            toggleDrawer(false);
+          } catch (err) {
+            clearTimeout(unlockTimer);
+            streamBtn.disabled = false;
+            streamBtn.textContent = origText;
+            alert('❌ 串流閱讀啟動失敗: ' + err.message);
+          }
+        };
+      } else {
+        streamBtn.style.display = 'none';
+      }
+    }
+
     updateFooter();
   };
 

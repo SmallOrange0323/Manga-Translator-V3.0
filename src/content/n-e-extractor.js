@@ -94,7 +94,7 @@ function injectStreamButton(isNHentai, isEHentai) {
   targetContainer.appendChild(btn);
 }
 
-async function extractMangaMetadata(isNHentai, isEHentai) {
+export async function extractMangaMetadata(isNHentai, isEHentai) {
   const url = window.location.href;
   
   if (isNHentai) {
