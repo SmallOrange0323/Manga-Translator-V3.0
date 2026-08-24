@@ -768,7 +768,6 @@ function renderPretranslatedChapter(chapterData) {
     // 1. 清空舊卡片資料與批次容器
     container.innerHTML = '';
     translatedData.length = 0;
-    batchSections.clear();
     const batchMenu = document.getElementById('batch-dropdown-menu');
     if (batchMenu) batchMenu.innerHTML = '';
 
