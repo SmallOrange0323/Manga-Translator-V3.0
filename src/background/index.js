@@ -1504,8 +1504,10 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
 
             for (let j = 0; j < currentBatch.length; j++) {
                 const res = allPageResults[j] || { results: [] };
+                const b64 = base64List[j];
                 jobData.results.push({
                     image: currentBatch[j],
+                    cachedBase64: (typeof b64 === 'string' && b64.length > 50) ? `data:image/jpeg;base64,${b64}` : null,
                     results: res.results || [],
                     error: res.error || null,
                     isProhibited: res.isProhibited || false,

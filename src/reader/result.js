@@ -1311,7 +1311,8 @@ function buildCard(item, index) {
     }
 
     const img = document.createElement('img');
-    img.setAttribute('src', item.image);
+    // 優先使用背景預翻快取的 Base64 實現 0ms 本機瞬間出圖，若無則降級為原圖 URL
+    img.setAttribute('src', item.cachedBase64 || item.image);
     img.setAttribute('alt', `Page ${index + 1}`);
     img.loading = 'lazy';
     img.decoding = 'async'; // 將圖片解碼移出 UI 主線程，避免百頁長條漫滑動掉幀
