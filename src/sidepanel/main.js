@@ -428,6 +428,13 @@ document.getElementById('mt-start-btn').onclick = () => {
                         alert("未在此網頁找到候選圖片！\n\n小提醒：部分網站需要往下捲動才會載入圖片，請先捲動網頁後再試一次。");
                         return;
                     }
+
+                    // 智慧預熱：趁使用者在側邊欄檢視預覽時，提前在背景預載壓縮前 10 張圖片
+                    chrome.runtime.sendMessage({
+                        action: 'PREWARM_MANGA_BATCH',
+                        payload: { images: candidateImages.slice(0, 10), tabId: tab.id }
+                    }).catch(() => {});
+
                     renderPreviewList();
                 }
             });

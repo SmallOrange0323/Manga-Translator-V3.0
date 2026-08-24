@@ -292,6 +292,14 @@ export function initMobileMode() {
     const navLinks = results.navLinks;
     foundImages = images;
     foundNavLinks = navLinks;
+
+    if (images.length > 0) {
+      // 智慧預熱：趁使用者瀏覽抽屜時，提前在背景預載壓縮前 10 張圖片
+      chrome.runtime.sendMessage({
+        action: 'PREWARM_MANGA_BATCH',
+        payload: { images: images.slice(0, 10), tabId: 'current' }
+      }).catch(() => {});
+    }
     
     if (images.length === 0) {
       const paragraphs = getNovelParagraphs();

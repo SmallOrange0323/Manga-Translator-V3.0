@@ -509,6 +509,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false; // 同步回應
   }
 
+  if (message.action === 'PREWARM_MANGA_BATCH') {
+      const { images, tabId } = message.payload || {};
+      const sourceTabId = tabId || sender.tab?.id;
+      if (Array.isArray(images) && images.length > 0) {
+          prewarmMangaImages(images, sourceTabId).catch(() => {});
+      }
+      sendResponse({ status: 'prewarming' });
+      return false;
+  }
+
   if (message.action === 'START_MANGA_BATCH_PC_MODE') {
       let { tabId, images, mobile, navLinks, mangaKey, windowId } = message.payload;
       if (!tabId && sender.tab) tabId = sender.tab.id;
@@ -531,8 +541,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               state.set('navLinksStore', store);
           });
       }
-      // 行動端來源時加上 mobile=1 參數，讓結果頁知道要啟用行動閱讀器模式
-      const mobileParam = mobile ? '&mobile=1' : '';
+      // 立即在背景非同步預熱前 10 張圖片 (在分頁開啟的 300ms 內完成第 1 批壓縮)
+      if (Array.isArray(images) && images.length > 0) {
+          prewarmMangaImages(images.slice(0, 10), tabId).catch(() => {});
+      }
+
       // 儲存 payload，等 result.html 的 resultPageReady 訊號再開始翻譯
       chrome.storage.local.set({ mt_batch_payload: { tabId, images } }, () => {
           const createTab = (targetWindowId) => {
@@ -1207,21 +1220,66 @@ async function resizeImageBlobToBase64(blob, maxDim) {
     }
 }
 
+// ── 智慧預載快取池 (Pre-warm Cache Pool) ──
+const prewarmedImageCache = new Map(); // key: url, value: { b64: string, timestamp: number }
+
+/**
+ * prewarmMangaImages — 在使用者開啟抽屜或瀏覽網頁時，提前非同步預熱壓縮前 10 張圖片
+ */
+export async function prewarmMangaImages(images, sourceTabId = null) {
+    if (!Array.isArray(images) || images.length === 0) return;
+    const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
+    const now = Date.now();
+
+    // 篩選出尚未快取或已過期 (3 分鐘) 的目標圖片 (最多預熱前 10 張)
+    const targets = images.slice(0, 10).filter(img => {
+        const url = img?.src || img?.url || img;
+        if (!url || typeof url !== 'string' || url.startsWith('data:image')) return false;
+        const cached = prewarmedImageCache.get(url);
+        return !cached || (now - cached.timestamp > 180_000);
+    });
+
+    if (targets.length === 0) return;
+
+    log.info('Background', `[預熱加速] 正在背景預載並壓縮前 ${targets.length} 張圖片...`);
+    const results = await fetchAndResizeBatch(targets, maxDim, sourceTabId);
+    targets.forEach((img, idx) => {
+        const url = img?.src || img?.url || img;
+        const b64 = results[idx];
+        if (url && typeof b64 === 'string') {
+            prewarmedImageCache.set(url, { b64, timestamp: Date.now() });
+        }
+    });
+    log.info('Background', `[預熱加速] 前 ${targets.length} 張圖片預熱壓縮就緒！快取池大小: ${prewarmedImageCache.size}`);
+}
+
 /**
  * fetchAndResizeBatch — 專職負責將指定批次的圖片進行並行抓取、Blob 轉換與 OffscreenCanvas 等比例縮放
- * 支援雙緩衝管線 (Pipeline Prefetching) 在背景非同步提前預載
+ * 支援雙緩衝管線 (Pipeline Prefetching) 在背景非同步提前預載與快取池秒級命中
  * @param {Array} batch - 當前批次圖片陣列
  * @param {number} maxDim - 最大限制尺寸
  * @param {number|string} sourceTabId - 來源分頁 ID
  * @returns {Promise<Array<string|null>>} Base64 字串陣列
  */
 async function fetchAndResizeBatch(batch, maxDim, sourceTabId) {
+    const now = Date.now();
     return Promise.all(batch.map(async (imgData) => {
         const imgSrc = imgData.src || imgData;
         if (!imgSrc) return null;
         if (typeof imgSrc === 'string' && imgSrc.startsWith('data:image')) {
             return imgSrc.split(',')[1];
         }
+
+        // 1. 優先檢查快取池命中 (0ms 秒取)
+        if (typeof imgSrc === 'string' && prewarmedImageCache.has(imgSrc)) {
+            const cached = prewarmedImageCache.get(imgSrc);
+            if (cached && (now - cached.timestamp < 180_000)) {
+                return cached.b64;
+            } else {
+                prewarmedImageCache.delete(imgSrc);
+            }
+        }
+
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -1229,7 +1287,11 @@ async function fetchAndResizeBatch(batch, maxDim, sourceTabId) {
             clearTimeout(timeoutId);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const blob = await res.blob();
-            return await resizeImageBlobToBase64(blob, maxDim);
+            const b64 = await resizeImageBlobToBase64(blob, maxDim);
+            if (typeof imgSrc === 'string' && typeof b64 === 'string') {
+                prewarmedImageCache.set(imgSrc, { b64, timestamp: Date.now() });
+            }
+            return b64;
         } catch (fetchErr) {
             // 退回 Content Script 備援
             if (sourceTabId && sourceTabId !== 'current') {
@@ -1237,7 +1299,11 @@ async function fetchAndResizeBatch(batch, maxDim, sourceTabId) {
                     new Promise(resolve => chrome.tabs.sendMessage(sourceTabId, { action: 'fetchBase64', url: imgSrc, maxDim }, resolve)),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Content Script fetch Timeout')), 15000))
                 ]).catch(e => ({ error: e.message }));
-                return resp?.base64 || null;
+                const b64 = resp?.base64 || null;
+                if (typeof imgSrc === 'string' && typeof b64 === 'string') {
+                    prewarmedImageCache.set(imgSrc, { b64, timestamp: Date.now() });
+                }
+                return b64;
             }
             return null;
         }
@@ -1700,14 +1766,22 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
             broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
 
-            // 1. 等待本批次圖片下載與壓縮完成
+            // 1. 等待本批次圖片下載與壓縮完成 (若快取命中則 0ms 瞬間就緒)
             const base64Results = await nextBatchPromise;
 
-            // 2. 雙緩衝管線核心：若有下一批圖片，立即在發送本批 API 之前非同步啟動下一批預載預壓！
+            // 2. 雙層滑動窗口核心 (Window Size = 2)：
+            // 在發送本批 API 之前，非同步啟動下一批 (N+1) 與下下一批 (N+2) 預載預壓！
             const nextStart = i + batchSize;
             if (nextStart < images.length) {
                 const nextBatchImages = images.slice(nextStart, nextStart + batchSize);
                 nextBatchPromise = fetchAndResizeBatch(nextBatchImages, maxDim, sourceTabId);
+
+                // 提前預熱 N+2 批次 (不阻塞主流程)
+                const nextNextStart = i + batchSize * 2;
+                if (nextNextStart < images.length) {
+                    const nextNextImages = images.slice(nextNextStart, nextNextStart + batchSize);
+                    fetchAndResizeBatch(nextNextImages, maxDim, sourceTabId).catch(() => {});
+                }
             } else {
                 nextBatchPromise = Promise.resolve([]);
             }
