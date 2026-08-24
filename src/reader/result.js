@@ -773,9 +773,10 @@ function renderPretranslatedChapter(chapterData) {
 
     // 2. 逐一渲染已預翻好的卡片
     const results = chapterData.results || [];
+    const batchSize = chapterData.batchSize || 10;
     results.forEach((item, idx) => {
         translatedData.push(item);
-        const batchIdx = Math.floor(idx / 5);
+        const batchIdx = Math.floor(idx / batchSize);
         const targetGrid = getOrCreateBatchSection(batchIdx);
         const card = buildCard(item, idx);
         targetGrid.appendChild(card);

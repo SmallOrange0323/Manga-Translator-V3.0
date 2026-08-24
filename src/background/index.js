@@ -1269,15 +1269,33 @@ async function crawlChapterImagesAndNav(chapterUrl) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const html = await res.text();
 
-        // 1. 提取漫畫圖片清單
+        // 1. 優先從漫畫正文容器抽取 (避免抓到 Header Logo, 按鈕圖示與 Footer 雜圖)
         const images = [];
         const seenUrls = new Set();
-        const imgRegex = /<img[^>]+(?:data-src|data-original|data-lazy-src|src)=["']([^"']+)["'][^>]*>/gi;
+        const junkKeywords = [
+            'logo', 'banner', 'icon', 'button', 'turn-off', 'light', 'dark', 'avatar',
+            'widget', 'social', 'badge', 'emoji', 'reaction', 'loading', 'placeholder',
+            'thumb', 'small', 'header', 'footer', 'advert', 'donate', 'rating', 'vote',
+            '512x512', '256x256', '128x128', 'chance-load', 'lzloader', 'captcha'
+        ];
+
+        // 嘗試截取主流漫畫容器 HTML
+        let targetHtml = html;
+        const containerMatch = html.match(/<(?:div|article|section)[^>]+(?:id|class)=["'](?:readerarea|reading-content|list-imga|ts-main-image|manga-image|viewer-cnt|chapter-content)["'][^>]*>([\s\S]*?)<\/(?:div|article|section)>/i);
+        if (containerMatch && containerMatch[1]) {
+            targetHtml = containerMatch[1];
+        }
+
+        const imgRegex = /<img[^>]+(?:data-src|data-lazy-src|data-original|data-aload|src)=["']([^"']+)["'][^>]*>/gi;
         let match;
-        while ((match = imgRegex.exec(html)) !== null) {
+        while ((match = imgRegex.exec(targetHtml)) !== null) {
             let imgUrl = match[1].trim();
-            if (!imgUrl || imgUrl.startsWith('data:') || imgUrl.endsWith('.svg') || imgUrl.includes('logo') || imgUrl.includes('banner')) continue;
+            if (!imgUrl || imgUrl.startsWith('data:') || imgUrl.endsWith('.svg')) continue;
             
+            const lower = imgUrl.toLowerCase();
+            const isJunk = junkKeywords.some(k => lower.includes(k));
+            if (isJunk) continue;
+
             try {
                 imgUrl = new URL(imgUrl, chapterUrl).href;
             } catch (_) {}
@@ -1288,27 +1306,56 @@ async function crawlChapterImagesAndNav(chapterUrl) {
             }
         }
 
-        // 2. 提取下下一話導航連結
+        // 2. 提取下下一話與上一話導航連結 (支援下拉選單與連結標籤)
         let nextNav = null;
         let prevNav = null;
-        const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-        while ((match = linkRegex.exec(html)) !== null) {
-            const href = match[1].trim();
-            const text = match[2].replace(/<[^>]+>/g, '').trim();
-            if (!href || href === '#' || href.startsWith('javascript:')) continue;
 
-            let absHref;
-            try {
-                absHref = new URL(href, chapterUrl).href;
-            } catch (_) {
-                continue;
+        // 下拉選單解析
+        const selectMatch = html.match(/<select[^>]*>([\s\S]*?)<\/select>/i);
+        if (selectMatch && selectMatch[1]) {
+            const optRegex = /<option[^>]+value=["']([^"']+)["'][^>]*>([\s\S]*?)<\/option>/gi;
+            const optList = [];
+            let currentOptIdx = -1;
+            let optMatch;
+            while ((optMatch = optRegex.exec(selectMatch[1])) !== null) {
+                const optVal = optMatch[1].trim();
+                const isCur = optMatch[0].includes('selected') || (optVal && chapterUrl.includes(optVal));
+                if (isCur) currentOptIdx = optList.length;
+                optList.push(optVal);
             }
+            if (currentOptIdx !== -1 && optList.length >= 2) {
+                const isDesc = optList[0] > optList[optList.length - 1];
+                if (isDesc) {
+                    if (currentOptIdx > 0) nextNav = new URL(optList[currentOptIdx - 1], chapterUrl).href;
+                    if (currentOptIdx < optList.length - 1) prevNav = new URL(optList[currentOptIdx + 1], chapterUrl).href;
+                } else {
+                    if (currentOptIdx < optList.length - 1) nextNav = new URL(optList[currentOptIdx + 1], chapterUrl).href;
+                    if (currentOptIdx > 0) prevNav = new URL(optList[currentOptIdx - 1], chapterUrl).href;
+                }
+            }
+        }
 
-            if (/下一[話话頁页章回節节]|next(?:\s*page|\s*chapter)?|次へ/i.test(text) || /(?:next|next-chapter|next_page)/i.test(href)) {
-                if (!nextNav && absHref !== chapterUrl) nextNav = absHref;
-            }
-            if (/上一[話话頁页章回節节]|prev(?:ious)?|前へ/i.test(text) || /(?:prev|prev-chapter|prev_page)/i.test(href)) {
-                if (!prevNav && absHref !== chapterUrl) prevNav = absHref;
+        // 連結標籤解析 (若未從 select 取得)
+        if (!nextNav || !prevNav) {
+            const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+            while ((match = linkRegex.exec(html)) !== null) {
+                const href = match[1].trim();
+                const text = match[2].replace(/<[^>]+>/g, '').trim();
+                if (!href || href === '#' || href.startsWith('javascript:')) continue;
+
+                let absHref;
+                try {
+                    absHref = new URL(href, chapterUrl).href;
+                } catch (_) {
+                    continue;
+                }
+
+                if (/下一[話话頁页章回節节]|next(?:\s*page|\s*chapter)?|次へ/i.test(text) || /(?:next|next-chapter|next_page)/i.test(href)) {
+                    if (!nextNav && absHref !== chapterUrl) nextNav = absHref;
+                }
+                if (/上一[話话頁页章回節节]|prev(?:ious)?|前へ/i.test(text) || /(?:prev|prev-chapter|prev_page)/i.test(href)) {
+                    if (!prevNav && absHref !== chapterUrl) prevNav = absHref;
+                }
             }
         }
 
@@ -1338,12 +1385,16 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         }
     }
 
+    const batchSizeSetting = await state.get('ocrBatchSize', 10);
+    const batchSize = Math.max(1, parseInt(batchSizeSetting) || 10);
+
     const jobData = {
         url: nextUrl,
         images: [],
         results: [],
         navLinks: null,
         usedModelName: null,
+        batchSize: batchSize,
         isDone: false,
         inProgress: true,
         isCancelled: false,
@@ -1354,7 +1405,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     pretranslatedChaptersMap.set(nextUrl, jobData);
     activePretranslateJob = jobData;
 
-    log.info('Background', `[跨話連續追漫] 🚀 開始在背景靜默預翻下一話: ${nextUrl}`);
+    log.info('Background', `[跨話連續追漫] 🚀 開始在背景靜默預翻下一話: ${nextUrl} (每批 ${batchSize} 頁)`);
 
     // 1. 抓取圖片與導航
     const crawlData = await crawlChapterImagesAndNav(nextUrl);
@@ -1371,10 +1422,11 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
 
     // 2. 依序執行批次翻譯
     const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
-    const batchSizeSetting = await state.get('ocrBatchSize', 5);
-    const batchSize = Math.max(1, parseInt(batchSizeSetting) || 5);
     const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
     const requestDelay = await state.get('requestDelay', 4000);
+    const mangaKey = await state.get('currentMangaKey', '');
+    const glossarySnippet = await buildGlossaryPromptSnippet(mangaKey);
+    const finalPrompt = await buildFinalMangaPrompt();
 
     const images = crawlData.images;
 
@@ -1395,17 +1447,18 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             try {
                 const subResults = await callGeminiAPIBatch(
                     validItems.map(v => v.b64),
-                    modelName,
-                    null,
-                    false,
+                    finalPrompt,
+                    glossarySnippet,
                     null
                 );
                 
                 for (let j = 0; j < currentBatch.length; j++) {
-                    const matched = subResults.find(r => r.pageIndex === j);
+                    const res = subResults[j] || { results: [] };
                     jobData.results.push({
                         image: currentBatch[j],
-                        results: matched?.results || [],
+                        results: res.results || [],
+                        error: res.error || null,
+                        isProhibited: res.isProhibited || false,
                         usedModelName: modelName
                     });
                 }
