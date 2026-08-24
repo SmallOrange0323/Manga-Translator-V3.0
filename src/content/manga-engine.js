@@ -498,14 +498,17 @@ export function crawlImages() {
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
         
-        // 垃圾關鍵字大滿貫 (徹底排除選單、加載轉輪、驗證碼、頭像、評分圖標)
+        // 垃圾關鍵字大滿貫 (徹底排除選單、加載轉輪、驗證碼、頭像、評分圖標、訪客計數器)
         const junkKeywords = [
             'chance-load', 'captcha', 'lzloader', 'lzloader1', 'loader', 'spin', 'spinner',
             'loading', 'placeholder', 'emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction',
             'thumb', 'small', 'widget', 'social', 'badge', 'ad-', 'comment',
             'footer', 'header', 'nav', 'share', 'profile', 'upvote', 'downvote',
             'funny', 'love', 'surprised', 'angry', 'vote', 'rating', 'emoticon', 'stickers',
-            'smilies', 'dislike', 'thumbs-up', 'thumbs-down', 'wp-reactions', 'post-ratings', 'emotion'
+            'smilies', 'dislike', 'thumbs-up', 'thumbs-down', 'wp-reactions', 'post-ratings', 'emotion',
+            'counter', 'whos.amung.us', 'hits', 'visitor', 'online', 'flagcounter', 'stat',
+            'histats', 'tracker', 'clustrmaps', 'fc2.com', '99counter', 'cbox', 'user_online',
+            'users_online', 'viewcount', 'traffic'
         ];
         const isJunkUrl = junkKeywords.some(key => url && url.toLowerCase().includes(key));
         

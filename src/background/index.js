@@ -1269,14 +1269,17 @@ async function crawlChapterImagesAndNav(chapterUrl) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const html = await res.text();
 
-        // 1. 優先從漫畫正文容器抽取 (避免抓到 Header Logo, 按鈕圖示與 Footer 雜圖)
+        // 1. 優先從漫畫正文容器抽取 (避免抓到 Header Logo, 按鈕圖示, 訪客計數器與 Footer 雜圖)
         const images = [];
         const seenUrls = new Set();
         const junkKeywords = [
             'logo', 'banner', 'icon', 'button', 'turn-off', 'light', 'dark', 'avatar',
             'widget', 'social', 'badge', 'emoji', 'reaction', 'loading', 'placeholder',
             'thumb', 'small', 'header', 'footer', 'advert', 'donate', 'rating', 'vote',
-            '512x512', '256x256', '128x128', 'chance-load', 'lzloader', 'captcha'
+            '512x512', '256x256', '128x128', 'chance-load', 'lzloader', 'captcha',
+            'counter', 'whos.amung.us', 'hits', 'visitor', 'online', 'flagcounter', 'stat',
+            'histats', 'tracker', 'clustrmaps', 'fc2.com', '99counter', 'cbox', 'user_online',
+            'users_online', 'viewcount', 'traffic'
         ];
 
         // 嘗試截取主流漫畫容器 HTML
@@ -1289,12 +1292,19 @@ async function crawlChapterImagesAndNav(chapterUrl) {
         const imgRegex = /<img[^>]+(?:data-src|data-lazy-src|data-original|data-aload|src)=["']([^"']+)["'][^>]*>/gi;
         let match;
         while ((match = imgRegex.exec(targetHtml)) !== null) {
+            const fullTag = match[0];
             let imgUrl = match[1].trim();
             if (!imgUrl || imgUrl.startsWith('data:') || imgUrl.endsWith('.svg')) continue;
             
-            const lower = imgUrl.toLowerCase();
+            const lower = (imgUrl + ' ' + fullTag).toLowerCase();
             const isJunk = junkKeywords.some(k => lower.includes(k));
             if (isJunk) continue;
+
+            // 檢查標籤中是否有小尺寸屬性 (如 width="80" 或 height="30")
+            const dimMatch = fullTag.match(/(?:width|height)=["']?(\d+)["']?/i);
+            if (dimMatch && parseInt(dimMatch[1]) > 0 && parseInt(dimMatch[1]) < 200) {
+                continue; // 排除小於 200px 的計數器與按鈕
+            }
 
             try {
                 imgUrl = new URL(imgUrl, chapterUrl).href;
