@@ -18,8 +18,8 @@ const sessionStoryContext = {};
 
 // 追蹤當前正在進行漫畫翻譯任務的分頁 (分頁 ID ➔ 任務詳情)
 const activeTranslationJobs = new Map();
-// 以結果分頁區分獨立漫畫任務，避免不同分頁彼此阻塞。
-const activeMangaTranslationRuns = new Map();
+// stop/pause 目前是全域狀態，因此同時間只允許一個漫畫翻譯生命週期。
+const activeMangaTranslationRuns = new Set();
 
 
 
@@ -1601,9 +1601,8 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
  * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
  */
 async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
-    // STOP 後只等待同一結果分頁的舊任務離開其 finally，不阻塞其他分頁的翻譯。
-    const previousRun = activeMangaTranslationRuns.get(resultTabId);
-    if (previousRun) await Promise.allSettled([previousRun]);
+    // STOP 後等待所有舊任務離開其 finally，才可清除全域停止/暫停旗標。
+    await Promise.allSettled([...activeMangaTranslationRuns]);
     await state.set('isStopping', false);
     await state.set('isBatchPaused', false);
     return dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey);
@@ -1615,13 +1614,11 @@ async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, na
     const run = (mode === 'two-step' && !isRetry)
         ? processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey)
         : processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey);
-    activeMangaTranslationRuns.set(resultTabId, run);
+    activeMangaTranslationRuns.add(run);
     try {
         return await run;
     } finally {
-        if (activeMangaTranslationRuns.get(resultTabId) === run) {
-            activeMangaTranslationRuns.delete(resultTabId);
-        }
+        activeMangaTranslationRuns.delete(run);
     }
 }
 
