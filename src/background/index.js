@@ -10,7 +10,7 @@ import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
 import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
-import { executeHybridRequest } from './hybrid-retry.js';
+import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -2178,9 +2178,16 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                             candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
                             secondaryModel: secondaryModelName, isHybrid,
                             shouldContinue: async () => !(await state.get('isStopping')),
-                            request: async ({ apiKey, modelName: requestModel }) => {
+                            request: async ({ apiKey, modelName: requestModel, shouldContinue: shouldContinueRequest }) => {
+                                const checkContinue = shouldContinueRequest || (async () => !(await state.get('isStopping')));
                                 for (const subBatch of subBatches) {
+                                    if (!await checkContinue()) {
+                                        throw new HybridRequestAbortedError();
+                                    }
                                     const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel);
+                                    if (!await checkContinue()) {
+                                        throw new HybridRequestAbortedError();
+                                    }
                                     subBatch.forEach((item, k) => { allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' }; });
                                 }
                                 return true;

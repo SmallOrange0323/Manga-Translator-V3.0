@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 const assert = { deepEqual: (actual, expected) => expect(actual).toEqual(expected), equal: (actual, expected) => expect(actual).toBe(expected) };
 import { getHybridSchedule, getBatchModel, getEffectiveDelay, getFailoverModel } from '../src/background/hybrid-scheduler.js';
-import { executeHybridRequest } from '../src/background/hybrid-retry.js';
+import { executeHybridRequest, HybridRequestAbortedError } from '../src/background/hybrid-retry.js';
 
 describe('2D Alternating Round-Robin Scheduler (Key × Model)', () => {
     const ModelA = 'gemini-3.1-flash-lite';
@@ -123,5 +123,35 @@ describe('Hybrid request failover', () => {
         });
         assert.deepEqual(result.results, { apiKey: 'Key2', modelName: 'B' });
         assert.equal(result.usedModelName, 'B');
+    });
+
+    it('stops subsequent sub-batches inside request callback when cancelled', async () => {
+        const calls = [];
+        let isRunning = true;
+        const subBatches = [['img1'], ['img2']];
+        const allPageResults = [];
+
+        await expect(executeHybridRequest({
+            ...options,
+            candidateKeys: ['Key1'],
+            shouldContinue: () => isRunning,
+            request: async ({ shouldContinue }) => {
+                for (const subBatch of subBatches) {
+                    if (!await shouldContinue()) {
+                        throw new HybridRequestAbortedError();
+                    }
+                    calls.push(subBatch[0]);
+                    isRunning = false;
+                    if (!await shouldContinue()) {
+                        throw new HybridRequestAbortedError();
+                    }
+                    allPageResults.push(...subBatch);
+                }
+                return true;
+            }
+        })).rejects.toMatchObject({ code: 'TRANSLATION_STOPPED' });
+
+        assert.deepEqual(calls, ['img1']);
+        assert.deepEqual(allPageResults, []);
     });
 });
