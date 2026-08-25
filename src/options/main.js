@@ -68,10 +68,60 @@ function setupTabs() {
     });
 }
 
+const MODEL_DROPDOWN_IDS = ['modelName', 'secondaryModelName', 'fallbackModelName', 'novelModelName', 'ocrModelName'];
+
+function populateModelDropdowns(models) {
+    if (!models || !Array.isArray(models) || models.length === 0) return;
+
+    MODEL_DROPDOWN_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const currentVal = el.value;
+
+        // 清空既有 option
+        el.innerHTML = '';
+
+        // 若為 OCR 模型選單，預先加入本地端 Manga-OCR 選項
+        if (id === 'ocrModelName') {
+            const localOpt = document.createElement('option');
+            localOpt.value = 'local-wasm-ocr';
+            localOpt.textContent = '💻 本地端 Manga-OCR (WebGPU 顯卡加速 / 日文漫畫專用 / 0 API 消耗)';
+            el.appendChild(localOpt);
+        }
+
+        models.forEach(m => {
+            const opt = document.createElement('option');
+            const modelId = typeof m === 'string' ? m : m.id;
+            const displayName = (typeof m === 'object' && m.displayName) ? `${m.displayName} (${modelId})` : modelId;
+            opt.value = modelId;
+            opt.textContent = displayName;
+            el.appendChild(opt);
+        });
+
+        // 嘗試還原先前選取值；若不在新清單中，動態建立以防空白
+        if (currentVal) {
+            if (Array.from(el.options).some(o => o.value === currentVal)) {
+                el.value = currentVal;
+            } else {
+                const opt = document.createElement('option');
+                opt.value = opt.textContent = currentVal;
+                el.appendChild(opt);
+                el.value = currentVal;
+            }
+        }
+    });
+}
+
 /**
  * 載入一般翻譯設定
  */
 async function initGeneralSettings() {
+    // 若本機有快取的最新 Google 模型清單，先行注入所有下拉選單
+    const cachedModels = await state.get('cachedGeminiModels', null);
+    if (cachedModels && Array.isArray(cachedModels) && cachedModels.length > 0) {
+        populateModelDropdowns(cachedModels);
+    }
+
     const fields = [
         ['translationMode', 'one-step'],
         ['ocrBatchSize', 5],
@@ -363,45 +413,50 @@ function setupEventHandlers() {
         };
     }
 
-    // 從 Google 取得模型清單
+    // 從 Google 取得最新模型清單
     const fetchModelsBtn = document.getElementById('fetchModelsBtn');
+    const fetchModelsSpinner = document.getElementById('fetchModelsSpinner');
+    const fetchModelsBtnText = document.getElementById('fetchModelsBtnText');
+
     if (fetchModelsBtn) {
         fetchModelsBtn.onclick = async () => {
             const apiContainer = document.getElementById('apiKeysContainer');
             const firstKey = apiContainer?.querySelector('.api-key-input')?.value.trim();
-            if (!firstKey) return alert('請先填寫至少一組 API Key');
-            
+            if (!firstKey) return alert('請先填寫至少一組有效的 Gemini API Key！');
+
+            if (fetchModelsSpinner) fetchModelsSpinner.style.display = 'inline-block';
+            if (fetchModelsBtnText) fetchModelsBtnText.textContent = '獲取中...';
+            fetchModelsBtn.disabled = true;
+
             try {
                 const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${firstKey}`);
-                if (!res.ok) throw new Error('API Key 無效或網路錯誤');
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData?.error?.message || `HTTP ${res.status}`);
+                }
                 const data = await res.json();
-                const validModels = data.models.filter(m => m.supportedGenerationMethods.includes('generateContent'));
-                
-                ['modelName', 'fallbackModelName', 'novelModelName', 'ocrModelName'].forEach(id => {
-                    const el = document.getElementById(id);
-                    if (!el) return;
-                    const oldVal = el.value;
-                    el.innerHTML = '';
+                const validModels = (data.models || [])
+                    .filter(m => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+                    .map(m => ({
+                        id: m.name.replace(/^models\//, ''),
+                        displayName: m.displayName || m.name.replace(/^models\//, '')
+                    }));
 
-                    // 若為 OCR 模型選單，預先加入本地端 Manga-OCR 選項
-                    if (id === 'ocrModelName') {
-                        const localOpt = document.createElement('option');
-                        localOpt.value = 'local-wasm-ocr';
-                        localOpt.textContent = '💻 本地端 Manga-OCR (WebGPU 顯卡加速 / 日文漫畫專用 / 0 API 消耗)';
-                        el.appendChild(localOpt);
-                    }
+                if (validModels.length === 0) throw new Error('未找到支援文字生成 (generateContent) 的模型');
 
-                    validModels.forEach(m => {
-                        const mid = m.name.replace('models/', '');
-                        const opt = document.createElement('option');
-                        opt.value = opt.textContent = mid;
-                        el.appendChild(opt);
-                    });
-                    if (Array.from(el.options).some(o => o.value === oldVal)) el.value = oldVal;
-                });
-                alert('模型清單更新成功！');
+                // 注入至所有模型下拉選單 (包含 secondaryModelName)
+                populateModelDropdowns(validModels);
+
+                // 持久化快取至 storage
+                await state.set('cachedGeminiModels', validModels);
+
+                alert(`🎉 成功從 Google 獲取 ${validModels.length} 個可用模型！已自動更新「主要模型」、「次要交替模型」、「備援模型」、「OCR 模型」與「小說模型」下拉清單。`);
             } catch (e) {
-                alert('無法獲取模型: ' + e.message);
+                alert(`❌ 獲取模型清單失敗: ${e.message}\n請檢查 API Key 是否正確以及網路連線。`);
+            } finally {
+                if (fetchModelsSpinner) fetchModelsSpinner.style.display = 'none';
+                if (fetchModelsBtnText) fetchModelsBtnText.textContent = '🔄 從 Google 獲取最新模型清單';
+                fetchModelsBtn.disabled = false;
             }
         };
     }

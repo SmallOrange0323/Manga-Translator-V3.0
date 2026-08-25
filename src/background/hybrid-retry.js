@@ -24,7 +24,7 @@ export async function executeHybridRequest({ candidateKeys, scheduledKey, schedu
             if (!await shouldContinue()) throw new HybridRequestAbortedError();
             const modelName = models[index];
             try {
-                const results = await request({ apiKey: key, modelName, shouldContinue });
+                const results = await request({ apiKey: key, modelName });
                 return { results, usedKey: key, usedModelName: modelName };
             } catch (error) {
                 lastError = error;
