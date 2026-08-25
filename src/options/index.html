@@ -339,7 +339,7 @@
                 <div style="background: linear-gradient(135deg, #fff3e0 0%, #fbe9e7 100%); border: 1px solid #ffcc80; padding: 15px; border-radius: 8px; margin-top: 15px; box-shadow: 0 2px 8px rgba(255, 152, 0, 0.08);">
                     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
                         <h4 style="margin: 0; color: #e65100; font-size: 14px; display: flex; align-items: center; gap: 6px;">
-                            <span>⚡ 雙模型 Hybrid 輪替加速 (速度翻倍 / 額度 3,000 頁)</span>
+                            <span>⚡ 雙模型 Hybrid 輪替與容錯</span>
                         </h4>
                         <label class="switch-container" style="margin-top: 0;">
                             <input type="checkbox" id="hybridModeEnabled" checked>
@@ -347,7 +347,7 @@
                         </label>
                     </div>
                     <p style="margin: 0 0 10px 0; font-size: 12px; color: #6d4c41; line-height: 1.5;">
-                        開啟後，每批次將在「主要模型」與「次要模型」之間自動交替發送。利用 Google AI Studio 免費額度按模型獨立計算的特性，可將每批間隔安全降至 2 秒（追漫速度提升 200%），每日免費翻譯張數翻倍至 3,000 頁！
+                        開啟後，每批次會在主要與次要模型之間交替發送，以分散模型負載並提供容錯。實際速度與可用額度取決於 Google API 當前 quota 及 Project 設定；同一 Project 的多組 Key 仍共享 project-level quota。
                     </p>
                     <div id="hybridSecondaryModelWrapper" style="margin-top: 8px;">
                         <label for="secondaryModelName" style="font-size: 12px; font-weight: bold; color: #e65100; margin-top: 0; display: block;">次要交替模型 (第 2、4、6... 批次輪流接棒):</label>

@@ -1,6 +1,7 @@
-import { describe, it } from 'node:test';
-import assert from 'node:assert/strict';
+import { describe, expect, it } from 'vitest';
+const assert = { deepEqual: (actual, expected) => expect(actual).toEqual(expected) };
 import { getPretranslationCompletion, mapPretranslationBatchResults } from '../src/background/manga-lifecycle.js';
+import { executeHybridRequest } from '../src/background/hybrid-retry.js';
 
 describe('pretranslation batch mapping', () => {
     it('maps compressed API results back to their original image indexes', () => {
@@ -31,4 +32,19 @@ describe('pretranslation completion', () => {
             assert.deepEqual(getPretranslationCompletion(input), expected);
         });
     }
+});
+
+describe('pretranslation hybrid failover', () => {
+    it('records the successful failover model in mapped results', async () => {
+        const execution = await executeHybridRequest({
+            candidateKeys: ['Key1'], scheduledKey: 'Key1', scheduledModel: 'A',
+            primaryModel: 'A', secondaryModel: 'B', isHybrid: true,
+            request: async ({ modelName }) => {
+                if (modelName === 'A') throw { statusCode: 429, message: 'rate limited' };
+                return [{ results: ['translated'] }];
+            }
+        });
+        const mapped = mapPretranslationBatchResults(['image'], ['base64'], [{ originalIdx: 0, b64: 'base64' }], execution.results, execution.usedModelName);
+        assert.deepEqual(mapped[0], { image: 'image', results: ['translated'], usedModelName: 'B' });
+    });
 });

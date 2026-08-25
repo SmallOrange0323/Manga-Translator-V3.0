@@ -1,5 +1,5 @@
-import { describe, it } from 'node:test';
-import assert from 'node:assert/strict';
+import { describe, expect, it } from 'vitest';
+const assert = { equal: (actual, expected) => expect(actual).toBe(expected) };
 import { shouldCompleteMangaTranslation } from '../src/background/manga-lifecycle.js';
 
 describe('manga completed-path decision', () => {

@@ -1,5 +1,5 @@
-import { describe, it, beforeEach } from 'node:test';
-import assert from 'node:assert/strict';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+const assert = { equal: (actual, expected) => expect(actual).toBe(expected) };
 
 function createStorageMock() {
     const data = {};
@@ -20,11 +20,12 @@ function createStorageMock() {
 
 describe('StateManager.update', () => {
     beforeEach(() => {
+        vi.resetModules();
         globalThis.chrome = { storage: createStorageMock() };
     });
 
     it('serializes concurrent updates for the same key', async () => {
-        const { state } = await import('../src/utils/state.js?t=' + Date.now());
+        const { state } = await import('../src/utils/state.js');
         await state.init();
         await Promise.all([
             state.update('counter', value => (value || 0) + 1),

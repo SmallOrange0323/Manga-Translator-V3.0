@@ -1,5 +1,5 @@
-import { describe, it } from 'node:test';
-import assert from 'node:assert/strict';
+import { describe, expect, it } from 'vitest';
+const assert = { deepEqual: (actual, expected) => expect(actual).toEqual(expected), equal: (actual, expected) => expect(actual).toBe(expected), rejects: async (task, pattern) => expect(task()).rejects.toThrow(pattern) };
 import { createMangaStartLock } from '../src/background/manga-start-lock.js';
 
 describe('manga start lock', () => {
