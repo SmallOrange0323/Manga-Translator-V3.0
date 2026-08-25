@@ -18,6 +18,7 @@ const sessionStoryContext = {};
 
 // 追蹤當前正在進行漫畫翻譯任務的分頁 (分頁 ID ➔ 任務詳情)
 const activeTranslationJobs = new Map();
+const activeMangaTranslationRuns = new Set();
 
 
 
@@ -552,8 +553,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!tabId && sender.tab) tabId = sender.tab.id;
       if (!windowId && sender.tab) windowId = sender.tab.windowId;
       
-      state.set('isStopping', false);
-      
       // 紀錄手動選擇的詞庫 key
       if (mangaKey) {
           state.get('navigationContext', {}).then(ctx => {
@@ -659,8 +658,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   const { sourceTabId, images, navLinks } = jobs[resultTabId];
                   delete jobs[resultTabId];
                   state.set('pendingBatchJobs', jobs);
-                  // 依據 translationMode (一條龍 vs 雙階段) 自動派發
-                  dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks);
+                  // 新任務必須等待先前被停止的任務真正退出後，才清除停止旗標並派發。
+                  startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks)
+                      .catch(err => log.error('Background', `啟動漫畫翻譯任務失敗: ${err.message}`));
               }
           });
       }
@@ -1071,7 +1071,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { sourceTabId, images, navLinks } = message.payload;
       const mobileTabId = sender.tab?.id;
       if (mobileTabId) {
-          dispatchMangaBatchProcessing(sourceTabId, mobileTabId, images, navLinks || null);
+          startNewMangaBatchProcessing(sourceTabId, mobileTabId, images, navLinks || null)
+              .catch(err => log.error('Background', `行動版漫畫翻譯啟動失敗: ${err.message}`));
       }
       sendResponse({ status: 'ok' });
       return false;
@@ -1140,8 +1141,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ status: 'error', error: '缺少圖片清單或結果分頁 ID' });
           return false;
       }
-      state.set('isStopping', false);
-      processMangaBatchPCMode(retrySourceTabId || null, retryResultTabId, images, null, true, targetBatchIndex, '', mangaKey || null);
+      startNewMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, true, targetBatchIndex, mangaKey || null)
+          .catch(err => log.error('Background', `重試批次啟動失敗: ${err.message}`));
       log.info('Background', `[重試批次] 收到 ${images.length} 張圖片，重翻指定批次 #${targetBatchIndex !== undefined ? targetBatchIndex + 1 : '全'} (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
       sendResponse({ status: 'retrying' });
       return false;
@@ -1159,11 +1160,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.set('isStopping', true);
 
       setTimeout(async () => {
-          await state.set('isStopping', false);
-          await state.set('isBatchPaused', false);
-
           log.info('Background', `[重翻批次] 收到 ${images.length} 張圖片，開始重新翻譯 (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
-          dispatchMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, false, null, mangaKey || null);
+          startNewMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, false, null, mangaKey || null)
+              .catch(err => log.error('Background', `重翻批次啟動失敗: ${err.message}`));
       }, 300);
 
       sendResponse({ status: 'retrying' });
@@ -1600,13 +1599,25 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
  * - one-step: 一條龍模式 (每批圖片直接送 Vision 直譯，極速、零等待)
  * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
  */
+async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
+    // STOP 後先等待舊任務離開其 finally，避免新任務過早清除舊任務的停止訊號。
+    await Promise.allSettled([...activeMangaTranslationRuns]);
+    await state.set('isStopping', false);
+    await state.set('isBatchPaused', false);
+    return dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey);
+}
+
 async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
     const mode = await state.get('translationMode', 'one-step');
     log.info('Background', `[任務派發] 當前模式: ${mode}，圖片數: ${images.length}，是否重試: ${isRetry}，指定作品Key: ${customMangaKey || '無'}`);
-    if (mode === 'two-step' && !isRetry) {
-        return processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey);
-    } else {
-        return processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey);
+    const run = (mode === 'two-step' && !isRetry)
+        ? processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey)
+        : processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey);
+    activeMangaTranslationRuns.add(run);
+    try {
+        return await run;
+    } finally {
+        activeMangaTranslationRuns.delete(run);
     }
 }
 
@@ -2463,7 +2474,6 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
             return;
         }
 
-        await state.set('isStopping', false);
         const images = crawlResult.images;
         const navLinks = crawlResult.navLinks || { prev: null, next: null };
 
@@ -2483,7 +2493,8 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
                             log.warn('Background', '[AutoBatch] 結果頁無回應，改開新頁');
                             openNewResultPage(tabId, images, navLinks, mangaKey, mobile);
                         } else {
-                            dispatchMangaBatchProcessing(tabId, resultTabId, images, navLinks);
+                            startNewMangaBatchProcessing(tabId, resultTabId, images, navLinks)
+                                .catch(err => log.error('Background', `[AutoBatch] 接力翻譯啟動失敗: ${err.message}`));
                         }
                     });
                     return;
