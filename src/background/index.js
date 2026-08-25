@@ -510,6 +510,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               exists: true,
               isDone: data.isDone,
               inProgress: data.inProgress,
+              status: data.status || null,
+              error: data.error || null,
               count: data.results?.length || 0,
               total: data.images?.length || 0,
               data: data.isDone && !data.isCancelled ? data : null
@@ -1387,23 +1389,40 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             const validItems = base64List
                 .map((b64, idx) => ({ b64, originalIdx: idx }))
                 .filter(item => typeof item.b64 === 'string' && item.b64);
+            const batchResults = currentBatch.map((image, idx) => {
+                if (typeof base64List[idx] !== 'string' || !base64List[idx]) {
+                    return { image, error: '圖片載入失敗', usedModelName: modelName };
+                }
+                return null;
+            });
 
             if (validItems.length > 0) {
                 try {
                     const subResults = await callGeminiAPIBatch(
                         validItems.map(v => v.b64), finalPrompt, glossarySnippet
                     );
-                    for (let j = 0; j < currentBatch.length; j++) {
-                        const matched = subResults.find(r => r.pageIndex === j);
-                        jobData.results.push({ image: currentBatch[j], results: matched?.results || [], usedModelName: modelName });
-                    }
+                    validItems.forEach((item, apiIndex) => {
+                        // callGeminiAPIBatch 已將模型 pageIndex 正規化為固定順序陣列；
+                        // apiIndex 對應 validItems 的位置，再回填原始批次索引。
+                        const matched = subResults[apiIndex];
+                        batchResults[item.originalIdx] = matched
+                            ? (matched.error
+                                ? { image: currentBatch[item.originalIdx], error: matched.error, usedModelName: modelName }
+                                : { image: currentBatch[item.originalIdx], results: matched.results || [], usedModelName: modelName })
+                            : { image: currentBatch[item.originalIdx], error: '批次結果不足', usedModelName: modelName };
+                    });
                 } catch (apiErr) {
                     log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤: ${apiErr.message}`);
-                    for (const image of currentBatch) {
-                        jobData.results.push({ image, error: apiErr.message, usedModelName: modelName });
-                    }
+                    validItems.forEach(item => {
+                        batchResults[item.originalIdx] = {
+                            image: currentBatch[item.originalIdx], error: apiErr.message, usedModelName: modelName
+                        };
+                    });
                 }
             }
+            jobData.results.push(...batchResults.map((result, idx) => result || ({
+                image: currentBatch[idx], error: '預翻結果缺失', usedModelName: modelName
+            })));
             if (i + batchSize < crawlData.images.length && !jobData.isCancelled) {
                 await new Promise(r => setTimeout(r, requestDelay));
             }
@@ -1413,10 +1432,14 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         if (jobData.isCancelled) {
             jobData.status = 'cancelled';
             log.info('Background', `[跨話連續追漫] 下一話預翻已取消`);
-        } else {
+        } else if (jobData.results.length === jobData.images.length && jobData.results.every(Boolean)) {
             jobData.isDone = true;
             jobData.status = 'completed';
             log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命！`);
+        } else {
+            jobData.error = '預翻結果不完整';
+            jobData.status = 'error';
+            log.warn('Background', `[跨話連續追漫] 預翻結果不完整 (${jobData.results.length}/${jobData.images.length})`);
         }
     } catch (err) {
         jobData.error = err.message;
@@ -1899,6 +1922,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
         let completedCount = 0;
         let allBatchResults = [];
+        let wasStopped = false;
+        let wasAborted = false;
 
         // ── 5. 雙緩衝管線 (Double-Buffered Pipeline) 啟動：提前非同步預載第 1 批 ──
         let nextBatchPromise = (images.length > 0)
@@ -1913,13 +1938,13 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     const tab = await chrome.tabs.get(resultTabId);
                     if (!tab) {
                         log.info('Background', `結果分頁 ${resultTabId} 不存在，中止任務。`);
+                        wasAborted = true;
                         break;
                     }
                 } catch (tabErr) {
-                    if (tabErr.message && tabErr.message.includes('No tab with id')) {
-                        log.info('Background', `結果分頁 ${resultTabId} 已關閉，中止任務。`);
-                        break;
-                    }
+                    log.info('Background', `結果分頁 ${resultTabId} 無法存取，中止任務。`);
+                    wasAborted = true;
+                    break;
                 }
             }
 
@@ -1929,6 +1954,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
             if (await state.get('isStopping')) {
                 log.warn('Background', '漫畫翻譯任務已被強制停止');
+                wasStopped = true;
                 break;
             }
 
@@ -1936,6 +1962,11 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             while (await state.get('isBatchPaused', false)) {
                 await new Promise(r => setTimeout(r, 500));
                 if (await state.get('isStopping')) break;
+            }
+            if (await state.get('isStopping')) {
+                log.warn('Background', '漫畫翻譯任務已在暫停狀態下停止');
+                wasStopped = true;
+                break;
             }
 
             const progressText = batchSize > 1
@@ -2135,6 +2166,22 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             if (i + batchSize < images.length) {
                 await new Promise(r => setTimeout(r, finalDelay));
             }
+        }
+
+        if (!wasStopped && await state.get('isStopping')) wasStopped = true;
+        if (!wasAborted && resultTabId && typeof resultTabId === 'number') {
+            try {
+                await chrome.tabs.get(resultTabId);
+            } catch (_) {
+                wasAborted = true;
+            }
+        }
+
+        if (wasStopped || wasAborted) {
+            const statusMessage = wasStopped ? '翻譯已停止' : '翻譯已中止（結果分頁已關閉）';
+            broadcastStatus(`⏹️ ${statusMessage}`, 'warn');
+            chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
+            return;
         }
 
         // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護) ──
