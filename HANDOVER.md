@@ -1,10 +1,10 @@
-# 漫譯 V3.1.5 (Manga Translator V3.1.5) 專案交接與進度備忘錄
+# 漫譯 V3.1.6 (Manga Translator V3.1.6) 專案交接與進度備忘錄
 
-**文件生成時間**：2026-08-24  
+**文件生成時間**：2026-08-25  
 **目前 Git 分支**：`feature/prompt-xml-upgrade`  
-**最新版本號**：`V3.1.5`  
+**最新版本號**：`V3.1.6`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已全面升級為 **V3.1.5**。完成【跨話無縫連續追漫與自動預翻機制 (Seamless Next-Chapter Pipeline：閱讀當前話時背景靜默預翻下一話 + 結果頁 0ms 原地秒開 SPA 換話 + 鏈式接力 + 分頁關閉自動銷毀快取)】、【整批觸發模型審查拒絕 (SAFETY / BLOCKLIST / Prohibited Content) 於第一張卡片呈現專屬朱紅警示橫幅與自癒重試指引】、【4 大經典字型即時切換系統（宋體/圓體/源石黑體/楷體）+ 偏好持久化記憶】、【極簡純粹導航列（上一話/下一話）】、【Google OAuth 2.0 雙平台通用 Client ID 配置打通】、【詞庫 Key 智慧歸一化與歷史重複詞庫自動合併去重】與【滿版漢字「漫」全新圖示升級】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.5_Store_Package*.zip`。
+**工作區狀態**：已全面升級為 **V3.1.6**。完成【核心架構穩定性修復 (Core Stability Hardening：State 狀態隊列鎖序列化防競態、預翻壞圖索引映射精準對齊、漫畫任務啟動互斥鎖、任務中止與生命週期精確管理、11 項 Vitest 單元測試與 GitHub CI 自動化防護)】、【跨話無縫連續追漫與自動預翻機制 (Seamless Next-Chapter Pipeline：閱讀當前話時背景靜默預翻下一話 + 結果頁 0ms 原地秒開 SPA 換話 + 鏈式接力 + 分頁關閉自動銷毀快取)】、【4 大經典字型即時切換系統（宋體/圓體/源石黑體/楷體）+ 偏好持久化記憶】與【滿版漢字「漫」全新圖示升級】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.6_Store_Package*.zip`。
 
 ---
 

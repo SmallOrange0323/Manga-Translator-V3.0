@@ -18,6 +18,7 @@ class StateManager {
     this.initPromise = null;
     this.apiKeys = [];
     this.currentKeyIndex = 0;
+    this.updateLocks = new Map();
   }
 
   /**
@@ -64,23 +65,30 @@ class StateManager {
   }
 
   /**
-   * 原子化更新：確保讀取、修改、寫入過程不被中途干擾
-   * 非常適用於隊列 (Queue) 操作
+   * 同一 StateManager instance 內依 key 序列化的更新，降低並行 read-modify-write race。
+   * 這不是跨 extension context 的 storage transaction。
    * @param {string} key 
    * @param {function} updater (currentVal) => newVal
    */
   async update(key, updater) {
     if (!this.isInitialized) await this.init();
-    
-    // 為了跨 context (Sidepanel/Background) 原子化，
-    // 我們在更新前強制從 storage 讀取一次最新值
-    const data = await chrome.storage.local.get(key);
-    const currentVal = data[key];
-    const newVal = await updater(currentVal);
-    
-    this.cache[key] = newVal;
-    await chrome.storage.local.set({ [key]: newVal });
-    log.state(key, 'Updated (Atomic)', newVal);
+    const previous = this.updateLocks.get(key) || Promise.resolve();
+    const current = previous.then(async () => {
+      const data = await chrome.storage.local.get(key);
+      const newVal = await updater(data[key]);
+      this.cache[key] = newVal;
+      await chrome.storage.local.set({ [key]: newVal });
+      log.state(key, 'Updated (Serialized)', newVal);
+      return newVal;
+    });
+    const settled = current.catch(() => {});
+    this.updateLocks.set(key, settled);
+
+    try {
+      return await current;
+    } finally {
+      if (this.updateLocks.get(key) === settled) this.updateLocks.delete(key);
+    }
   }
 
   /**
