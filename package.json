@@ -1,7 +1,7 @@
 {
   "name": "manga-translator-v3",
-  "version": "3.1.5",
-  "description": "Manga Translator V3.1.5 - Seamless Next-Chapter Pipeline & Washi Reader",
+  "version": "3.1.6",
+  "description": "Manga Translator V3.1.6 - Core Stability & Lifecycle Hardening",
   "type": "module",
   "scripts": {
     "dev": "vite",
