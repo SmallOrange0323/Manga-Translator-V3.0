@@ -18,8 +18,10 @@ const sessionStoryContext = {};
 
 // 追蹤當前正在進行漫畫翻譯任務的分頁 (分頁 ID ➔ 任務詳情)
 const activeTranslationJobs = new Map();
-// stop/pause 目前是全域狀態，因此同時間只允許一個漫畫翻譯生命週期。
+// V3.1.5 的 stop/pause 仍是全域狀態；啟動 mutex 與 run tracking 共同保證全域單一漫畫 lifecycle。
+// 未來若要支援多 Tab 並行，需將 stop/pause、cancellation 與 job state 改為 per-job。
 const activeMangaTranslationRuns = new Set();
+let mangaStartQueue = Promise.resolve();
 
 
 
@@ -1600,12 +1602,34 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
  * - one-step: 一條龍模式 (每批圖片直接送 Vision 直譯，極速、零等待)
  * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
  */
+function withMangaStartLock(task) {
+    const previous = mangaStartQueue;
+    let release;
+    mangaStartQueue = new Promise(resolve => { release = resolve; });
+
+    return previous.then(async () => {
+        try {
+            return await task();
+        } finally {
+            release();
+        }
+    });
+}
+
 async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
-    // STOP 後等待所有舊任務離開其 finally，才可清除全域停止/暫停旗標。
-    await Promise.allSettled([...activeMangaTranslationRuns]);
-    await state.set('isStopping', false);
-    await state.set('isBatchPaused', false);
-    return dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey);
+    let createdRun;
+    await withMangaStartLock(async () => {
+        // STOP 後等待所有舊任務離開其 finally，才可清除全域停止/暫停旗標。
+        await Promise.allSettled([...activeMangaTranslationRuns]);
+        await state.set('isStopping', false);
+        await state.set('isBatchPaused', false);
+
+        // dispatch 建立並追蹤 run 後立即釋放啟動鎖；翻譯本身不佔用 mutex。
+        createdRun = (await dispatchMangaBatchProcessing(
+            sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey
+        )).run;
+    });
+    return createdRun;
 }
 
 async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
@@ -1615,11 +1639,10 @@ async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, na
         ? processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey)
         : processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey);
     activeMangaTranslationRuns.add(run);
-    try {
-        return await run;
-    } finally {
+    run.finally(() => {
         activeMangaTranslationRuns.delete(run);
-    }
+    }).catch(err => log.error('Background', `漫畫翻譯任務結束時發生錯誤: ${err.message}`));
+    return { run };
 }
 
 /**
