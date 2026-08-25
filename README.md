@@ -1,21 +1,24 @@
-# 漫譯 V3.1.7 (Manga Translator V3.1.7) 🎌
+# 漫譯 V3.1.8 (Manga Translator V3.1.8) 🎌
 
-![Version](https://img.shields.io/badge/version-3.1.7-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.1.8-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.1.7** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
-支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**雙模型 Hybrid 輪替加速 (速度翻倍/額度 3,000 頁)、核心狀態隊列鎖防護、跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
+**漫譯 V3.1.8** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
+支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**2D 二維交錯輪替調度 (Key × Model 負載均衡 / 速度翻倍 / 額度 3,000+ 頁)、核心狀態隊列鎖防護、跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
 
 ---
 
 ## 🌟 核心功能特色 (Key Features)
 
-### ⚡ 1. 雙 Gemini 模型 Hybrid 輪替加速 (Dual-Gemini Hybrid Speed Pipeline)
-* **雙模型交替發送 (Round-Robin)**：每批次在 Primary (`3.1-Flash-Lite`) 與 Secondary (`3.5-Flash-Lite` / `2.5-Flash`) 間自動交替發送。
-* **追漫延遲減半 (4s ➔ 2s)**：各模型獨立冷卻，請求間隔安全縮短至 2 秒，整話 30 頁漫畫秒級翻完。
-* **每日免費額度翻倍至 3,000 頁**：利用 Google AI Studio 免費額度按模型獨立計算機制，大水管暢讀無阻。
+### ⚡ 1. 2D 二維交錯輪替調度 (2D Alternating Round-Robin Pipeline: Key × Model)
+* **二維交錯輪替 (Key1-A → Key2-B → Key3-A → Key4-B → Round 2: Key1-B → ...)**：
+  * **第 1 輪 (Round 0)**：Key 1 ➔ Model A、Key 2 ➔ Model B、Key 3 ➔ Model A、Key 4 ➔ Model B。
+  * **第 2 輪 (Round 1)**：一輪結束後由 **Key 1 ➔ Model B** 接棒開始，依序 Key 2 ➔ Model A、Key 3 ➔ Model B、Key 4 ➔ Model A！
+  * **第 3 輪 (Round 2)**：回歸 Key 1 ➔ Model A 循環，實現極致的 Key 與模型負載均衡！
+* **追漫延遲極速降至 1~2 秒**：每個 `(Key, Model)` 實體享有超長獨立冷卻時間，整話 30 頁漫畫秒速翻完且絕不撞 15 RPM 限速。
+* **每日免費額度倍數飆升**：多 Key 與雙模型相乘，大水管暢讀無阻。
 * **智慧 429 跨模型容錯 (Failover)**：若單一模型繁忙或撞限，自動 0 毫秒切換另一個模型接力救援。
 
 ---

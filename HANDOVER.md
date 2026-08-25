@@ -1,10 +1,10 @@
-# 漫譯 V3.1.7 (Manga Translator V3.1.7) 專案交接與進度備忘錄
+# 漫譯 V3.1.8 (Manga Translator V3.1.8) 專案交接與進度備忘錄
 
 **文件生成時間**：2026-08-25  
 **目前 Git 分支**：`feature/prompt-xml-upgrade`  
-**最新版本號**：`V3.1.7`  
+**最新版本號**：`V3.1.8`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已全面升級為 **V3.1.7**。完成【雙 Gemini 模型 Hybrid 輪替加速機制 (Dual-Gemini Hybrid Speed Pipeline：每批次在 3.1 Flash-Lite 與 3.5 Flash-Lite 間自動交替發送、請求延遲減半至 2 秒、每日免費額度翻倍至 3,000 頁、智慧 429 跨模型容錯接棒、17 項單元測試全數通過)】、【核心架構穩定性修復 (Core Stability Hardening：State 狀態隊列鎖序列化防競態、預翻壞圖索引映射精準對齊、漫畫任務啟動互斥鎖、任務中止與生命週期精確管理)】、【跨話無縫連續追漫與自動預翻機制】與【專案目錄大掃除】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.7_Store_Package*.zip`。
+**工作區狀態**：已全面升級為 **V3.1.8**。完成【2D 二維交錯輪替調度 (2D Alternating Round-Robin Pipeline: Key1-A → Key2-B → Key3-A → Key4-B → Round 2: Key1-B → ... 極致負載均衡、延遲極速降至 1~2 秒、17 項單元測試全數通過)】、【雙 Gemini 模型 Hybrid 輪替加速機制】、【核心架構穩定性修復】、【跨話無縫連續追漫與自動預翻機制】與【專案目錄大掃除】。已通過 Vite 生產構建並產出最新三款 `Manga_Translator_V3.1.8_Store_Package*.zip`。
 
 ---
 

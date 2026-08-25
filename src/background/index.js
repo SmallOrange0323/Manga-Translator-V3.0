@@ -9,6 +9,7 @@ import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
 import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation } from './manga-lifecycle.js';
+import { getHybridSchedule, getEffectiveDelay, getFailoverModel } from './hybrid-scheduler.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -1488,9 +1489,10 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
         const requestDelay = await state.get('requestDelay', 4000);
 
+        const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
         const isHybrid = await state.get('hybridModeEnabled', true);
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
-        const effectiveDelay = isHybrid ? Math.max(1500, Math.floor(requestDelay / 2)) : requestDelay;
+        const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
 
         for (let i = 0; i < crawlData.images.length; i += batchSize) {
             if (jobData.isCancelled) {
@@ -1499,7 +1501,9 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             }
             const currentBatch = crawlData.images.slice(i, i + batchSize);
             const batchIdx = Math.floor(i / batchSize);
-            const batchModel = (isHybrid && batchIdx % 2 === 1) ? secondaryModelName : modelName;
+            const schedule = getHybridSchedule(batchIdx, candidateKeys.length, isHybrid, modelName, secondaryModelName);
+            const batchModel = schedule.modelName;
+            const scheduledKey = candidateKeys[schedule.keyIndex];
             const base64List = await fetchAndResizeBatch(currentBatch, maxDim, sourceTabId);
             const validItems = base64List
                 .map((b64, idx) => ({ b64, originalIdx: idx }))
@@ -1508,11 +1512,11 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             if (validItems.length > 0) {
                 try {
                     const subResults = await callGeminiAPIBatch(
-                        validItems.map(v => v.b64), finalPrompt, glossarySnippet, null, batchModel
+                        validItems.map(v => v.b64), finalPrompt, glossarySnippet, scheduledKey, batchModel
                     );
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, subResults, batchModel);
                 } catch (apiErr) {
-                    log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${batchModel}): ${apiErr.message}`);
+                    log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${state.getApiKeyAlias(scheduledKey)} | ${batchModel}): ${apiErr.message}`);
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel, apiErr);
                 }
             } else {
@@ -2045,15 +2049,16 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         const batchSize = isGemmaMode ? 1 : (parseInt(ocrBatchSizeSetting) || 1);
         const requestDelay = await state.get('requestDelay', 4000);
         const maxDim = await state.get('imageMaxDimension', 1024);
+        const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
         const isHybrid = await state.get('hybridModeEnabled', true);
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
-        const effectiveDelay = isHybrid ? Math.max(1500, Math.floor(requestDelay / 2)) : requestDelay;
+        const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
         
         if (!state.isInitialized) await state.init();
 
         await state.set('isBatchPaused', false);
 
-        log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (Hybrid加速: ${isHybrid ? `已啟用 [主: ${modelName} / 次: ${secondaryModelName}], 延遲: ${effectiveDelay}ms` : `關閉, 延遲: ${requestDelay}ms`})`);
+        log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (2D交錯加速: ${isHybrid ? `已啟用 [Key池=${candidateKeys.length}組 / 主: ${modelName} / 次: ${secondaryModelName}], 延遲: ${effectiveDelay}ms` : `關閉, 延遲: ${requestDelay}ms`})`);
 
         let completedCount = 0;
         let allBatchResults = [];
@@ -2087,7 +2092,17 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             const totalBatches = Math.ceil(images.length / batchSize);
             const currentBatchIndex = Math.floor(i / batchSize) + 1;
             const batchIdx = Math.floor(i / batchSize);
-            let batchModel = (isHybrid && batchIdx % 2 === 1) ? secondaryModelName : modelName;
+
+            // 2D 二維交錯輪替排程 (Key1-A → Key2-B → Key3-A → Key4-B → Round 2: Key1-B → ...)
+            const schedule = getHybridSchedule(batchIdx, candidateKeys.length, isHybrid, modelName, secondaryModelName);
+            let batchModel = schedule.modelName;
+            const scheduledKey = candidateKeys[schedule.keyIndex];
+
+            // 優先使用二維排程指派的 Key，其餘作為備援順序
+            const orderedKeys = [
+                scheduledKey,
+                ...candidateKeys.filter((_, idx) => idx !== schedule.keyIndex)
+            ];
 
             if (await state.get('isStopping')) {
                 log.warn('Background', '漫畫翻譯任務已被強制停止');
@@ -2106,9 +2121,10 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 break;
             }
 
+            const keyTag = state.getApiKeyAlias(scheduledKey);
             const progressText = batchSize > 1
-                ? `第 ${currentBatchIndex} / ${totalBatches} 批 [${batchModel.replace('gemini-', '')}] (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
-                : `${i + 1} / ${images.length} [${batchModel.replace('gemini-', '')}]`;
+                ? `第 ${currentBatchIndex} / ${totalBatches} 批 [${keyTag} | ${batchModel.replace('gemini-', '')}] (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
+                : `${i + 1} / ${images.length} [${keyTag} | ${batchModel.replace('gemini-', '')}]`;
             
             chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
             broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
@@ -2155,11 +2171,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
                     }
 
-                    // ── 多 Key 批次輪流重試：優先換 Key 繼續批次翻譯 ──
-                    const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
-
-                    for (let ki = 0; ki < candidateKeys.length; ki++) {
-                        const targetKey = candidateKeys[ki];
+                    // ── 多 Key 批次二維交錯輪替與重試 ──
+                    for (let ki = 0; ki < orderedKeys.length; ki++) {
+                        const targetKey = orderedKeys[ki];
                         const keyAlias = state.getApiKeyAlias(targetKey);
 
                         try {
@@ -2188,11 +2202,11 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                             }
                             break; // 本批次成功，跳出 Key 輪流重試
                         } catch (batchKeyErr) {
-                            log.warn('Background', `[批次] Key ${ki + 1} (${keyAlias}) 模型 ${batchModel} 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key/模型...`);
+                            log.warn('Background', `[批次] Key (${keyAlias}) 模型 ${batchModel} 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key/模型...`);
                             // 智慧跨模型容錯：若觸發 429 或 503，切換至另一個模型接力救援
                             if (isHybrid && (batchKeyErr.message.includes('429') || batchKeyErr.message.includes('503'))) {
                                 const prevModel = batchModel;
-                                batchModel = (batchModel === modelName) ? secondaryModelName : modelName;
+                                batchModel = getFailoverModel(batchModel, modelName, secondaryModelName);
                                 log.info('Background', `[Hybrid 跨模型容錯] 檢測到 ${prevModel} 配額限制，自動切換至模型 ${batchModel} 進行救援！`);
                             }
                         }
