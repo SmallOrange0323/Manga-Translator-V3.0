@@ -7,6 +7,8 @@ import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch, extrac
 import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
+import { createMangaStartLock } from './manga-start-lock.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation } from './manga-lifecycle.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -21,7 +23,7 @@ const activeTranslationJobs = new Map();
 // V3.1.5 的 stop/pause 仍是全域狀態；啟動 mutex 與 run tracking 共同保證全域單一漫畫 lifecycle。
 // 未來若要支援多 Tab 並行，需將 stop/pause、cancellation 與 job state 改為 per-job。
 const activeMangaTranslationRuns = new Set();
-let mangaStartQueue = Promise.resolve();
+const withMangaStartLock = createMangaStartLock();
 
 
 
@@ -1391,56 +1393,40 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             const validItems = base64List
                 .map((b64, idx) => ({ b64, originalIdx: idx }))
                 .filter(item => typeof item.b64 === 'string' && item.b64);
-            const batchResults = currentBatch.map((image, idx) => {
-                if (typeof base64List[idx] !== 'string' || !base64List[idx]) {
-                    return { image, error: '圖片載入失敗', usedModelName: modelName };
-                }
-                return null;
-            });
-
+            let batchResults;
             if (validItems.length > 0) {
                 try {
                     const subResults = await callGeminiAPIBatch(
                         validItems.map(v => v.b64), finalPrompt, glossarySnippet
                     );
-                    validItems.forEach((item, apiIndex) => {
-                        // callGeminiAPIBatch 已將模型 pageIndex 正規化為固定順序陣列；
-                        // apiIndex 對應 validItems 的位置，再回填原始批次索引。
-                        const matched = subResults[apiIndex];
-                        batchResults[item.originalIdx] = matched
-                            ? (matched.error
-                                ? { image: currentBatch[item.originalIdx], error: matched.error, usedModelName: modelName }
-                                : { image: currentBatch[item.originalIdx], results: matched.results || [], usedModelName: modelName })
-                            : { image: currentBatch[item.originalIdx], error: '批次結果不足', usedModelName: modelName };
-                    });
+                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, subResults, modelName);
                 } catch (apiErr) {
                     log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤: ${apiErr.message}`);
-                    validItems.forEach(item => {
-                        batchResults[item.originalIdx] = {
-                            image: currentBatch[item.originalIdx], error: apiErr.message, usedModelName: modelName
-                        };
-                    });
+                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, modelName, apiErr);
                 }
+            } else {
+                batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, modelName);
             }
-            jobData.results.push(...batchResults.map((result, idx) => result || ({
-                image: currentBatch[idx], error: '預翻結果缺失', usedModelName: modelName
-            })));
+            jobData.results.push(...batchResults);
             if (i + batchSize < crawlData.images.length && !jobData.isCancelled) {
                 await new Promise(r => setTimeout(r, requestDelay));
             }
         }
 
         jobData.usedModelName = modelName;
-        if (jobData.isCancelled) {
-            jobData.status = 'cancelled';
+        const completion = getPretranslationCompletion({
+            isCancelled: jobData.isCancelled,
+            resultCount: jobData.results.length,
+            imageCount: jobData.images.length
+        });
+        jobData.status = completion.status;
+        jobData.isDone = completion.isDone;
+        if (completion.status === 'cancelled') {
             log.info('Background', `[跨話連續追漫] 下一話預翻已取消`);
-        } else if (jobData.results.length === jobData.images.length && jobData.results.every(Boolean)) {
-            jobData.isDone = true;
-            jobData.status = 'completed';
+        } else if (completion.status === 'completed') {
             log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命！`);
         } else {
-            jobData.error = '預翻結果不完整';
-            jobData.status = 'error';
+            jobData.error = completion.error;
             log.warn('Background', `[跨話連續追漫] 預翻結果不完整 (${jobData.results.length}/${jobData.images.length})`);
         }
     } catch (err) {
@@ -1602,20 +1588,6 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
  * - one-step: 一條龍模式 (每批圖片直接送 Vision 直譯，極速、零等待)
  * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
  */
-function withMangaStartLock(task) {
-    const previous = mangaStartQueue;
-    let release;
-    mangaStartQueue = new Promise(resolve => { release = resolve; });
-
-    return previous.then(async () => {
-        try {
-            return await task();
-        } finally {
-            release();
-        }
-    });
-}
-
 async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
     let createdRun;
     await withMangaStartLock(async () => {
@@ -2203,7 +2175,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
         }
 
-        if (!wasStopped && await state.get('isStopping')) wasStopped = true;
+        const isStopping = wasStopped || await state.get('isStopping');
+        if (isStopping) wasStopped = true;
         if (!wasAborted && resultTabId && typeof resultTabId === 'number') {
             try {
                 await chrome.tabs.get(resultTabId);
@@ -2212,7 +2185,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
         }
 
-        if (wasStopped || wasAborted) {
+        if (!shouldCompleteMangaTranslation({ wasStopped, wasAborted, isStopping })) {
             const statusMessage = wasStopped ? '翻譯已停止' : '翻譯已中止（結果分頁已關閉）';
             broadcastStatus(`⏹️ ${statusMessage}`, 'warn');
             chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
