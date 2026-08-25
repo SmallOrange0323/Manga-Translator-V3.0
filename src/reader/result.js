@@ -1304,8 +1304,11 @@ function buildCard(item, index) {
         const modelBadge = document.createElement('span');
         modelBadge.className = 'card-model-badge';
         let displayName = item.usedModelName;
-        if (item.usedModelName.toLowerCase().includes('gemini')) displayName = 'Gemini';
-        if (item.usedModelName.toLowerCase().includes('gemma')) displayName = 'Gemma';
+        if (item.usedModelName.includes('3.1-flash-lite')) displayName = '⚡ 3.1-Lite';
+        else if (item.usedModelName.includes('3.5-flash-lite')) displayName = '⚡ 3.5-Lite';
+        else if (item.usedModelName.includes('2.5-flash')) displayName = '⚡ 2.5-Flash';
+        else if (item.usedModelName.toLowerCase().includes('gemini')) displayName = 'Gemini';
+        else if (item.usedModelName.toLowerCase().includes('gemma')) displayName = 'Gemma';
         modelBadge.textContent = displayName;
         imageWrapper.appendChild(modelBadge);
     }

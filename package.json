@@ -1,7 +1,7 @@
 {
   "name": "manga-translator-v3",
-  "version": "3.1.6",
-  "description": "Manga Translator V3.1.6 - Core Stability & Lifecycle Hardening",
+  "version": "3.1.7",
+  "description": "Manga Translator V3.1.7 - Dual-Gemini Hybrid Round-Robin Speed Pipeline",
   "type": "module",
   "scripts": {
     "dev": "vite",

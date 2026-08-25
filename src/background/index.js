@@ -1488,12 +1488,18 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
         const requestDelay = await state.get('requestDelay', 4000);
 
+        const isHybrid = await state.get('hybridModeEnabled', true);
+        const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
+        const effectiveDelay = isHybrid ? Math.max(1500, Math.floor(requestDelay / 2)) : requestDelay;
+
         for (let i = 0; i < crawlData.images.length; i += batchSize) {
             if (jobData.isCancelled) {
                 log.info('Background', `[跨話連續追漫] 任務已被取消，停止預翻`);
                 break;
             }
             const currentBatch = crawlData.images.slice(i, i + batchSize);
+            const batchIdx = Math.floor(i / batchSize);
+            const batchModel = (isHybrid && batchIdx % 2 === 1) ? secondaryModelName : modelName;
             const base64List = await fetchAndResizeBatch(currentBatch, maxDim, sourceTabId);
             const validItems = base64List
                 .map((b64, idx) => ({ b64, originalIdx: idx }))
@@ -1502,15 +1508,15 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             if (validItems.length > 0) {
                 try {
                     const subResults = await callGeminiAPIBatch(
-                        validItems.map(v => v.b64), finalPrompt, glossarySnippet
+                        validItems.map(v => v.b64), finalPrompt, glossarySnippet, null, batchModel
                     );
-                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, subResults, modelName);
+                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, subResults, batchModel);
                 } catch (apiErr) {
-                    log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤: ${apiErr.message}`);
-                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, modelName, apiErr);
+                    log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${batchModel}): ${apiErr.message}`);
+                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel, apiErr);
                 }
             } else {
-                batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, modelName);
+                batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel);
             }
 
             jobData.results.push(...batchResults);
@@ -1527,7 +1533,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             }
 
             if (i + batchSize < crawlData.images.length && !jobData.isCancelled) {
-                await new Promise(r => setTimeout(r, requestDelay));
+                await new Promise(r => setTimeout(r, effectiveDelay));
             }
         }
 
@@ -2039,12 +2045,15 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         const batchSize = isGemmaMode ? 1 : (parseInt(ocrBatchSizeSetting) || 1);
         const requestDelay = await state.get('requestDelay', 4000);
         const maxDim = await state.get('imageMaxDimension', 1024);
+        const isHybrid = await state.get('hybridModeEnabled', true);
+        const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
+        const effectiveDelay = isHybrid ? Math.max(1500, Math.floor(requestDelay / 2)) : requestDelay;
         
         if (!state.isInitialized) await state.init();
 
         await state.set('isBatchPaused', false);
 
-        log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (雙緩衝預載加速中)`);
+        log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (Hybrid加速: ${isHybrid ? `已啟用 [主: ${modelName} / 次: ${secondaryModelName}], 延遲: ${effectiveDelay}ms` : `關閉, 延遲: ${requestDelay}ms`})`);
 
         let completedCount = 0;
         let allBatchResults = [];
@@ -2077,6 +2086,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             const currentBatch = images.slice(i, i + batchSize);
             const totalBatches = Math.ceil(images.length / batchSize);
             const currentBatchIndex = Math.floor(i / batchSize) + 1;
+            const batchIdx = Math.floor(i / batchSize);
+            let batchModel = (isHybrid && batchIdx % 2 === 1) ? secondaryModelName : modelName;
 
             if (await state.get('isStopping')) {
                 log.warn('Background', '漫畫翻譯任務已被強制停止');
@@ -2096,8 +2107,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
 
             const progressText = batchSize > 1
-                ? `第 ${currentBatchIndex} / ${totalBatches} 批 (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
-                : `${i + 1} / ${images.length}`;
+                ? `第 ${currentBatchIndex} / ${totalBatches} 批 [${batchModel.replace('gemini-', '')}] (圖片 ${i + 1}~${Math.min(i + batchSize, images.length)})`
+                : `${i + 1} / ${images.length} [${batchModel.replace('gemini-', '')}]`;
             
             chrome.tabs.sendMessage(resultTabId, { action: 'updateProgress', current: progressText, total: images.length }).catch(() => {});
             broadcastStatus(`⏳ 正在處理 ${progressText}...`, 'info');
@@ -2136,8 +2147,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 let batchSuccess = false;
 
                 if (batchSize > 1) {
-                    if (i > 0 && requestDelay > 0) {
-                        await new Promise(r => setTimeout(r, requestDelay));
+                    if (i > 0 && effectiveDelay > 0) {
+                        await new Promise(r => setTimeout(r, effectiveDelay));
                     }
 
                     if (subBatches.length > 1) {
@@ -2162,7 +2173,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                     subBatch.map(v => v.b64),
                                     finalPrompt,
                                     glossarySnippet,
-                                    targetKey
+                                    targetKey,
+                                    batchModel
                                 );
                                 subBatch.forEach((item, k) => {
                                     allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
@@ -2171,12 +2183,18 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
                             batchSuccess = true;
                             if (ki > 0) {
-                                log.info('Background', `[批次] Key ${ki + 1} (${keyAlias}) 批次翻譯成功！`);
+                                log.info('Background', `[批次] Key ${ki + 1} (${keyAlias}) 模型 ${batchModel} 批次翻譯成功！`);
                                 broadcastStatus(`✅ Key ${ki + 1} 批次重試成功`, 'ok');
                             }
                             break; // 本批次成功，跳出 Key 輪流重試
                         } catch (batchKeyErr) {
-                            log.warn('Background', `[批次] Key ${ki + 1} (${keyAlias}) 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key...`);
+                            log.warn('Background', `[批次] Key ${ki + 1} (${keyAlias}) 模型 ${batchModel} 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key/模型...`);
+                            // 智慧跨模型容錯：若觸發 429 或 503，切換至另一個模型接力救援
+                            if (isHybrid && (batchKeyErr.message.includes('429') || batchKeyErr.message.includes('503'))) {
+                                const prevModel = batchModel;
+                                batchModel = (batchModel === modelName) ? secondaryModelName : modelName;
+                                log.info('Background', `[Hybrid 跨模型容錯] 檢測到 ${prevModel} 配額限制，自動切換至模型 ${batchModel} 進行救援！`);
+                            }
                         }
                     }
                 } else {
@@ -2272,14 +2290,14 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         }
                     }).catch(() => {});
                 } else {
-                    await incrementDailyUsage(modelName);
+                    await incrementDailyUsage(batchModel);
                     allBatchResults.push(...(res.results || []));
                     chrome.tabs.sendMessage(resultTabId, {
                         action: 'appendResult',
                         data: { 
                             image: imgSrc, 
                             results: res.results, 
-                            usedModelName: res.usedModelName || modelName,
+                            usedModelName: res.usedModelName || batchModel,
                             batchIndex: currentBatchIdx,
                             pageIndex: completedCount
                         }
@@ -2287,8 +2305,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 }
             }
 
-            // 批次間延遲
-            const finalDelay = batchSize > 1 ? requestDelay * 1.5 : requestDelay;
+            // 批次間延遲 (Hybrid 模式下可安全減半加速)
+            const finalDelay = isHybrid ? Math.max(1000, Math.floor(requestDelay / 2)) : (batchSize > 1 ? requestDelay * 1.5 : requestDelay);
             if (i + batchSize < images.length) {
                 await new Promise(r => setTimeout(r, finalDelay));
             }

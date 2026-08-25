@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 import { createMangaStartLock } from '../src/background/manga-start-lock.js';
 
 describe('manga start lock', () => {
@@ -14,15 +15,18 @@ describe('manga start lock', () => {
         const b = withLock(async () => { events.push('B enter'); });
 
         await Promise.resolve();
-        expect(events).toEqual(['A enter']);
+        assert.deepEqual(events, ['A enter']);
         releaseA();
         await Promise.all([a, b]);
-        expect(events).toEqual(['A enter', 'A release', 'B enter']);
+        assert.deepEqual(events, ['A enter', 'A release', 'B enter']);
     });
 
     it('releases the queue after a startup failure', async () => {
         const withLock = createMangaStartLock();
-        await expect(withLock(async () => { throw new Error('startup failed'); })).rejects.toThrow('startup failed');
-        await expect(withLock(async () => 'next startup')).resolves.toBe('next startup');
+        await assert.rejects(async () => {
+            await withLock(async () => { throw new Error('startup failed'); });
+        }, /startup failed/);
+        const res = await withLock(async () => 'next startup');
+        assert.equal(res, 'next startup');
     });
 });

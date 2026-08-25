@@ -1,18 +1,26 @@
-# 漫譯 V3.1.6 (Manga Translator V3.1.6) 🎌
+# 漫譯 V3.1.7 (Manga Translator V3.1.7) 🎌
 
-![Version](https://img.shields.io/badge/version-3.1.6-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.1.7-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.1.6** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
-支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**核心狀態隊列鎖防護、跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
+**漫譯 V3.1.7** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
+支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**雙模型 Hybrid 輪替加速 (速度翻倍/額度 3,000 頁)、核心狀態隊列鎖防護、跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
 
 ---
 
 ## 🌟 核心功能特色 (Key Features)
 
-### ⚡ 1. 跨話無縫連續追漫 (Seamless Next-Chapter Pipeline)
+### ⚡ 1. 雙 Gemini 模型 Hybrid 輪替加速 (Dual-Gemini Hybrid Speed Pipeline)
+* **雙模型交替發送 (Round-Robin)**：每批次在 Primary (`3.1-Flash-Lite`) 與 Secondary (`3.5-Flash-Lite` / `2.5-Flash`) 間自動交替發送。
+* **追漫延遲減半 (4s ➔ 2s)**：各模型獨立冷卻，請求間隔安全縮短至 2 秒，整話 30 頁漫畫秒級翻完。
+* **每日免費額度翻倍至 3,000 頁**：利用 Google AI Studio 免費額度按模型獨立計算機制，大水管暢讀無阻。
+* **智慧 429 跨模型容錯 (Failover)**：若單一模型繁忙或撞限，自動 0 毫秒切換另一個模型接力救援。
+
+---
+
+### ⚡ 2. 跨話無縫連續追漫 (Seamless Next-Chapter Pipeline)
 * **背景自動預翻**：當讀者在閱讀當前話時，系統已在背景靜默將下一話翻譯就緒。
 * **0 毫秒 SPA 原地秒開**：點擊「下一話 ➔」時，畫面不重整、不閃爍，瞬間平滑展開已翻好內容，並鏈式啟動下下一話預翻，享受無縫暢讀到底的極致追漫感！
 * **精準生命週期管理**：預翻快取與當前閱讀分頁共存亡，分頁關閉瞬間自動釋放所有快取，零記憶體殘留。

@@ -415,9 +415,9 @@ ${inputText}`;
  * @param {string} glossarySnippet - 術語注入片段
  * @returns {Array} 長度固定等於 base64Array.length 的結果陣列
  */
-export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null) {
+export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null) {
     const n = base64Array.length;
-    const model = await state.get('modelName', 'gemini-3.1-flash-lite');
+    const model = modelOverride || await state.get('modelName', 'gemini-3.1-flash-lite');
 
     // 若未指定 Key，從 Key 池自動選取
     const resolvedKey = apiKey || state.getNextApiKey();

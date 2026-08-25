@@ -83,7 +83,9 @@ async function initGeneralSettings() {
         ['ocrModelName', 'gemma-4-26b-a4b-it'],
         ['enableTaiwanLocalization', true],
         ['autoPretranslateNextChapter', true],
-        ['incognitoPrivacyMode', true]
+        ['incognitoPrivacyMode', true],
+        ['hybridModeEnabled', true],
+        ['secondaryModelName', 'gemini-3.5-flash-lite']
     ];
 
     for (const [id, def] of fields) {
@@ -124,6 +126,17 @@ async function initGeneralSettings() {
         };
         updateOcrVisibility();
         translationModeSelect.addEventListener('change', updateOcrVisibility);
+    }
+
+    // 雙模型 Hybrid 輪替加速：開關動態顯示次要模型選擇區
+    const hybridToggle = document.getElementById('hybridModeEnabled');
+    const hybridWrapper = document.getElementById('hybridSecondaryModelWrapper');
+    if (hybridToggle && hybridWrapper) {
+        const updateHybridUI = () => {
+            hybridWrapper.style.display = hybridToggle.checked ? 'block' : 'none';
+        };
+        updateHybridUI();
+        hybridToggle.addEventListener('change', updateHybridUI);
     }
 
     // 初始化本機 WebGPU 狀態與清理快取按鈕
@@ -292,6 +305,12 @@ function setupEventHandlers() {
 
             const autoPretrans = document.getElementById('autoPretranslateNextChapter');
             if(autoPretrans) await state.set('autoPretranslateNextChapter', autoPretrans.checked);
+
+            const hybridModeEl = document.getElementById('hybridModeEnabled');
+            if(hybridModeEl) await state.set('hybridModeEnabled', hybridModeEl.checked);
+
+            const secModelEl = document.getElementById('secondaryModelName');
+            if(secModelEl) await state.set('secondaryModelName', secModelEl.value);
 
             const googleEmailEl = document.getElementById('googleAccountEmail');
             if (googleEmailEl) {
