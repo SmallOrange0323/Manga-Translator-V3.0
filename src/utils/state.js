@@ -92,12 +92,15 @@ class StateManager {
   }
 
   /**
-   * 寫入狀態 (即時)
+   * 寫入狀態
    * @param {string} key 
    * @param {any} value 
    */
   async set(key, value) {
     this.cache[key] = value;
+    if (key === 'apiKey') {
+      this.refreshApiKeyPool();
+    }
     await chrome.storage.local.set({ [key]: value });
     log.state(key, 'Set', value);
   }
@@ -110,6 +113,9 @@ class StateManager {
    */
   async setThrottled(key, value, delay = 200) {
     this.cache[key] = value;
+    if (key === 'apiKey') {
+      this.refreshApiKeyPool();
+    }
     
     if (this.throttleTimers[key]) return; // 已有排定的寫入，略過此波
 
@@ -126,6 +132,18 @@ class StateManager {
     const rawKeys = this.cache['apiKey'] || '';
     this.apiKeys = rawKeys.split('\n').map(k => k.trim()).filter(k => k);
     log.info('StateManager', `API Key Pool refreshed: ${this.apiKeys.length} keys`);
+  }
+
+  /**
+   * 獲取當前所有的 API Key 清單 (確保快取已初始化)
+   * @returns {Promise<string[]>}
+   */
+  async getApiKeys() {
+    if (!this.isInitialized) await this.init();
+    if (!this.apiKeys || this.apiKeys.length === 0) {
+      this.refreshApiKeyPool();
+    }
+    return this.apiKeys;
   }
 
   /**

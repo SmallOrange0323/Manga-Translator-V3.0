@@ -1489,7 +1489,8 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
         const requestDelay = await state.get('requestDelay', 4000);
 
-        const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
+        const apiKeys = await state.getApiKeys();
+        const candidateKeys = (apiKeys && apiKeys.length > 0) ? [...apiKeys] : [null];
         const isHybrid = await state.get('hybridModeEnabled', true);
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
@@ -2049,7 +2050,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         const batchSize = isGemmaMode ? 1 : (parseInt(ocrBatchSizeSetting) || 1);
         const requestDelay = await state.get('requestDelay', 4000);
         const maxDim = await state.get('imageMaxDimension', 1024);
-        const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
+        const apiKeys = await state.getApiKeys();
+        const candidateKeys = (apiKeys && apiKeys.length > 0) ? [...apiKeys] : [null];
         const isHybrid = await state.get('hybridModeEnabled', true);
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
