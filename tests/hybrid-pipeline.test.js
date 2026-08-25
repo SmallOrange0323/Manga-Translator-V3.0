@@ -1,6 +1,7 @@
-import { describe, it } from 'node:test';
-import assert from 'node:assert/strict';
+import { describe, expect, it } from 'vitest';
+const assert = { deepEqual: (actual, expected) => expect(actual).toEqual(expected), equal: (actual, expected) => expect(actual).toBe(expected) };
 import { getHybridSchedule, getBatchModel, getEffectiveDelay, getFailoverModel } from '../src/background/hybrid-scheduler.js';
+import { executeHybridRequest, HybridRequestAbortedError } from '../src/background/hybrid-retry.js';
 
 describe('2D Alternating Round-Robin Scheduler (Key × Model)', () => {
     const ModelA = 'gemini-3.1-flash-lite';
@@ -65,5 +66,92 @@ describe('2D Alternating Round-Robin Scheduler (Key × Model)', () => {
             assert.equal(getFailoverModel(ModelA, ModelA, ModelB), ModelB);
             assert.equal(getFailoverModel(ModelB, ModelA, ModelB), ModelA);
         });
+    });
+});
+
+describe('Hybrid request failover', () => {
+    const options = { scheduledKey: 'Key1', scheduledModel: 'A', primaryModel: 'A', secondaryModel: 'B', isHybrid: true };
+
+    it('retries the same single key with the failover model after 429', async () => {
+        const calls = [];
+        const result = await executeHybridRequest({ ...options, candidateKeys: ['Key1'], request: async ({ apiKey, modelName }) => {
+            calls.push([apiKey, modelName]);
+            if (modelName === 'A') throw { statusCode: 429, message: 'rate limited' };
+            return 'ok';
+        }});
+        assert.deepEqual(calls, [['Key1', 'A'], ['Key1', 'B']]);
+        assert.equal(result.usedModelName, 'B');
+    });
+
+    it('tries failover on the final key after 503', async () => {
+        const calls = [];
+        const result = await executeHybridRequest({ ...options, candidateKeys: ['Key1', 'Key2'], scheduledKey: 'Key2', request: async ({ apiKey, modelName }) => {
+            calls.push([apiKey, modelName]);
+            if (apiKey === 'Key2' && modelName === 'A') throw { statusCode: 503, message: 'unavailable' };
+            return 'ok';
+        }});
+        assert.deepEqual(calls, [['Key2', 'A'], ['Key2', 'B']]);
+        assert.equal(result.usedModelName, 'B');
+    });
+
+    it('does not switch models for a non-failover error', async () => {
+        const calls = [];
+        await expect(executeHybridRequest({ ...options, candidateKeys: ['Key1'], request: async ({ modelName }) => {
+            calls.push(modelName); throw { statusCode: 400, message: 'bad request' };
+        }})).rejects.toMatchObject({ statusCode: 400 });
+        assert.deepEqual(calls, ['A']);
+    });
+
+    it('does not issue a failover request after cancellation', async () => {
+        const calls = [];
+        let isRunning = true;
+        await expect(executeHybridRequest({ ...options, candidateKeys: ['Key1'], shouldContinue: () => isRunning, request: async ({ modelName }) => {
+            calls.push(modelName);
+            isRunning = false;
+            throw { statusCode: 429, message: 'rate limited' };
+        }})).rejects.toMatchObject({ code: 'TRANSLATION_STOPPED' });
+        assert.deepEqual(calls, ['A']);
+    });
+
+    it('passes the scheduled key and model to a single-image request', async () => {
+        const result = await executeHybridRequest({
+            ...options,
+            candidateKeys: ['Key1', 'Key2'],
+            scheduledKey: 'Key2',
+            scheduledModel: 'B',
+            request: async ({ apiKey, modelName }) => ({ apiKey, modelName })
+        });
+        assert.deepEqual(result.results, { apiKey: 'Key2', modelName: 'B' });
+        assert.equal(result.usedModelName, 'B');
+    });
+
+    it('stops subsequent sub-batches inside request callback when cancelled', async () => {
+        const calls = [];
+        let isRunning = true;
+        const subBatches = [['img1'], ['img2']];
+        const allPageResults = [];
+
+        await expect(executeHybridRequest({
+            ...options,
+            candidateKeys: ['Key1'],
+            shouldContinue: () => isRunning,
+            request: async ({ shouldContinue }) => {
+                for (const subBatch of subBatches) {
+                    if (!await shouldContinue()) {
+                        throw new HybridRequestAbortedError();
+                    }
+                    calls.push(subBatch[0]);
+                    isRunning = false;
+                    if (!await shouldContinue()) {
+                        throw new HybridRequestAbortedError();
+                    }
+                    allPageResults.push(...subBatch);
+                }
+                return true;
+            }
+        })).rejects.toMatchObject({ code: 'TRANSLATION_STOPPED' });
+
+        assert.deepEqual(calls, ['img1']);
+        assert.deepEqual(allPageResults, []);
     });
 });

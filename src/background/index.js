@@ -9,7 +9,8 @@ import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
 import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation } from './manga-lifecycle.js';
-import { getHybridSchedule, getEffectiveDelay, getFailoverModel } from './hybrid-scheduler.js';
+import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
+import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -1490,7 +1491,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         const requestDelay = await state.get('requestDelay', 4000);
 
         const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
-        const isHybrid = await state.get('hybridModeEnabled', true);
+        const isHybrid = (await state.get('hybridModeEnabled', true)) && !modelName.toLowerCase().includes('gemma');
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
 
@@ -1511,10 +1512,16 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             let batchResults;
             if (validItems.length > 0) {
                 try {
-                    const subResults = await callGeminiAPIBatch(
-                        validItems.map(v => v.b64), finalPrompt, glossarySnippet, scheduledKey, batchModel
-                    );
-                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, subResults, batchModel);
+                    const execution = await executeHybridRequest({
+                        candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
+                        secondaryModel: secondaryModelName, isHybrid,
+                        shouldContinue: () => !jobData.isCancelled,
+                        request: ({ apiKey, modelName: requestModel }) => callGeminiAPIBatch(
+                            validItems.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel
+                        )
+                    });
+                    batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, execution.results, execution.usedModelName);
+                    jobData.usedModelName = execution.usedModelName;
                 } catch (apiErr) {
                     log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${state.getApiKeyAlias(scheduledKey)} | ${batchModel}): ${apiErr.message}`);
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel, apiErr);
@@ -1541,7 +1548,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             }
         }
 
-        jobData.usedModelName = modelName;
+        jobData.usedModelName ||= modelName;
         const completion = getPretranslationCompletion({
             isCancelled: jobData.isCancelled,
             resultCount: jobData.results.length,
@@ -2050,7 +2057,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         const requestDelay = await state.get('requestDelay', 4000);
         const maxDim = await state.get('imageMaxDimension', 1024);
         const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
-        const isHybrid = await state.get('hybridModeEnabled', true);
+        const isHybrid = (await state.get('hybridModeEnabled', true)) && !isGemmaMode;
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
         
@@ -2097,12 +2104,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             const schedule = getHybridSchedule(batchIdx, candidateKeys.length, isHybrid, modelName, secondaryModelName);
             let batchModel = schedule.modelName;
             const scheduledKey = candidateKeys[schedule.keyIndex];
-
-            // 優先使用二維排程指派的 Key，其餘作為備援順序
-            const orderedKeys = [
-                scheduledKey,
-                ...candidateKeys.filter((_, idx) => idx !== schedule.keyIndex)
-            ];
 
             if (await state.get('isStopping')) {
                 log.warn('Background', '漫畫翻譯任務已被強制停止');
@@ -2161,6 +2162,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     : null;
 
                 let batchSuccess = false;
+                let batchWasStopped = false;
 
                 if (batchSize > 1) {
                     if (i > 0 && effectiveDelay > 0) {
@@ -2171,54 +2173,44 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         log.warn('Background', `[批次] 請求體過大，拆分為 ${subBatches.length} 個子批次。`);
                     }
 
-                    // ── 多 Key 批次二維交錯輪替與重試 ──
-                    for (let ki = 0; ki < orderedKeys.length; ki++) {
-                        const targetKey = orderedKeys[ki];
-                        const keyAlias = state.getApiKeyAlias(targetKey);
-
-                        try {
-                            if (ki > 0) {
-                                log.info('Background', `[批次] 正在嘗試切換至 Key ${ki + 1} (${keyAlias}) 進行批次重試...`);
-                                broadcastStatus(`⏳ 切換至 Key ${ki + 1} 批次重試...`, 'info');
+                    try {
+                        const execution = await executeHybridRequest({
+                            candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
+                            secondaryModel: secondaryModelName, isHybrid,
+                            shouldContinue: async () => !(await state.get('isStopping')),
+                            request: async ({ apiKey, modelName: requestModel, shouldContinue: shouldContinueRequest }) => {
+                                const checkContinue = shouldContinueRequest || (async () => !(await state.get('isStopping')));
+                                for (const subBatch of subBatches) {
+                                    if (!await checkContinue()) {
+                                        throw new HybridRequestAbortedError();
+                                    }
+                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel);
+                                    if (!await checkContinue()) {
+                                        throw new HybridRequestAbortedError();
+                                    }
+                                    subBatch.forEach((item, k) => { allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' }; });
+                                }
+                                return true;
                             }
-
-                            for (const subBatch of subBatches) {
-                                const subResults = await callGeminiAPIBatch(
-                                    subBatch.map(v => v.b64),
-                                    finalPrompt,
-                                    glossarySnippet,
-                                    targetKey,
-                                    batchModel
-                                );
-                                subBatch.forEach((item, k) => {
-                                    allPageResults[item.originalIdx] = subResults[k] || { error: '批次結果不足' };
-                                });
-                            }
-
-                            batchSuccess = true;
-                            if (ki > 0) {
-                                log.info('Background', `[批次] Key ${ki + 1} (${keyAlias}) 模型 ${batchModel} 批次翻譯成功！`);
-                                broadcastStatus(`✅ Key ${ki + 1} 批次重試成功`, 'ok');
-                            }
-                            break; // 本批次成功，跳出 Key 輪流重試
-                        } catch (batchKeyErr) {
-                            log.warn('Background', `[批次] Key (${keyAlias}) 模型 ${batchModel} 批次失敗 (${batchKeyErr.message})，準備嘗試下一個 Key/模型...`);
-                            // 智慧跨模型容錯：若觸發 429 或 503，切換至另一個模型接力救援
-                            if (isHybrid && (batchKeyErr.message.includes('429') || batchKeyErr.message.includes('503'))) {
-                                const prevModel = batchModel;
-                                batchModel = getFailoverModel(batchModel, modelName, secondaryModelName);
-                                log.info('Background', `[Hybrid 跨模型容錯] 檢測到 ${prevModel} 配額限制，自動切換至模型 ${batchModel} 進行救援！`);
-                            }
-                        }
+                        });
+                        batchModel = execution.usedModelName;
+                        batchSuccess = true;
+                    } catch (batchKeyErr) {
+                        batchWasStopped = batchKeyErr.code === 'TRANSLATION_STOPPED';
+                        log.warn('Background', `[批次] 所有 Key/模型批次嘗試失敗: ${batchKeyErr.message}`);
                     }
                 } else {
                     // 逐張路徑 (batchSize=1)
                     const item = validItems[0];
                     if (item) {
                         try {
-                            const result = await translateTexts([], {
-                                model: modelName,
-                                fallbackModel: fallbackModelName,
+                            const execution = await executeHybridRequest({
+                                candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
+                                secondaryModel: secondaryModelName, isHybrid,
+                                shouldContinue: async () => !(await state.get('isStopping')),
+                                request: ({ apiKey, modelName: requestModel }) => translateTexts([], {
+                                model: requestModel,
+                                apiKey,
                                 prompt: finalPrompt,
                                 glossarySnippet,
                                 imageBase64: item.b64,
@@ -2227,13 +2219,20 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                     properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
                                     required: ['results']
                                 }
-                            });
-                            allPageResults[item.originalIdx] = result;
+                            }) });
+                            allPageResults[item.originalIdx] = execution.results;
+                            batchModel = execution.usedModelName;
                             batchSuccess = true;
                         } catch (singleErr) {
+                            batchWasStopped = singleErr.code === 'TRANSLATION_STOPPED';
                             log.warn('Background', `[逐張] 翻譯失敗: ${singleErr.message}`);
                         }
                     }
+                }
+
+                if (batchWasStopped) {
+                    wasStopped = true;
+                    break;
                 }
 
                 // ── 若所有 Key 的批次請求均宣告失敗，才啟動最後防線：逐張降級重試 ──
@@ -2243,7 +2242,15 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
                     const fallbackResults = Array(validItems.length).fill(null);
                     await Promise.all(validItems.map(async (item, k) => {
+                        if (await state.get('isStopping')) {
+                            fallbackResults[k] = { error: '翻譯已停止' };
+                            return;
+                        }
                         const apiKey = await state.getNextApiKey();
+                        if (await state.get('isStopping')) {
+                            fallbackResults[k] = { error: '翻譯已停止' };
+                            return;
+                        }
                         try {
                             const result = await translateTexts([], {
                                 model: fallbackModelName,
@@ -2257,7 +2264,10 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                     required: ['results']
                                 }
                             });
-                            fallbackResults[k] = result;
+                            fallbackResults[k] = {
+                                ...result,
+                                usedModelName: result.usedModelName || fallbackModelName
+                            };
                             broadcastStatus(`第 ${item.originalIdx + 1} 張備援翻譯成功`, 'ok');
                         } catch (singleErr) {
                             log.warn('Background', `[備援] 第 ${item.originalIdx + 1} 張翻譯失敗 (Key: ${state.getApiKeyAlias(apiKey)}): ${singleErr.message}`);
@@ -2304,14 +2314,15 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         }
                     }).catch(() => {});
                 } else {
-                    await incrementDailyUsage(batchModel);
+                    const actualModel = res.usedModelName || batchModel;
+                    await incrementDailyUsage(actualModel);
                     allBatchResults.push(...(res.results || []));
                     chrome.tabs.sendMessage(resultTabId, {
                         action: 'appendResult',
                         data: { 
                             image: imgSrc, 
                             results: res.results, 
-                            usedModelName: res.usedModelName || batchModel,
+                            usedModelName: actualModel,
                             batchIndex: currentBatchIdx,
                             pageIndex: completedCount
                         }
