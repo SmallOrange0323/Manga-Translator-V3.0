@@ -267,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const overlay = document.getElementById('loading-overlay');
                     if (overlay) overlay.classList.add('hidden');
                     // 清除可能殘留的暫停狀態
-                    chrome.runtime.sendMessage({ action: 'toggleBatchPause' }).catch(() => {});
+                    chrome.runtime.sendMessage({ action: 'SET_BATCH_PAUSE', paused: false }).catch(() => {});
                 });
             }
         });
