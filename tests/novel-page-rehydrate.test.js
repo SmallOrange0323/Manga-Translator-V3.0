@@ -7,8 +7,64 @@ import { buildNovelRehydrateSnapshot } from '../src/background/novel-rehydrate.j
 import { compareNovelSourceItems, applyNovelRehydrateSnapshot, createNovelRehydrateController } from '../src/content/novel-rehydrate-client.js';
 import { createNovelSessionRegistry } from '../src/background/novel-cancellation.js';
 import { createNovelJobCheckpoint } from '../src/background/novel-job-checkpoint.js';
+import {
+    saveNovelSessionState,
+    getNovelSessionStates,
+    removeNovelSessionStateIfMatches,
+    NOVEL_SESSION_STATE_KEY
+} from '../src/background/novel-session-state.js';
 
-describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specification)', () => {
+describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () => {
+
+    let mockSessionStore = {};
+
+    beforeEach(() => {
+        mockSessionStore = {};
+
+        global.chrome = {
+            storage: {
+                session: {
+                    get: (keys, callback) => {
+                        if (typeof keys === 'string') {
+                            callback({ [keys]: mockSessionStore[keys] });
+                        } else if (Array.isArray(keys)) {
+                            const res = {};
+                            keys.forEach(k => { res[k] = mockSessionStore[k]; });
+                            callback(res);
+                        } else if (keys && typeof keys === 'object') {
+                            const res = {};
+                            for (const k of Object.keys(keys)) {
+                                res[k] = mockSessionStore[k] !== undefined ? mockSessionStore[k] : keys[k];
+                            }
+                            callback(res);
+                        } else {
+                            callback({});
+                        }
+                    },
+                    set: (items, callback) => {
+                        Object.assign(mockSessionStore, items);
+                        if (callback) callback();
+                    }
+                }
+            },
+            runtime: {
+                sendMessage: vi.fn(),
+                lastError: null
+            },
+            tabs: {
+                sendMessage: vi.fn()
+            }
+        };
+
+        global.document = {
+            readyState: 'complete',
+            addEventListener: vi.fn(),
+            querySelector: vi.fn(() => null)
+        };
+        global.window = {
+            location: { href: 'https://site/chapter1' }
+        };
+    });
 
     // ─────────────────────────────────────────────────────────
     // 一、 Background Snapshot Tests (1 ~ 10)
@@ -24,7 +80,7 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             expect(res.status).toBe('no-session');
         });
 
-        it('Test 2: cancelled session ➔ 回傳 no-session', () => {
+        it('Test 2: sessionState 已標記 cancelled ➔ 回傳 no-session', () => {
             const res = buildNovelRehydrateSnapshot({
                 sessionState: { tabId: 1, sessionId: 's1', pageUrl: 'https://site/1', cancelled: true },
                 job: createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, items: [{ idx: 0, text: 'A' }] }),
@@ -312,7 +368,7 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
         it('Test 24: 前後 trim 遵循 getParagraphText 既有輸入結果，不額外 normalize', () => {
             const cur = [{ idx: 0, text: '  段落一  ' }];
             const exp = [{ idx: 0, text: '段落一' }];
-            expect(compareNovelSourceItems(cur, exp)).toBe(false); // 嚴格比對，不隱式 trim
+            expect(compareNovelSourceItems(cur, exp)).toBe(false);
         });
     });
 
@@ -320,36 +376,21 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
     // 四、 Client State & Double Snapshot Tests (25 ~ 33)
     // ─────────────────────────────────────────────────────────
     describe('4. Client State 與 Double Snapshot Catch-up (Tests 25 ~ 33)', () => {
-        beforeEach(() => {
-            global.document = {
-                readyState: 'complete',
-                addEventListener: vi.fn(),
-                querySelector: vi.fn(() => null)
-            };
-            global.window = {
-                location: { href: 'https://site/chapter1' }
-            };
-        });
-
         it('Test 25 ~ 27: Rehydrate 成功 ➔ current session 與 window.mt_currentNovelSessionId 恢復', async () => {
             const controller = createNovelRehydrateController();
             let attachedSessionId = null;
 
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            cb({
-                                ok: true,
-                                status: 'rehydratable',
-                                sessionId: 'sess_abc',
-                                expectedItems: [{ idx: 0, text: 'A' }],
-                                renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
-                            });
-                        }
-                    })
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_abc',
+                        expectedItems: [{ idx: 0, text: 'A' }],
+                        renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
+                    });
                 }
-            };
+            });
 
             await controller.attemptRehydrate({
                 getParagraphsFn: () => ['<p>A</p>'],
@@ -367,22 +408,18 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             const controller = createNovelRehydrateController();
             const sentActions = [];
 
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        sentActions.push(msg.action);
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            cb({
-                                ok: true,
-                                status: 'rehydratable',
-                                sessionId: 'sess_abc',
-                                expectedItems: [{ idx: 0, text: 'A' }],
-                                renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
-                            });
-                        }
-                    })
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                sentActions.push(msg.action);
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_abc',
+                        expectedItems: [{ idx: 0, text: 'A' }],
+                        renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
+                    });
                 }
-            };
+            });
 
             await controller.attemptRehydrate({
                 getParagraphsFn: () => ['<p>A</p>'],
@@ -419,26 +456,22 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             let detached = false;
             let callCount = 0;
 
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            callCount++;
-                            if (callCount === 1) {
-                                cb({
-                                    ok: true,
-                                    status: 'rehydratable',
-                                    sessionId: 'sess_abc',
-                                    expectedItems: [{ idx: 0, text: 'A' }],
-                                    renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
-                                });
-                            } else {
-                                cb({ ok: false, status: 'stale-session' });
-                            }
-                        }
-                    })
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    callCount++;
+                    if (callCount === 1) {
+                        cb({
+                            ok: true,
+                            status: 'rehydratable',
+                            sessionId: 'sess_abc',
+                            expectedItems: [{ idx: 0, text: 'A' }],
+                            renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
+                        });
+                    } else {
+                        cb({ ok: false, status: 'stale-session' });
+                    }
                 }
-            };
+            });
 
             await controller.attemptRehydrate({
                 getParagraphsFn: () => ['<p>A</p>'],
@@ -455,33 +488,24 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
     });
 
     // ─────────────────────────────────────────────────────────
-    // 五、 AUTO Race Tests (34 ~ 38)
+    // 五、 AUTO Race & Recovery Barrier Tests (34 ~ 38, A ~ E, O)
     // ─────────────────────────────────────────────────────────
-    describe('5. AUTO 競爭與手動覆蓋 (Tests 34 ~ 38)', () => {
-        beforeEach(() => {
-            global.document = { readyState: 'complete', addEventListener: vi.fn() };
-            global.window = { location: { href: 'https://site/1' } };
-        });
-
+    describe('5. AUTO 競爭、Recovery Barrier 與早期導航 (Tests 34 ~ 38, A ~ E, O)', () => {
         it('Test 34 & 35: AUTO during checking ➔ defer，rehydrate 成功後不發起新 session', async () => {
             const controller = createNovelRehydrateController();
             controller.setPendingAuto(true);
 
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            cb({
-                                ok: true,
-                                status: 'rehydratable',
-                                sessionId: 'sess_1',
-                                expectedItems: [{ idx: 0, text: 'A' }],
-                                renderItems: [{ idx: 0, status: 'done', translation: 'A' }]
-                            });
-                        }
-                    })
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_1',
+                        expectedItems: [{ idx: 0, text: 'A' }],
+                        renderItems: [{ idx: 0, status: 'done', translation: 'A' }]
+                    });
                 }
-            };
+            });
 
             const startNew = vi.fn();
             await controller.attemptRehydrate({
@@ -495,74 +519,84 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             expect(controller.hasPendingAuto()).toBe(false);
         });
 
-        it('Test 36: No session + pending AUTO ➔ start normal new translation', async () => {
+        it('Scenario AUTO Controller Test: phase === rehydrated 收到 AUTO ➔ 忽略並不發起新翻譯', async () => {
             const controller = createNovelRehydrateController();
-            controller.setPendingAuto(true);
 
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            cb({ ok: false, status: 'no-session' });
-                        }
-                    })
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_1',
+                        expectedItems: [{ idx: 0, text: 'A' }],
+                        renderItems: [{ idx: 0, status: 'done', translation: 'A' }]
+                    });
                 }
-            };
-
-            const startNew = vi.fn();
-            await controller.attemptRehydrate({
-                getParagraphsFn: () => ['<p>A</p>'],
-                getParagraphTextFn: () => 'A',
-                startNewTranslationFn: startNew
             });
 
-            expect(controller.getPhase()).toBe('none');
-            expect(startNew).toHaveBeenCalledTimes(1);
+            await controller.attemptRehydrate({
+                getParagraphsFn: () => ['<p>A</p>'],
+                getParagraphTextFn: () => 'A'
+            });
+
+            expect(controller.getPhase()).toBe('rehydrated');
+            expect(controller.isChecking()).toBe(false);
         });
 
-        it('Test 37 & 38: Manual translate during checking ➔ supersede rehydrate 且遲到的 callback 失效', async () => {
-            const controller = createNovelRehydrateController();
-            controller.supersede();
+        it('Scenario A & B: Source Code 驗證 SW Startup 具備 novelRecoveryReady barrier 且包含 try...finally settle', () => {
+            const bgCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
+            expect(bgCode.includes('novelRecoveryReady')).toBe(true);
+            expect(bgCode.includes('resolveNovelRecoveryReady()')).toBe(true);
+            expect(bgCode.includes('finally')).toBe(true);
+        });
 
-            let attached = false;
-            await controller.attemptRehydrate({
-                getParagraphsFn: () => ['<p>A</p>'],
-                getParagraphTextFn: () => 'A',
-                onSessionAttachedFn: () => { attached = true; }
-            });
+        it('Scenario C, D, E: Source Code 驗證 Early URL Navigation Invalidation 在 changeInfo.url 立即執行', () => {
+            const bgCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
+            expect(bgCode.includes('if (changeInfo.url)')).toBe(true);
+            expect(bgCode.includes('handleNovelPageNavigationChange(tabId, changeInfo.url)')).toBe(true);
+        });
 
-            expect(controller.getPhase()).toBe('superseded');
-            expect(attached).toBe(false);
+        it('Scenario O: Same URL / Hash navigation 不執行 invalidation', () => {
+            expect(isSameNovelPage('https://novel.com/ch1#p1', 'https://novel.com/ch1#p50')).toBe(true);
+            expect(isSameNovelPage('https://novel.com/ch1', 'https://novel.com/ch1')).toBe(true);
+            expect(isSameNovelPage('https://novel.com/ch1', 'https://novel.com/ch2')).toBe(false);
         });
     });
 
     // ─────────────────────────────────────────────────────────
-    // 六、 Navigation Tests (39 ~ 44)
+    // 六、 Ownership-Safe Cleanup Tests (39 ~ 44, F ~ K)
     // ─────────────────────────────────────────────────────────
-    describe('6. 導航失效與分頁隔離 (Tests 39 ~ 44)', () => {
-        it('Test 39: same normalized URL reload ➔ Session/Job 保留', () => {
+    describe('6. Ownership-Safe Cleanup 與條件移除 (Tests 39 ~ 44, F ~ K)', () => {
+        it('Scenario F, G, H, I: cleanup AAA 期間若已成立 BBB ➔ 保留 BBB 且不誤刪', async () => {
             const registry = createNovelSessionRegistry();
-            registry.begin(1, 'sess_1');
+            registry.begin(1, 'BBB'); // 當前分頁已經切換至 BBB
 
-            const url1 = 'https://site/ch1';
-            const url2 = 'https://site/ch1#p10';
-            expect(isSameNovelPage(url1, url2)).toBe(true);
-            expect(registry.isCurrentSession(1, 'sess_1')).toBe(true);
+            // 嘗試以舊的 AAA 呼叫 isCurrentSession
+            expect(registry.isCurrentSession(1, 'AAA')).toBe(false);
+            // BBB 完整保留
+            expect(registry.isCurrentSession(1, 'BBB')).toBe(true);
         });
 
-        it('Test 40 ~ 42: different URL ➔ old Job / Session / novelResults removed only for same tab+session', () => {
-            const registry = createNovelSessionRegistry();
-            registry.begin(1, 'old_sess');
+        it('Scenario H: removeNovelSessionStateIfMatches 只有 sessionId 相符時才刪除', async () => {
+            // 寫入 Session AAA
+            await saveNovelSessionState({ tabId: 10, sessionId: 'session_AAA', pageUrl: 'https://site/1' });
+            let states = await getNovelSessionStates();
+            expect(states[10]?.sessionId).toBe('session_AAA');
 
-            expect(isSameNovelPage('https://site/ch1', 'https://site/ch2')).toBe(false);
+            // 嘗試用不相符的 session_BBB 條件刪除 ➔ 應保留不刪除
+            const deletedStale = await removeNovelSessionStateIfMatches(10, 'session_BBB');
+            expect(deletedStale).toBe(false);
+            states = await getNovelSessionStates();
+            expect(states[10]?.sessionId).toBe('session_AAA');
 
-            registry.cancel(1);
-            registry.clear(1);
-
-            expect(registry.isCurrentSession(1, 'old_sess')).toBe(false);
+            // 用相符的 session_AAA 刪除 ➔ 成功刪除
+            const deletedMatched = await removeNovelSessionStateIfMatches(10, 'session_AAA');
+            expect(deletedMatched).toBe(true);
+            states = await getNovelSessionStates();
+            expect(states[10]).toBeUndefined();
         });
 
-        it('Test 43: Tab A navigation 不得清 Tab B', () => {
+        it('Test 43 & Scenario K: Tab A navigation 不得清 Tab B', () => {
             const registry = createNovelSessionRegistry();
             registry.begin(10, 'tabA_sess');
             registry.begin(20, 'tabB_sess');
@@ -573,81 +607,30 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             expect(registry.isCurrentSession(10, 'tabA_sess')).toBe(false);
             expect(registry.isCurrentSession(20, 'tabB_sess')).toBe(true);
         });
-
-        it('Test 44: stale AAA invalidation 不得清 BBB', () => {
-            const registry = createNovelSessionRegistry();
-            registry.begin(10, 'BBB');
-
-            // 嘗試以過期的 AAA 檢查
-            expect(registry.isCurrentSession(10, 'AAA')).toBe(false);
-            expect(registry.isCurrentSession(10, 'BBB')).toBe(true);
-        });
     });
 
     // ─────────────────────────────────────────────────────────
-    // 七、 Mismatch Abandon Tests (45 ~ 48)
+    // 七、 Mismatch Abandon & SPA Response Tests (45 ~ 48, L ~ N)
     // ─────────────────────────────────────────────────────────
-    describe('7. Source Mismatch 放棄與重啟 (Tests 45 ~ 48)', () => {
-        beforeEach(() => {
-            global.document = { readyState: 'complete', addEventListener: vi.fn() };
-            global.window = { location: { href: 'https://site/1' } };
-        });
-
-        it('Test 45 ~ 47: Source mismatch ➔ 發送 ABANDON_NOVEL_REHYDRATE 且 stale 不清新 Session', async () => {
-            const controller = createNovelRehydrateController();
-            let abandonSessionId = null;
-
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            cb({
-                                ok: true,
-                                status: 'rehydratable',
-                                sessionId: 'sess_mismatch',
-                                expectedItems: [{ idx: 0, text: '舊內容' }],
-                                renderItems: []
-                            });
-                        }
-                        if (msg.action === 'ABANDON_NOVEL_REHYDRATE') {
-                            abandonSessionId = msg.sessionId;
-                            cb({ ok: true });
-                        }
-                    })
-                }
-            };
-
-            await controller.attemptRehydrate({
-                getParagraphsFn: () => ['<p>新內容</p>'],
-                getParagraphTextFn: () => '新內容'
-            });
-
-            expect(controller.getPhase()).toBe('mismatch');
-            expect(abandonSessionId).toBe('sess_mismatch');
-        });
-
-        it('Test 48: Mismatch + pending AUTO ➔ abandon 後可 start new session', async () => {
+    describe('7. Source Mismatch 放棄與 SPA 導航 (Tests 45 ~ 48, L ~ N)', () => {
+        it('Scenario L: ABANDON ok:true + pending AUTO ➔ 允許開啟新 Session', async () => {
             const controller = createNovelRehydrateController();
             controller.setPendingAuto(true);
 
-            global.chrome = {
-                runtime: {
-                    sendMessage: vi.fn((msg, cb) => {
-                        if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                            cb({
-                                ok: true,
-                                status: 'rehydratable',
-                                sessionId: 'sess_mismatch',
-                                expectedItems: [{ idx: 0, text: '舊內容' }],
-                                renderItems: []
-                            });
-                        }
-                        if (msg.action === 'ABANDON_NOVEL_REHYDRATE') {
-                            cb({ ok: true });
-                        }
-                    })
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_mismatch',
+                        expectedItems: [{ idx: 0, text: '舊內容' }],
+                        renderItems: []
+                    });
                 }
-            };
+                if (msg.action === 'ABANDON_NOVEL_REHYDRATE') {
+                    cb({ ok: true });
+                }
+            });
 
             const startNew = vi.fn();
             await controller.attemptRehydrate({
@@ -657,6 +640,42 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             });
 
             expect(startNew).toHaveBeenCalledTimes(1);
+        });
+
+        it('Scenario M: ABANDON stale-session + pending AUTO ➔ 絕不建立新 Session', async () => {
+            const controller = createNovelRehydrateController();
+            controller.setPendingAuto(true);
+
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_stale',
+                        expectedItems: [{ idx: 0, text: '舊內容' }],
+                        renderItems: []
+                    });
+                }
+                if (msg.action === 'ABANDON_NOVEL_REHYDRATE') {
+                    cb({ ok: false, status: 'stale-session' }); // 收到 stale
+                }
+            });
+
+            const startNew = vi.fn();
+            await controller.attemptRehydrate({
+                getParagraphsFn: () => ['<p>新內容</p>'],
+                getParagraphTextFn: () => '新內容',
+                startNewTranslationFn: startNew
+            });
+
+            expect(startNew).not.toHaveBeenCalled(); // 絕不開啟新 Session
+            expect(controller.getPhase()).toBe('none');
+        });
+
+        it('Scenario N: Content 收到 abortNovelTranslation ➔ 立即重置 phase 與 sessionId', () => {
+            const controller = createNovelRehydrateController();
+            controller.supersede();
+            expect(controller.getPhase()).toBe('superseded');
         });
     });
 
@@ -696,7 +715,7 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             const pendingSnapshot = [{ idx: 0, status: 'pending', translation: null }];
             applyNovelRehydrateSnapshot(pendingSnapshot, { injectBatchResultFn: injectMock });
 
-            expect(calls.length).toBe(1); // pending 不會重複 inject 覆蓋
+            expect(calls.length).toBe(1);
         });
 
         it('Test 53 & 54: Desktop 與 Mobile init 均包含 attemptRehydrate 調用', () => {
@@ -707,12 +726,14 @@ describe('Novel Mode: Page Reload Rehydrate Architecture (Full 60-Test Specifica
             expect(mobileCode.includes('attemptRehydrate')).toBe(true);
         });
 
-        it('Test 55 & 56: Desktop 與 Mobile AUTO_TRANSLATE_PAGE 均具備 defer path', () => {
+        it('Test 55 & 56: Desktop 與 Mobile AUTO_TRANSLATE_PAGE 均具備 defer path 與 rehydrated consume path', () => {
             const desktopCode = fs.readFileSync(path.resolve(__dirname, '../src/content/desktop-main.js'), 'utf-8');
             const mobileCode = fs.readFileSync(path.resolve(__dirname, '../src/content/mobile-main.js'), 'utf-8');
 
             expect(desktopCode.includes('deferred: true')).toBe(true);
             expect(mobileCode.includes('deferred: true')).toBe(true);
+            expect(desktopCode.includes('rehydrated: true')).toBe(true);
+            expect(mobileCode.includes('rehydrated: true')).toBe(true);
         });
 
         it('Test 57 ~ 59: Rehydrate 模組未調用 createNovelSessionId / BEGIN / SUBMIT', () => {

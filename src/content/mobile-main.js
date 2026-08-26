@@ -586,10 +586,16 @@ export function initMobileMode() {
 
     if (request.action === 'AUTO_TRANSLATE_PAGE') {
         log.info('Content-Mobile', '收到 AUTO_TRANSLATE_PAGE 自動翻譯訊息');
-        if (rehydrateController.isChecking()) {
+        const phase = rehydrateController.getPhase();
+        if (phase === 'checking') {
             log.info('Content-Mobile', '當前正在執行 Page Rehydrate，延遲 AUTO_TRANSLATE_PAGE 處理');
             rehydrateController.setPendingAuto(true);
             sendResponse({ started: false, deferred: true });
+            return false;
+        }
+        if (phase === 'rehydrated') {
+            log.info('Content-Mobile', '小說頁面已成功 Rehydrate，消耗並忽略延遲 AUTO_TRANSLATE_PAGE，不建立新 Session');
+            sendResponse({ started: false, rehydrated: true });
             return false;
         }
         try {

@@ -167,6 +167,48 @@ export function removeNovelSessionState(tabId) {
 }
 
 /**
+ * 條件式移除特定分頁的 Session Identity (只有當前 storage 中的 sessionId 相符時才刪除)
+ * @param {number|string} tabId 
+ * @param {string} expectedSessionId 
+ * @returns {Promise<boolean>}
+ */
+export function removeNovelSessionStateIfMatches(tabId, expectedSessionId) {
+    const numericTabId = Number(tabId);
+    if (!Number.isInteger(numericTabId) || numericTabId <= 0 || !expectedSessionId) return Promise.resolve(false);
+
+    return enqueueSessionStateMutation(async () => {
+        const storage = getStorageSession();
+        if (!storage) return false;
+
+        try {
+            const rawMap = await new Promise((resolve) => {
+                storage.get(NOVEL_SESSION_STATE_KEY, (res) => resolve(res?.[NOVEL_SESSION_STATE_KEY] || {}));
+            });
+            if (rawMap && typeof rawMap === 'object' && rawMap[numericTabId]) {
+                if (rawMap[numericTabId].sessionId === expectedSessionId) {
+                    const currentMap = { ...rawMap };
+                    delete currentMap[numericTabId];
+                    await new Promise((resolve, reject) => {
+                        storage.set({ [NOVEL_SESSION_STATE_KEY]: currentMap }, () => {
+                            if (chrome.runtime?.lastError) reject(chrome.runtime.lastError);
+                            else resolve();
+                        });
+                    });
+                    return true;
+                } else {
+                    // sessionId 不匹配，表示已被更新的 Session 覆寫，無操作
+                    return false;
+                }
+            }
+            return true;
+        } catch (e) {
+            log.warn('NovelSessionState', `條件式移除分頁 ${tabId} (session: ${expectedSessionId}) 失敗:`, e);
+            return false;
+        }
+    });
+}
+
+/**
  * SW 重啟時從 storedStates 恢復 registry，並剔除不存在的 Ghost Tab
  * @param {object} registry 
  * @param {Object.<number, object>} storedStates 

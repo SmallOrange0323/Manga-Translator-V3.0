@@ -124,6 +124,11 @@ export function createNovelRehydrateController() {
             if (currentGen !== generation || phase === 'superseded') return;
 
             if (!firstSnapshot || !firstSnapshot.ok || firstSnapshot.status !== 'rehydratable') {
+                if (firstSnapshot?.status === 'error') {
+                    // 若為伺服器/通訊異常，不 definitive 判定為無 session，保持 phase = 'none' 但不自動開新翻譯破壞 durable state
+                    phase = 'none';
+                    return;
+                }
                 phase = 'none';
                 if (pendingAutoTranslate) {
                     pendingAutoTranslate = false;
@@ -158,8 +163,9 @@ export function createNovelRehydrateController() {
             if (!matched) {
                 // 原文不一致 ➔ 發送 ABANDON 釋放舊 Session
                 phase = 'mismatch';
+                let abandonRes = null;
                 try {
-                    await new Promise(resolve => {
+                    abandonRes = await new Promise(resolve => {
                         chrome.runtime.sendMessage({
                             action: 'ABANDON_NOVEL_REHYDRATE',
                             sessionId: firstSnapshot.sessionId
@@ -167,9 +173,18 @@ export function createNovelRehydrateController() {
                     });
                 } catch (_) {}
 
-                if (pendingAutoTranslate) {
-                    pendingAutoTranslate = false;
-                    if (typeof startNewTranslationFn === 'function') startNewTranslationFn();
+                // 只有在 ABANDON 確認成功清理時，才允許 pending AUTO 開啟新 Session
+                // 若回傳 stale-session 表示背景已切換至其他 Session (例如 BBB)，絕不在此建立 CCC
+                if (abandonRes && abandonRes.ok) {
+                    if (pendingAutoTranslate) {
+                        pendingAutoTranslate = false;
+                        if (typeof startNewTranslationFn === 'function') startNewTranslationFn();
+                    }
+                } else {
+                    if (typeof onSessionDetachedFn === 'function') {
+                        onSessionDetachedFn();
+                    }
+                    phase = 'none';
                 }
                 return;
             }
