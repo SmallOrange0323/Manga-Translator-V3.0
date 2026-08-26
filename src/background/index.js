@@ -2877,9 +2877,11 @@ async function incrementDailyUsage(modelName = '') {
 chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace !== 'local') return;
 
-    // 關鍵設定的 Keys (包含翻譯語言、API Key、自訂詞彙、模型設定、自訂提示詞)
+    // 關鍵設定的 Keys (包含翻譯語言、API Key、獨立時間戳、自訂詞彙、模型設定、自訂提示詞)
     const criticalKeys = [
         'apiKey',
+        'apiKeyLastModified',
+        'settingsLastModified',
         'targetLanguage',
         'mangaGlossaries',
         'modelName',
