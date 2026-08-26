@@ -192,12 +192,6 @@ async function processNovelQueue() {
             const queue = Array.isArray(rawQueue) ? rawQueue : Object.values(rawQueue || {});
             
             if (queue.length === 0) break;
-            
-            // 檢查是否中斷
-            if (await state.get('isStopping')) {
-                log.warn('Background', '小說翻譯任務已被強制停止');
-                break;
-            }
 
             const task = queue.shift();
             await state.set('novelQueue', queue);
@@ -589,9 +583,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
     }
     
-    // Bug #1 修復：重置停止旗標，防止前次按停止後小說無法再次翻譯
-    state.set('isStopping', false);
-    state.set('isBatchPaused', false);
+    // 若為新 Session 則清除中斷標記
+    if (payload.tabId && isNewFullSession(payload)) {
+        novelCancellationRegistry.begin(payload.tabId);
+    }
+
+    if (payload.tabId && novelCancellationRegistry.isCancelled(payload.tabId)) {
+        sendResponse({ status: 'cancelled' });
+        return false;
+    }
     
     // 將任務加入全域佇列 (使用原子化 handleAddToQueue)
     handleAddToQueue(payload).then(() => {

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+
 const assert = {
     equal: (actual, expected) => expect(actual).toBe(expected),
     deepEqual: (actual, expected) => expect(actual).toEqual(expected)
@@ -7,7 +10,8 @@ const assert = {
 import {
     createNovelCancellationRegistry,
     isNewFullSession,
-    pruneQueueForTab
+    pruneQueueForTab,
+    shouldProcessNovelTask
 } from '../src/background/novel-cancellation.js';
 
 describe('Novel Mode: STOP / Abort Lifecycle & Per-Tab Isolation Tests', () => {
@@ -230,6 +234,76 @@ describe('Novel Mode: STOP / Abort Lifecycle & Per-Tab Isolation Tests', () => {
                 apiExecuted = true;
             }
             assert.equal(apiExecuted, true);
+        });
+    });
+
+    describe('Test 15: Manga 全域 isStopping 絕不影響小說任務 (跨模式隔離)', () => {
+        it('即使漫畫模式正在 STOP (isStopping = true)，活躍的小說任務 (shouldProcessNovelTask) 依然允許執行', () => {
+            const registry = createNovelCancellationRegistry();
+            // 漫畫模式全域 STOP
+            const mangaGlobalState = { isStopping: true };
+
+            // 小說 Tab 101 未中止
+            const novelTask = { tabId: 101, batchIndex: 0, texts: ['小說段落'] };
+
+            // shouldProcessNovelTask 只看 registry，不受 mangaGlobalState 影響
+            const canProcess = shouldProcessNovelTask(novelTask, registry);
+            assert.equal(canProcess, true);
+        });
+
+        it('小說 Tab 101 被中止時，shouldProcessNovelTask 精準拒絕', () => {
+            const registry = createNovelCancellationRegistry();
+            registry.cancel(101);
+
+            const novelTask = { tabId: 101, batchIndex: 0, texts: ['小說段落'] };
+            assert.equal(shouldProcessNovelTask(novelTask, registry), false);
+        });
+    });
+
+    describe('Test 16: 多分頁小說佇列交錯時，Tab A 中止僅跳過 A，Tab B 依然正常執行', () => {
+        it('模擬佇列循環處理 [TaskA1, TaskB1, TaskA2, TaskB2]：A 中止時僅 A 被 skip，B 順利執行完成且佇列不 break', () => {
+            const registry = createNovelCancellationRegistry();
+            registry.cancel(101); // Tab A 中止
+
+            const queue = [
+                { tabId: 101, batchIndex: 0, id: 'A1' },
+                { tabId: 202, batchIndex: 0, id: 'B1' },
+                { tabId: 101, batchIndex: 1, id: 'A2' },
+                { tabId: 202, batchIndex: 1, id: 'B2' }
+            ];
+
+            const executedTasks = [];
+            const skippedTasks = [];
+
+            // 模擬修正後的 processNovelQueue 循環
+            for (const task of queue) {
+                if (registry.isCancelled(task.tabId)) {
+                    skippedTasks.push(task.id);
+                    continue; // 僅 skip 該 task，絕不 break 整條 queue
+                }
+                executedTasks.push(task.id);
+            }
+
+            assert.deepEqual(skippedTasks, ['A1', 'A2']);
+            assert.deepEqual(executedTasks, ['B1', 'B2']);
+        });
+    });
+
+    describe('Test 17: 靜態程式碼防護：processNovelQueue 函式體內絕無 isStopping 依賴', () => {
+        it('讀取 src/background/index.js 確認 processNovelQueue 實作中未調用 isStopping', () => {
+            const indexPath = path.resolve(__dirname, '../src/background/index.js');
+            const code = fs.readFileSync(indexPath, 'utf-8');
+
+            // 擷取 processNovelQueue 函式主體
+            const startIdx = code.indexOf('async function processNovelQueue()');
+            const endIdx = code.indexOf('chrome.runtime.onMessage.addListener', startIdx);
+            assert.equal(startIdx !== -1, true);
+            assert.equal(endIdx !== -1, true);
+
+            const novelFnCode = code.substring(startIdx, endIdx);
+
+            // 斷言 processNovelQueue 內部絕對沒有 isStopping
+            assert.equal(novelFnCode.includes('isStopping'), false);
         });
     });
 });

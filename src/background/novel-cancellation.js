@@ -7,6 +7,7 @@
  * 2. 收到中斷請求時，精確修剪 novelQueue 中屬於該分頁的所有未執行任務。
  * 3. 只有全新的整篇翻譯 Session (batchIndex === 0 且非重試) 才能安全解除該分頁的中斷狀態。
  * 4. Stale batch 或重試 batch 絕不能解除中斷狀態。
+ * 5. 小說模式完全獨立於漫畫模式的全域 isStopping 狀態，彼此互不干擾。
  */
 
 export function createNovelCancellationRegistry() {
@@ -84,6 +85,21 @@ export function pruneQueueForTab(queue, tabId) {
     }
     const targetId = Number(tabId);
     return queue.filter(task => Number(task?.tabId) !== targetId);
+}
+
+/**
+ * 判定特定小說任務是否應當繼續執行
+ * 完全僅依賴 registry 中的 per-tab 中斷狀態，絕不依賴全域 isStopping
+ * @param {object} task 
+ * @param {object} registry 
+ * @returns {boolean}
+ */
+export function shouldProcessNovelTask(task, registry) {
+    if (!task || typeof task !== 'object') return false;
+    const tabId = task.tabId;
+    if (tabId === undefined || tabId === null) return false;
+    if (!registry || typeof registry.isCancelled !== 'function') return true;
+    return !registry.isCancelled(tabId);
 }
 
 /**
