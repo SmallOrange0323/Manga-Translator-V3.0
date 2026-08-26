@@ -17,6 +17,8 @@ import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellatio
 import { saveNovelSessionState, getNovelSessionStates, removeNovelSessionState, restoreNovelSessionRegistry } from './novel-session-state.js';
 import { createNovelJobCheckpoint, getNovelJobCheckpoints, saveNovelJobCheckpoint, submitNovelJobCheckpointAtomic, updateNovelJobCheckpoint, removeNovelJobCheckpoint, removeNovelJobCheckpointsForTab, normalizeRestoredNovelJob, getNovelJobBatchItems, selectNextRunnableNovelJob } from './novel-job-checkpoint.js';
 import { upsertNovelResultItems, applyNovelResultUpsertIfCurrent } from './novel-result-store.js';
+import { isSameNovelPage, normalizeNovelPageUrl } from '../utils/novel-page-identity.js';
+import { buildNovelRehydrateSnapshot } from './novel-rehydrate.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -871,6 +873,95 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               sendResponse({ ok: true, sessionId, tabId, totalItems: items.length });
           } catch (err) {
               log.error('Background', 'SUBMIT_NOVEL_JOB 處理失敗:', err);
+              sendResponse({ ok: false, error: err.message });
+          }
+      })();
+
+      return true;
+  }
+
+  if (message.action === 'GET_NOVEL_REHYDRATE_STATE') {
+      const tabId = sender.tab ? sender.tab.id : null;
+      if (!tabId) {
+          sendResponse({ ok: false, status: 'no-tab' });
+          return false;
+      }
+
+      const { pageUrl, expectedSessionId } = message;
+
+      (async () => {
+          try {
+              const sessionStates = await getNovelSessionStates();
+              const sessionState = sessionStates[tabId];
+
+              if (!sessionState || sessionState.cancelled || !novelCancellationRegistry.isCurrentSession(tabId, sessionState.sessionId)) {
+                  sendResponse({ ok: false, status: 'no-session' });
+                  return;
+              }
+
+              if (expectedSessionId && sessionState.sessionId !== expectedSessionId) {
+                  sendResponse({ ok: false, status: 'stale-session' });
+                  return;
+              }
+
+              // 二次驗證實際 Tab URL
+              let realTabUrl = pageUrl || '';
+              try {
+                  const tabInfo = await chrome.tabs.get(tabId);
+                  if (tabInfo && tabInfo.url) realTabUrl = tabInfo.url;
+              } catch (_) {}
+
+              const jobsMap = await getNovelJobCheckpoints();
+              const job = jobsMap[sessionState.sessionId];
+
+              const novelResults = await state.get('novelResults', []);
+
+              const snapshot = buildNovelRehydrateSnapshot({
+                  sessionState,
+                  job,
+                  novelResults,
+                  currentTabUrl: realTabUrl
+              });
+
+              sendResponse(snapshot);
+          } catch (err) {
+              log.error('Background', 'GET_NOVEL_REHYDRATE_STATE 處理異常:', err);
+              sendResponse({ ok: false, status: 'error', error: err.message });
+          }
+      })();
+
+      return true;
+  }
+
+  if (message.action === 'ABANDON_NOVEL_REHYDRATE') {
+      const tabId = sender.tab ? sender.tab.id : null;
+      const { sessionId } = message;
+      if (!tabId || !sessionId) {
+          sendResponse({ ok: false, status: 'invalid-payload' });
+          return false;
+      }
+
+      (async () => {
+          try {
+              // 只有當前 Session 仍屬於該 sessionId 時才執行清理
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  sendResponse({ ok: false, status: 'stale-session' });
+                  return;
+              }
+
+              log.info('Background', `[Novel Rehydrate] 分頁 ${tabId} 放棄不相符的舊 Session ${sessionId}`);
+              novelCancellationRegistry.cancel(tabId);
+              await removeNovelJobCheckpointsForTab(tabId);
+              await removeNovelSessionState(tabId);
+              await state.update('novelResults', (current = []) => {
+                  const safe = Array.isArray(current) ? current : [];
+                  return safe.filter(item => !(item && item.tabId === tabId && item.sessionId === sessionId));
+              });
+              novelCancellationRegistry.clear(tabId);
+
+              sendResponse({ ok: true });
+          } catch (err) {
+              log.error('Background', 'ABANDON_NOVEL_REHYDRATE 處理異常:', err);
               sendResponse({ ok: false, error: err.message });
           }
       })();
@@ -3030,6 +3121,29 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       // 通知前台終止小說翻譯
       chrome.tabs.sendMessage(tabId, { action: 'abortNovelTranslation' }).catch(() => {});
       return;
+  }
+
+  // 跨章節導航安全失效保護：若已存在活躍小說 Session 且目標 URL 為不同章節，立即失效舊 Session
+  try {
+      const activeStates = await getNovelSessionStates();
+      const activeState = activeStates[tabId];
+      if (activeState && !activeState.cancelled && activeState.pageUrl) {
+          if (!isSameNovelPage(activeState.pageUrl, currentUrl)) {
+              log.info('Background', `[Novel Navigation] 分頁 ${tabId} 導航至不同小說章節 (${activeState.pageUrl} ➔ ${currentUrl})，立即失效舊 Session ${activeState.sessionId}`);
+              if (novelCancellationRegistry.getActiveSessionId(tabId) === activeState.sessionId) {
+                  novelCancellationRegistry.cancel(tabId);
+                  await removeNovelJobCheckpointsForTab(tabId);
+                  await removeNovelSessionState(tabId);
+                  await state.update('novelResults', (current = []) => {
+                      const safe = Array.isArray(current) ? current : [];
+                      return safe.filter(item => !(item && item.tabId === tabId && item.sessionId === activeState.sessionId));
+                  });
+                  novelCancellationRegistry.clear(tabId);
+              }
+          }
+      }
+  } catch (navErr) {
+      log.warn('Background', '檢查小說導航 Session 失效異常:', navErr);
   }
 
   if (lastNovelUrlByTab[tabId] === currentUrl) return; // 防止重複觸發

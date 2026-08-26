@@ -4,10 +4,12 @@ import { crawlImages, triggerLazyScroll } from './manga-engine.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
 import { extractMangaMetadata } from './n-e-extractor.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
+import { createNovelRehydrateController } from './novel-rehydrate-client.js';
 
 // 本地小說中斷旗標與當前 Session ID
 let isNovelTranslationAborted = false;
 let currentNovelSessionId = null;
+const rehydrateController = createNovelRehydrateController();
 
 /**
  * 啟動行動端專用 UI 系統 (Overlay Drawer 模式)
@@ -569,14 +571,40 @@ export function initMobileMode() {
 
   // 監聽背景訊息 (支援小說模式 + API 狀態回報)
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'translateNovelPage' || request.action === 'AUTO_TRANSLATE_PAGE') {
-        startNovelTranslation();
-        sendResponse({ started: true });
+    if (request.action === 'translateNovelPage') {
+        log.info('Content-Mobile', '收到手動 translateNovelPage 訊息，使 Rehydrate 失效並啟動新翻譯');
+        rehydrateController.supersede();
+        try {
+            startNovelTranslation();
+            sendResponse({ started: true });
+        } catch (e) {
+            log.error('Content-Mobile', 'startNovelTranslation 發生錯誤:', e);
+            sendResponse({ started: false, error: e.message });
+        }
+        return false;
+    }
+
+    if (request.action === 'AUTO_TRANSLATE_PAGE') {
+        log.info('Content-Mobile', '收到 AUTO_TRANSLATE_PAGE 自動翻譯訊息');
+        if (rehydrateController.isChecking()) {
+            log.info('Content-Mobile', '當前正在執行 Page Rehydrate，延遲 AUTO_TRANSLATE_PAGE 處理');
+            rehydrateController.setPendingAuto(true);
+            sendResponse({ started: false, deferred: true });
+            return false;
+        }
+        try {
+            startNovelTranslation();
+            sendResponse({ started: true });
+        } catch (e) {
+            log.error('Content-Mobile', 'startNovelTranslation 發生錯誤:', e);
+            sendResponse({ started: false, error: e.message });
+        }
         return false;
     }
 
     if (request.action === 'abortNovelTranslation') {
         log.info('Content-Mobile', '收到 abortNovelTranslation 訊息，終止本地翻譯狀態');
+        rehydrateController.supersede();
         isNovelTranslationAborted = true;
         currentNovelSessionId = null;
         window.mt_currentNovelSessionId = null;
@@ -741,5 +769,25 @@ export function initMobileMode() {
       });
   }
 
-  log.info('Content-Mobile', 'Mobile Overlay Drawer ready.');
+  log.info('Content-Mobile', 'Mobile Overlay Drawer ready. 啟動小說頁面 Rehydrate 檢測...');
+
+  // 初始化完成後，自動嘗試從背景恢復既有小說 Session (Reload Rehydrate)
+  rehydrateController.attemptRehydrate({
+      getParagraphsFn: getNovelParagraphs,
+      getParagraphTextFn: getParagraphText,
+      insertPlaceholdersFn: insertPlaceholders,
+      injectBatchResultFn: injectNovelBatchResult,
+      translateUIElementsFn: translateUIElements,
+      startNewTranslationFn: startNovelTranslation,
+      onSessionAttachedFn: (sessId) => {
+          isNovelTranslationAborted = false;
+          currentNovelSessionId = sessId;
+          window.mt_currentNovelSessionId = sessId;
+          log.info('Content-Mobile', `已成功重新連接至既有小說 Session: ${sessId}`);
+      },
+      onSessionDetachedFn: () => {
+          currentNovelSessionId = null;
+          window.mt_currentNovelSessionId = null;
+      }
+  });
 }
