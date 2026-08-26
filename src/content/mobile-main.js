@@ -605,12 +605,14 @@ export function initMobileMode() {
         log.info('Content-Mobile', '收到 abortNovelTranslation 訊息，清空本地佇列並終止');
         isNovelTranslationAborted = true;
         novelBatchQueue = [];
+        currentNovelSessionId = null;
+        window.mt_currentNovelSessionId = null;
         sendResponse({ ok: true });
         return false;
     }
 
     if (request.action === 'injectNovelBatchResult') {
-        if (isNovelTranslationAborted || (request.sessionId && request.sessionId !== currentNovelSessionId)) {
+        if (isNovelTranslationAborted || !currentNovelSessionId || request.sessionId !== currentNovelSessionId) {
             log.info('Content-Mobile', `小說翻譯已終止或 Session 不匹配 (收到: ${request.sessionId}, 當前: ${currentNovelSessionId})，忽略遲來的 inject 請求`);
             sendResponse({ ignored: true });
             return false;
@@ -673,8 +675,9 @@ export function initMobileMode() {
         const BATCH_SIZE = window.mt_currentNovelBatchSize || 50;
         
         // 建立全新 Session ID
-        currentNovelSessionId = createNovelSessionId();
-        window.mt_currentNovelSessionId = currentNovelSessionId;
+        const newSessionId = createNovelSessionId();
+        currentNovelSessionId = newSessionId;
+        window.mt_currentNovelSessionId = newSessionId;
 
         // 劃分批次，排入 novelBatchQueue
         novelBatchQueue = [];
@@ -690,7 +693,7 @@ export function initMobileMode() {
             });
             
             novelBatchQueue.push({
-                sessionId: currentNovelSessionId,
+                sessionId: newSessionId,
                 batchIndex: b,
                 totalBatches,
                 startIdx: start,
@@ -701,12 +704,16 @@ export function initMobileMode() {
         // 明確發送 BEGIN_NOVEL_SESSION 註冊新 Session
         chrome.runtime.sendMessage({
             action: 'BEGIN_NOVEL_SESSION',
-            sessionId: currentNovelSessionId,
+            sessionId: newSessionId,
             pageUrl: location.href
         }, (response) => {
             if (isNovelTranslationAborted) return;
+            if (currentNovelSessionId !== newSessionId || response?.sessionId !== newSessionId) {
+                log.warn('Content-Mobile', `忽略過期或不匹配的 BEGIN_NOVEL_SESSION ACK (當前: ${currentNovelSessionId}, 收到: ${response?.sessionId})`);
+                return;
+            }
             if (response && response.ok) {
-                log.info('Content-Mobile', `Novel Session 已在背景註冊: ${currentNovelSessionId}`);
+                log.info('Content-Mobile', `Novel Session 已在背景註冊: ${newSessionId}`);
                 // 啟動首批拉取
                 sendNextNovelBatch();
                 // 啟動全網頁 UI 翻譯

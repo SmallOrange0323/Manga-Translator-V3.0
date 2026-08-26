@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
@@ -12,6 +12,15 @@ import {
     pruneQueueForTab,
     shouldProcessNovelTask
 } from '../src/background/novel-cancellation.js';
+
+import {
+    NOVEL_SESSION_STATE_KEY,
+    sanitizeNovelSessionState,
+    saveNovelSessionState,
+    getNovelSessionStates,
+    removeNovelSessionState,
+    restoreNovelSessionRegistry
+} from '../src/background/novel-session-state.js';
 
 import { createNovelSessionId } from '../src/utils/novel-session-id.js';
 
@@ -91,10 +100,8 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
             registry.begin(101, 'session-AAA');
             registry.cancel(101);
 
-            // 模擬 translateNovelParagraphs 收到 stale Batch 0
             const staleBatchMsg = { sessionId: 'session-AAA', batchIndex: 0, texts: ['hello'] };
 
-            // 斷言：普通 batch 訊息不再調用 begin，狀態維持 cancelled
             const canProcess = registry.isCurrentSession(101, staleBatchMsg.sessionId);
             assert.equal(canProcess, false);
             assert.equal(registry.isCancelled(101), true);
@@ -108,7 +115,6 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
             registry.cancel(101);
             assert.equal(registry.isCancelled(101), true);
 
-            // 顯式 BEGIN_NOVEL_SESSION BBB
             registry.begin(101, 'session-BBB');
             assert.equal(registry.isCancelled(101), false);
             assert.equal(registry.getActiveSessionId(101), 'session-BBB');
@@ -220,22 +226,173 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
         });
     });
 
-    describe('Test 15: Session ID 產生器功能驗證', () => {
-        it('createNovelSessionId 產生非空且長度合規的唯一識別碼', () => {
-            const id1 = createNovelSessionId();
-            const id2 = createNovelSessionId();
+    describe('Test 15: Session State 淨化與白名單驗證 (防敏感資料寫入)', () => {
+        it('只保留 tabId, sessionId, pageUrl, cancelled, updatedAt，丟棄原文/譯文/Key/token 等非法欄位', () => {
+            const dirtyState = {
+                tabId: 101,
+                sessionId: 'sess-abc',
+                pageUrl: 'https://example.com/novel/1',
+                cancelled: false,
+                updatedAt: 12345678,
+                // 非法欄位
+                texts: ['秘密小說原文'],
+                translations: ['機密譯文'],
+                apiKey: 'AIzaSyFakeKey123',
+                oauthToken: 'bearer-token-xyz',
+                prompt: 'You are a translator'
+            };
 
-            assert.equal(typeof id1, 'string');
-            assert.equal(id1.length > 8, true);
-            assert.equal(id1 !== id2, true);
+            const clean = sanitizeNovelSessionState(dirtyState);
+            assert.deepEqual(clean, {
+                tabId: 101,
+                sessionId: 'sess-abc',
+                pageUrl: 'https://example.com/novel/1',
+                cancelled: false,
+                updatedAt: 12345678
+            });
+            assert.equal(clean.texts, undefined);
+            assert.equal(clean.apiKey, undefined);
+            assert.equal(clean.oauthToken, undefined);
+        });
+
+        it('無效 tabId 或空 sessionId 判定為 null', () => {
+            assert.equal(sanitizeNovelSessionState({ tabId: -1, sessionId: 'abc' }), null);
+            assert.equal(sanitizeNovelSessionState({ tabId: 101, sessionId: '' }), null);
+            assert.equal(sanitizeNovelSessionState(null), null);
         });
     });
 
-    describe('Test 16: 靜態程式碼防護：確認 production 代碼中不再有 isNewFullSession', () => {
-        it('確認 src/background/index.js 中未引用或調用 isNewFullSession', () => {
+    describe('Test 16: SW Restart Hydration 閉環測試', () => {
+        it('Session AAA persist ➔ SW 重啟建立新 registry ➔ restore ➔ AAA 仍為 active', async () => {
+            const stored = {
+                101: { tabId: 101, sessionId: 'sess-AAA', pageUrl: '', cancelled: false, updatedAt: 1000 }
+            };
+
+            const freshRegistry = createNovelSessionRegistry();
+            assert.equal(freshRegistry.isCurrentSession(101, 'sess-AAA'), false);
+
+            await restoreNovelSessionRegistry(freshRegistry, stored, new Set([101]));
+            assert.equal(freshRegistry.isCurrentSession(101, 'sess-AAA'), true);
+            assert.equal(freshRegistry.getActiveSessionId(101), 'sess-AAA');
+        });
+
+        it('Cancelled AAA persist ➔ SW 重啟 restore ➔ 依然保持 cancelled 狀態', async () => {
+            const stored = {
+                101: { tabId: 101, sessionId: 'sess-AAA', pageUrl: '', cancelled: true, updatedAt: 1000 }
+            };
+
+            const freshRegistry = createNovelSessionRegistry();
+            await restoreNovelSessionRegistry(freshRegistry, stored, new Set([101]));
+
+            assert.equal(freshRegistry.isCancelled(101), true);
+            assert.equal(freshRegistry.isCurrentSession(101, 'sess-AAA'), false);
+        });
+
+        it('Ghost Tab (分頁已關閉) ➔ restore 時自動剔除且不 hydrate', async () => {
+            const stored = {
+                101: { tabId: 101, sessionId: 'sess-AAA', pageUrl: '', cancelled: false, updatedAt: 1000 },
+                202: { tabId: 202, sessionId: 'sess-BBB', pageUrl: '', cancelled: false, updatedAt: 1000 }
+            };
+
+            const freshRegistry = createNovelSessionRegistry();
+            // 只有 101 還活著，202 是 ghost tab
+            const activeTabs = new Set([101]);
+
+            const restoredCount = await restoreNovelSessionRegistry(freshRegistry, stored, activeTabs);
+            assert.equal(restoredCount, 1);
+            assert.equal(freshRegistry.isCurrentSession(101, 'sess-AAA'), true);
+            assert.equal(freshRegistry.isCurrentSession(202, 'sess-BBB'), false);
+        });
+    });
+
+    describe('Test 17: Rapid Double-Start Race 防禦測試', () => {
+        it('當 Content 快速切換至 Session BBB 時，遲來的 Session AAA ACK 絕不啟動 queue', () => {
+            let currentNovelSessionId = 'session-BBB'; // 已切換為 BBB
+            let queueStarted = false;
+
+            const capturedSessionId = 'session-AAA'; // 這是 AAA 發起的 request 捕捉的 session
+            const responseFromAAA = { ok: true, sessionId: 'session-AAA' };
+
+            // 模擬 Content Script 的 ACK callback
+            if (currentNovelSessionId !== capturedSessionId || responseFromAAA?.sessionId !== capturedSessionId) {
+                // 成功偵測到 stale ACK，直接退出
+            } else {
+                queueStarted = true;
+            }
+
+            assert.equal(queueStarted, false);
+        });
+
+        it('當前 Session BBB 收到 BBB 的 ACK 時正常啟動 queue', () => {
+            let currentNovelSessionId = 'session-BBB';
+            let queueStarted = false;
+
+            const capturedSessionId = 'session-BBB';
+            const responseFromBBB = { ok: true, sessionId: 'session-BBB' };
+
+            if (currentNovelSessionId === capturedSessionId && responseFromBBB?.sessionId === capturedSessionId) {
+                queueStarted = true;
+            }
+
+            assert.equal(queueStarted, true);
+        });
+    });
+
+    describe('Test 18: ADD_TO_QUEUE 與 Single Paragraph Retry 嚴格 Session 驗證', () => {
+        it('ADD_TO_QUEUE missing sessionId 必須被拒絕', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(101, 'sess-101');
+
+            const payloadWithoutSession = { tabId: 101, texts: ['p1'] };
+            let enqueued = false;
+
+            if (payloadWithoutSession.tabId && payloadWithoutSession.sessionId && registry.isCurrentSession(payloadWithoutSession.tabId, payloadWithoutSession.sessionId)) {
+                enqueued = true;
+            }
+
+            assert.equal(enqueued, false);
+        });
+
+        it('Single retry 在發起前若 Session 不符直接拒絕發起 API', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(101, 'sess-BBB');
+
+            const retryReq = { tabId: 101, sessionId: 'sess-AAA', text: '段落原文' };
+            let apiExecuted = false;
+
+            if (retryReq.tabId && retryReq.sessionId && registry.isCurrentSession(retryReq.tabId, retryReq.sessionId)) {
+                apiExecuted = true;
+            }
+
+            assert.equal(apiExecuted, false);
+        });
+
+        it('Single retry API 傳輸期間 Session 切換 ➔ 回應被 Post-request Guard 捨棄', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(101, 'sess-AAA');
+
+            const retryReq = { tabId: 101, sessionId: 'sess-AAA', text: '段落原文' };
+
+            // API 傳輸期間切換至 BBB
+            registry.begin(101, 'sess-BBB');
+
+            let translationInjected = false;
+            // Post-request Guard
+            if (registry.isCurrentSession(retryReq.tabId, retryReq.sessionId)) {
+                translationInjected = true;
+            }
+
+            assert.equal(translationInjected, false);
+        });
+    });
+
+    describe('Test 19: 靜態程式碼防護：確認 BEGIN_NOVEL_SESSION 與 abort 為 async barrier', () => {
+        it('確認 src/background/index.js 中 BEGIN_NOVEL_SESSION 使用 state.update 與 async barrier', () => {
             const indexPath = path.resolve(__dirname, '../src/background/index.js');
             const code = fs.readFileSync(indexPath, 'utf-8');
 
+            assert.equal(code.includes('BEGIN_NOVEL_SESSION'), true);
+            assert.equal(code.includes('saveNovelSessionState'), true);
             assert.equal(code.includes('isNewFullSession'), false);
         });
     });

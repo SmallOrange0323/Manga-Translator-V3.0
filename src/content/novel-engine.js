@@ -324,8 +324,8 @@ export async function retrySingleNovelParagraph(idx, originalText, container) {
         text: originalText,
         mangaKey: currentMangaKey
     }, (response) => {
-        // 若 Session 已切換，捨棄結果不覆蓋新 DOM
-        if (capturedSessionId && window.mt_currentNovelSessionId && capturedSessionId !== window.mt_currentNovelSessionId) {
+        // 若 Session 已切換或已 STOP (window.mt_currentNovelSessionId 變 null)，捨棄結果不覆蓋新 DOM
+        if (!capturedSessionId || capturedSessionId !== window.mt_currentNovelSessionId) {
             return;
         }
 
