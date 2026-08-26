@@ -11,6 +11,7 @@ import { createMangaStartLock } from './manga-start-lock.js';
 import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
+import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -113,13 +114,60 @@ state.init().then(async () => {
     log.info('Background', `狀態載入完成 (無痕模式: ${isIncognitoProcess})，檢查待處理任務...`);
     await state.set('isStopping', false); // 重置停止狀態
 
-    // 範例：檢查是否有遺留的小說翻譯任務
+    // 檢查是否有遺留的小說翻譯任務
     const queue = await state.get('novelQueue', []);
     if (queue.length > 0 && !isIncognitoProcess) {
         log.warn('Background', `偵測到 ${queue.length} 個小說待處理任務，準備恢復...`);
         processNovelQueue().catch(err => log.error('Background', '恢復小說佇列失敗:', err));
     }
+
+    // 檢查是否有未完成的漫畫預翻 session checkpoint，安全恢復
+    if (!isIncognitoProcess) {
+        restorePretranslationCheckpoints().catch(err => log.warn('Background', `[跨話連續追漫] 恢復預翻 checkpoint 失敗: ${err.message}`));
+    }
 });
+
+/**
+ * Service Worker 啟動時從 chrome.storage.session 恢復中斷的預翻任務
+ * 嚴格單話保證：只恢復 updatedAt 最新的一筆，過期或無效的 checkpoint 立即清理且絕不寫入 Map
+ */
+async function restorePretranslationCheckpoints() {
+    try {
+        const checkpoints = await getPretranslationCheckpoints();
+        const { latestInterrupted, staleUrls } = selectLatestInterruptedCheckpoint(checkpoints);
+
+        // 1. 清理所有無效或過期的 stale checkpoints
+        for (const staleUrl of staleUrls) {
+            await removePretranslationCheckpoint(staleUrl);
+        }
+
+        // 2. 處理最新一筆中斷的預翻
+        if (latestInterrupted) {
+            let isValidTab = false;
+            if (latestInterrupted.sourceTabId && typeof latestInterrupted.sourceTabId === 'number') {
+                try {
+                    await chrome.tabs.get(latestInterrupted.sourceTabId);
+                    isValidTab = true;
+                } catch (_) {
+                    isValidTab = false;
+                }
+            }
+
+            if (isValidTab) {
+                // 來源分頁驗證成功後，才寫入記憶體 Map 並安全恢復
+                pretranslatedChaptersMap.set(latestInterrupted.url, latestInterrupted);
+                log.info('Background', `[跨話連續追漫] 正在從 Service Worker 重啟中恢復預翻: ${latestInterrupted.url} (已完成 ${latestInterrupted.processedCount}/${latestInterrupted.images.length} 頁)`);
+                startPretranslateNextChapter(latestInterrupted.url, latestInterrupted.sourceTabId, latestInterrupted.associatedResultTabId)
+                    .catch(err => log.warn('Background', `恢復預翻失敗: ${err.message}`));
+            } else {
+                log.info('Background', `[跨話連續追漫] 來源分頁 ${latestInterrupted.sourceTabId} 已不存在，清理 checkpoint: ${latestInterrupted.url}`);
+                await removePretranslationCheckpoint(latestInterrupted.url);
+            }
+        }
+    } catch (err) {
+        log.warn('Background', `恢復預翻 checkpoint 異常: ${err.message}`);
+    }
+}
 
 // 同步本地鎖，解決 chrome.storage 非同步造成的 race condition
 let _localNovelProcessingLock = false;
@@ -1430,12 +1478,16 @@ async function crawlChapterImagesAndNav(chapterUrl) {
 }
 
 /**
- * startPretranslateNextChapter — 啟動下一話的背景靜默預翻 (嚴格單話佇列 + SW保活)
+ * startPretranslateNextChapter — 啟動下一話的背景靜默預翻 (嚴格單話佇列 + SW保活 + Session Checkpoint 斷點續翻)
  */
 async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     if (!nextUrl || typeof nextUrl !== 'string') return;
     const isEnabled = await state.get('autoPretranslateNextChapter', true);
     if (!isEnabled) return;
+
+    let resumeIndex = 0;
+    let initialResults = [];
+    let jobData = null;
 
     if (pretranslatedChaptersMap.has(nextUrl)) {
         const existing = pretranslatedChaptersMap.get(nextUrl);
@@ -1443,37 +1495,62 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             log.info('Background', `[跨話連續追漫] 下一話 ${nextUrl} 已經在預翻或已完成，不重複觸發`);
             return;
         }
+        if (existing.status === 'interrupted') {
+            resumeIndex = getPretranslationResumeIndex(existing);
+            initialResults = Array.isArray(existing.results) ? [...existing.results] : [];
+            jobData = existing;
+            jobData.inProgress = true;
+            jobData.isCancelled = false;
+            jobData.sourceTabId = sourceTabId || existing.sourceTabId;
+            jobData.associatedResultTabId = resultTabId || existing.associatedResultTabId;
+        }
     }
 
     const batchSizeSetting = await state.get('ocrBatchSize', 10);
     const batchSize = Math.max(1, parseInt(batchSizeSetting) || 10);
 
-    const jobData = {
-        url: nextUrl,
-        images: [],
-        results: [],
-        navLinks: null,
-        usedModelName: null,
-        batchSize: batchSize,
-        isDone: false,
-        inProgress: true,
-        isCancelled: false,
-        sourceTabId,
-        associatedResultTabId: resultTabId,
-        startTime: Date.now()
-    };
-    pretranslatedChaptersMap.set(nextUrl, jobData);
+    if (!jobData) {
+        jobData = {
+            url: nextUrl,
+            images: [],
+            results: [],
+            navLinks: null,
+            usedModelName: null,
+            batchSize: batchSize,
+            isDone: false,
+            inProgress: true,
+            isCancelled: false,
+            sourceTabId,
+            associatedResultTabId: resultTabId,
+            startTime: Date.now(),
+            processedCount: 0
+        };
+        pretranslatedChaptersMap.set(nextUrl, jobData);
+    }
     activePretranslateJob = jobData;
     swKeepAlive.start();
 
-    log.info('Background', `[跨話連續追漫] 🚀 開始在背景靜默預翻下一話: ${nextUrl}`);
+    log.info('Background', `[跨話連續追漫] 🚀 開始在背景靜默預翻下一話: ${nextUrl} (起始索引: ${resumeIndex})`);
     try {
-        const crawlData = await crawlChapterImagesAndNav(nextUrl);
-        if (!crawlData.images || crawlData.images.length === 0) throw new Error('無法獲取圖片');
+        let chapterImages = jobData.images;
+        let navLinks = jobData.navLinks;
 
-        jobData.images = crawlData.images;
-        jobData.navLinks = crawlData.navLinks;
-        log.info('Background', `[跨話連續追漫] 成功抓取下一話 ${crawlData.images.length} 張圖片，下下一話連結: ${crawlData.navLinks?.next || '無'}`);
+        if (!chapterImages || chapterImages.length === 0) {
+            const crawlData = await crawlChapterImagesAndNav(nextUrl);
+            if (!crawlData.images || crawlData.images.length === 0) throw new Error('無法獲取圖片');
+            chapterImages = crawlData.images;
+            navLinks = crawlData.navLinks;
+            jobData.images = chapterImages;
+            jobData.navLinks = navLinks;
+            log.info('Background', `[跨話連續追漫] 成功抓取下一話 ${chapterImages.length} 張圖片，下下一話連結: ${navLinks?.next || '無'}`);
+        }
+
+        // 確保 results 只包含 resumeIndex 之前的已完成項目，防止重複
+        jobData.results = initialResults.slice(0, resumeIndex);
+        jobData.processedCount = jobData.results.length;
+
+        // 初始或恢復前的即時 Checkpoint (確保即使第一批中途被 SW 回收也能保存 images/navLinks/起始進度)
+        await savePretranslationCheckpoint(jobData);
 
         const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
         const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
@@ -1486,7 +1563,6 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             const glossary = await loadGlossary(mangaKey);
             if (glossary?.terms?.length) glossarySnippet = buildGlossaryPromptSnippet(glossary.terms);
         }
-        const batchSize = Math.max(1, parseInt(await state.get('ocrBatchSize', 5)) || 5);
         const maxDim = parseInt(await state.get('imageMaxDimension', 1024)) || 1024;
         const requestDelay = await state.get('requestDelay', 4000);
 
@@ -1495,12 +1571,12 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
 
-        for (let i = 0; i < crawlData.images.length; i += batchSize) {
+        for (let i = resumeIndex; i < chapterImages.length; i += batchSize) {
             if (jobData.isCancelled) {
                 log.info('Background', `[跨話連續追漫] 任務已被取消，停止預翻`);
                 break;
             }
-            const currentBatch = crawlData.images.slice(i, i + batchSize);
+            const currentBatch = chapterImages.slice(i, i + batchSize);
             const batchIdx = Math.floor(i / batchSize);
             const schedule = getHybridSchedule(batchIdx, candidateKeys.length, isHybrid, modelName, secondaryModelName);
             const batchModel = schedule.modelName;
@@ -1531,19 +1607,23 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             }
 
             jobData.results.push(...batchResults);
+            jobData.processedCount = jobData.results.length;
+
+            // 每完成一批，立即保存 Session Checkpoint
+            await savePretranslationCheckpoint(jobData);
 
             // 若讀者已切換至本話，即時串流推送本批翻譯結果至結果頁
             if (jobData.associatedResultTabId) {
                 chrome.tabs.sendMessage(jobData.associatedResultTabId, {
                     action: 'batchComplete',
                     batchIndex: Math.floor(i / batchSize),
-                    totalBatches: Math.ceil(crawlData.images.length / batchSize),
+                    totalBatches: Math.ceil(chapterImages.length / batchSize),
                     batchResults: batchResults,
-                    isLastBatch: (i + batchSize >= crawlData.images.length)
+                    isLastBatch: (i + batchSize >= chapterImages.length)
                 }).catch(() => {});
             }
 
-            if (i + batchSize < crawlData.images.length && !jobData.isCancelled) {
+            if (i + batchSize < chapterImages.length && !jobData.isCancelled) {
                 await new Promise(r => setTimeout(r, effectiveDelay));
             }
         }
@@ -1557,17 +1637,22 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         jobData.status = completion.status;
         jobData.isDone = completion.isDone;
         if (completion.status === 'cancelled') {
+            await removePretranslationCheckpoint(nextUrl);
             log.info('Background', `[跨話連續追漫] 下一話預翻已取消`);
         } else if (completion.status === 'completed') {
+            // 先保存完成的 local 快取，再清理 session checkpoint
             await savePretranslatedChapterToStorage(nextUrl, jobData);
+            await removePretranslationCheckpoint(nextUrl);
             log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命！`);
         } else {
             jobData.error = completion.error;
+            await removePretranslationCheckpoint(nextUrl);
             log.warn('Background', `[跨話連續追漫] 預翻結果不完整 (${jobData.results.length}/${jobData.images.length})`);
         }
     } catch (err) {
         jobData.error = err.message;
         jobData.status = 'error';
+        await removePretranslationCheckpoint(nextUrl);
         log.warn('Background', `[跨話連續追漫] 預翻失敗: ${err.message}`);
     } finally {
         jobData.inProgress = false;
@@ -2510,7 +2595,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   delete sessionStoryContext[tabId];
   delete lastNovelUrlByTab[tabId];
 
-  // 清理與該分頁關聯的跨話預翻快取
+  // 清理與該分頁關聯的跨話預翻快取 (記憶體 + Session Checkpoint)
   for (const [chUrl, data] of pretranslatedChaptersMap.entries()) {
     if (data.associatedResultTabId === tabId || data.sourceTabId === tabId) {
       pretranslatedChaptersMap.delete(chUrl);
@@ -2521,6 +2606,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     activePretranslateJob.isCancelled = true;
     activePretranslateJob = null;
   }
+  await clearPretranslationCheckpointsForTabs(tabId);
 
   // 1. 清除小說模式狀態
   await state.update('novelModeTabs', (current = {}) => {
