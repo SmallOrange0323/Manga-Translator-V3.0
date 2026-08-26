@@ -12,6 +12,7 @@ import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompl
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
+import { mapNovelTranslationResults } from './novel-result-mapping.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -290,16 +291,10 @@ async function processNovelQueue() {
                     glossarySnippet
                 }); 
 
-                // 解析結果
-                let translations = [];
-                if (result && result.translations) {
-                    const sorted = result.translations.sort((a, b) => a.index - b.index);
-                    translations = sorted.map(item => item.text);
-                } else if (Array.isArray(result)) {
-                    translations = result;
-                }
+                // 解析結果 (使用專用 pure mapping，永遠維持固定長度並防止缺項錯位)
+                const { translations, validCount } = mapNovelTranslationResults(result, task.texts.length);
                 
-                if (translations.length === 0) throw new Error('翻譯結果為空或格式錯誤'); 
+                if (validCount === 0) throw new Error('翻譯結果為空或格式錯誤'); 
 
                 // 補全配額更新，傳入 modelName 支援 Gemma 識別
                 await incrementDailyUsage(modelName);
