@@ -4,13 +4,18 @@ import { crawlImages, triggerLazyScroll } from './manga-engine.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
 import { extractMangaMetadata } from './n-e-extractor.js';
 
-// 本地小說批次翻譯拉取佇列
+// 本地小說批次翻譯拉取佇列與中斷旗標
 let novelBatchQueue = [];
+let isNovelTranslationAborted = false;
 
 /**
  * 傳送下一個小說翻譯批次給背景服務，實現拉取式佇列控速
  */
 function sendNextNovelBatch() {
+    if (isNovelTranslationAborted) {
+        log.info('Content-Mobile', '小說翻譯已中止，停止發送後續批次');
+        return;
+    }
     if (novelBatchQueue.length === 0) {
         log.info('Content-Mobile', '所有小說批次已翻譯完成');
         return;
@@ -593,7 +598,20 @@ export function initMobileMode() {
         return false;
     }
 
+    if (request.action === 'abortNovelTranslation') {
+        log.info('Content-Mobile', '收到 abortNovelTranslation 訊息，清空本地佇列並終止');
+        isNovelTranslationAborted = true;
+        novelBatchQueue = [];
+        sendResponse({ ok: true });
+        return false;
+    }
+
     if (request.action === 'injectNovelBatchResult') {
+        if (isNovelTranslationAborted) {
+            log.info('Content-Mobile', '小說翻譯已終止，忽略遲來的 inject 請求');
+            sendResponse({ ignored: true });
+            return false;
+        }
         log.info('Content-Mobile', `收到譯文批次結果，BatchIndex: ${request.batchIndex}，是否失敗: ${request.isFailed}`);
         injectNovelBatchResult(request.batchIndex, request.translations, request.retryIndices, request.isFailed);
         sendNextNovelBatch(); // 注入完畢，主動拉取下一批！
@@ -636,6 +654,7 @@ export function initMobileMode() {
   });
 
   function startNovelTranslation() {
+    isNovelTranslationAborted = false;
     const paragraphs = getNovelParagraphs();
     if (paragraphs.length === 0) return;
     
@@ -689,6 +708,7 @@ export function initMobileMode() {
       }
       
       log.info('Content-Mobile', `開始重譯所有失敗段落，共 ${failedIndices.length} 段`);
+    isNovelTranslationAborted = false;
       
       // 將所有失敗的段落標記為翻譯中 ⏳
       failedIndices.forEach(idx => {

@@ -900,7 +900,6 @@ if (novelModeToggle) {
                 });
             } else {
                 chrome.runtime.sendMessage({ action: 'abortNovelTranslation', tabId });
-                state.set('isStopping', true);
             }
         });
     });
