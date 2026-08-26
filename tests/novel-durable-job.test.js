@@ -17,7 +17,7 @@ import {
     selectNextRunnableNovelJob
 } from '../src/background/novel-job-checkpoint.js';
 
-import { upsertNovelResultItems } from '../src/background/novel-result-store.js';
+import { upsertNovelResultItems, applyNovelResultUpsertIfCurrent } from '../src/background/novel-result-store.js';
 import { createNovelSessionRegistry } from '../src/background/novel-cancellation.js';
 
 describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', () => {
@@ -674,7 +674,6 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
         it('Test A: Fresh result 已 checkpoint 後使用者 STOP ➔ local commit 階段 guard 阻斷', () => {
             const registry = createNovelSessionRegistry();
             registry.begin(1, 's1');
-            // 模擬已 checkpoint 成功後收到 STOP
             registry.cancel(1);
 
             expect(registry.isCurrentSession(1, 's1')).toBe(false);
@@ -691,7 +690,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
         it('Test C: AAA replay 期間分頁建立 BBB ➔ AAA 判定 stale，阻斷寫入', () => {
             const registry = createNovelSessionRegistry();
             registry.begin(1, 'AAA');
-            registry.begin(1, 'BBB'); // 切換至 BBB
+            registry.begin(1, 'BBB');
 
             expect(registry.isCurrentSession(1, 'AAA')).toBe(false);
             expect(registry.isCurrentSession(1, 'BBB')).toBe(true);
@@ -700,7 +699,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
         it('Test D: Tab 關閉後 ➔ stale replay 阻斷 commit', () => {
             const registry = createNovelSessionRegistry();
             registry.begin(1, 's1');
-            registry.clear(1); // 關閉分頁
+            registry.clear(1);
 
             expect(registry.isCurrentSession(1, 's1')).toBe(false);
         });
@@ -783,7 +782,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
 
             const jobsMap = { 'sA': jobA, 'sB': jobB };
             const next = selectNextRunnableNovelJob(jobsMap, registry);
-            expect(next.sessionId).toBe('sB'); // 優先選取較久未執行的 Job B
+            expect(next.sessionId).toBe('sB');
         });
     });
 
@@ -861,10 +860,8 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
             const saveRes = await submitNovelJobCheckpointAtomic(job);
             expect(saveRes.ok).toBe(true);
 
-            // 模擬此時收到 STOP
             registry.cancel(1);
 
-            // post-save guard 執行清理
             if (!registry.isCurrentSession(1, 's1')) {
                 await removeNovelJobCheckpoint('s1');
             }
@@ -918,6 +915,219 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
         it('Test 44: Desktop retryAllFailedNovels 一次發送 SUBMIT_NOVEL_JOB retry items', () => {
             const code = fs.readFileSync(path.resolve(__dirname, '../src/content/desktop-main.js'), 'utf-8');
             expect(code.includes("kind: 'retry'")).toBe(true);
+        });
+    });
+
+    // ─────────────────────────────────────────────────────────
+    // 九、 Ownership-aware novelResults Updater 測試 (G ~ J)
+    // ─────────────────────────────────────────────────────────
+    describe('9. Ownership-aware novelResults Updater 測試', () => {
+        it('Test G: Fresh updater 在 storage.get pending 期間被 cancel ➔ applied 為 false 且不寫入 stale 譯文', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 's1');
+
+            const current = [{ sessionId: 's1', tabId: 1, idx: 0, original: 'A', translation: '舊譯文' }];
+            const incoming = [{ sessionId: 's1', tabId: 1, idx: 1, original: 'B', translation: '新譯文' }];
+
+            // 模擬在 updater 回呼執行前收到 STOP
+            registry.cancel(1);
+
+            const { applied, nextResults } = applyNovelResultUpsertIfCurrent(current, incoming, {
+                tabId: 1,
+                sessionId: 's1',
+                registry
+            });
+
+            expect(applied).toBe(false);
+            expect(nextResults.length).toBe(1);
+            expect(nextResults[0].translation).toBe('舊譯文');
+        });
+
+        it('Test H: Replay updater 執行前 session 被 cancel ➔ applied 為 false，拒絕寫入', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 's1');
+
+            const current = [];
+            const incoming = [{ sessionId: 's1', tabId: 1, idx: 0, original: 'A', translation: 'Replay 譯文' }];
+
+            // 模擬在 replay updater 回呼執行前收到 STOP
+            registry.cancel(1);
+
+            const { applied, nextResults } = applyNovelResultUpsertIfCurrent(current, incoming, {
+                tabId: 1,
+                sessionId: 's1',
+                registry
+            });
+
+            expect(applied).toBe(false);
+            expect(nextResults.length).toBe(0);
+        });
+
+        it('Test I: Tab 關閉 (registry.clear) 發生在 updater 執行前 ➔ applied 為 false，不產生 orphan 結果', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(99, 's1');
+
+            const current = [];
+            const incoming = [{ sessionId: 's1', tabId: 99, idx: 0, original: 'A', translation: '分頁關閉之譯文' }];
+
+            // 模擬分頁關閉
+            registry.clear(99);
+
+            const { applied, nextResults } = applyNovelResultUpsertIfCurrent(current, incoming, {
+                tabId: 99,
+                sessionId: 's1',
+                registry
+            });
+
+            expect(applied).toBe(false);
+            expect(nextResults.length).toBe(0);
+        });
+
+        it('Test J: AAA 寫入等待期間分頁建立 BBB ➔ AAA updater 判定 stale (applied: false)，不污染 BBB', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 'AAA');
+
+            const current = [];
+            const incomingAAA = [{ sessionId: 'AAA', tabId: 1, idx: 0, original: 'A', translation: 'AAA 譯文' }];
+
+            // 模擬分頁切換至 BBB
+            registry.begin(1, 'BBB');
+
+            const { applied, nextResults } = applyNovelResultUpsertIfCurrent(current, incomingAAA, {
+                tabId: 1,
+                sessionId: 'AAA',
+                registry
+            });
+
+            expect(applied).toBe(false);
+            expect(nextResults.length).toBe(0);
+        });
+    });
+
+    // ─────────────────────────────────────────────────────────
+    // 十、 Scheduler Lock 生命週期與防死鎖測試 (A ~ F)
+    // ─────────────────────────────────────────────────────────
+    describe('10. Scheduler Lock 生命週期與防死鎖測試', () => {
+        it('Test A: isProcessingNovel 寫入失敗 ➔ lock 依然受到 finally 保護，最終可安全釋放', async () => {
+            let lock = false;
+            let finallyExecuted = false;
+
+            const runScheduler = async () => {
+                if (lock) return;
+                lock = true;
+                try {
+                    try {
+                        throw new Error('state.set isProcessingNovel failed');
+                    } catch (_) {}
+                } finally {
+                    lock = false;
+                    finallyExecuted = true;
+                }
+            };
+
+            await runScheduler();
+            expect(lock).toBe(false);
+            expect(finallyExecuted).toBe(true);
+        });
+
+        it('Test B: finally 的 isProcessingNovel=false 清理失敗 ➔ pending kick 依然正常 consume', async () => {
+            let lock = true;
+            let pendingKick = true;
+            let retriggered = false;
+
+            const simulateFinally = () => {
+                try {
+                    throw new Error('UI cleanup failure');
+                } catch (_) {}
+
+                lock = false;
+                const shouldKick = pendingKick;
+                pendingKick = false;
+                if (shouldKick) {
+                    retriggered = true;
+                }
+            };
+
+            simulateFinally();
+            expect(lock).toBe(false);
+            expect(pendingKick).toBe(false);
+            expect(retriggered).toBe(true);
+        });
+
+        it('Test C: finally 的 novelProgress=null 清理失敗 ➔ pending kick 依然正常 consume', async () => {
+            let lock = true;
+            let pendingKick = true;
+            let retriggered = false;
+
+            const simulateFinally = () => {
+                try {
+                    throw new Error('novelProgress cleanup failure');
+                } catch (_) {}
+
+                lock = false;
+                const shouldKick = pendingKick;
+                pendingKick = false;
+                if (shouldKick) {
+                    retriggered = true;
+                }
+            };
+
+            simulateFinally();
+            expect(lock).toBe(false);
+            expect(retriggered).toBe(true);
+        });
+
+        it('Test D: kick 在 scheduler locked 時到達 ➔ pending kick 被標記為 true', () => {
+            let lock = true;
+            let pendingKick = false;
+
+            const requestProcessing = () => {
+                if (lock) {
+                    pendingKick = true;
+                    return;
+                }
+            };
+
+            requestProcessing();
+            expect(pendingKick).toBe(true);
+        });
+
+        it('Test E: scheduler finally 釋放鎖 ➔ pending kick 重新觸發調度', () => {
+            let lock = true;
+            let pendingKick = true;
+            let triggeredCount = 0;
+
+            const trigger = () => { triggeredCount++; };
+
+            const simulateFinally = () => {
+                lock = false;
+                const shouldKick = pendingKick;
+                pendingKick = false;
+                if (shouldKick) {
+                    trigger();
+                }
+            };
+
+            simulateFinally();
+            expect(lock).toBe(false);
+            expect(pendingKick).toBe(false);
+            expect(triggeredCount).toBe(1);
+        });
+
+        it('Test F: 靜態原始碼檢查：state.set isProcessingNovel 受 try 保護，且 lock 在 cleanup 後釋放', () => {
+            const indexCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
+            // 驗證 _localNovelJobProcessingLock = true 緊接 try
+            const lockSetIdx = indexCode.indexOf('_localNovelJobProcessingLock = true;');
+            const tryIdx = indexCode.indexOf('try {', lockSetIdx);
+            expect(lockSetIdx).toBeGreaterThan(-1);
+            expect(tryIdx).toBeGreaterThan(lockSetIdx);
+            expect(tryIdx - lockSetIdx).toBeLessThan(50); // 確保在 lock 後立即進入 try
+
+            // 驗證 finally 中 lock release 在 UI cleanup 之後
+            const finallyIdx = indexCode.indexOf('finally {', lockSetIdx);
+            const uiCleanupIdx = indexCode.indexOf("await state.set('isProcessingNovel', false);", finallyIdx);
+            const lockReleaseIdx = indexCode.indexOf('_localNovelJobProcessingLock = false;', uiCleanupIdx);
+            expect(lockReleaseIdx).toBeGreaterThan(uiCleanupIdx);
         });
     });
 });

@@ -37,3 +37,27 @@ export function upsertNovelResultItems(currentResults = [], incomingResults = []
 
     return Array.from(itemMap.values());
 }
+
+/**
+ * 具備 Ownership/Session 驗證的 novelResults updater 輔助函式 (Pure Helper)
+ * @param {Array<object>} currentResults 既有結果陣列
+ * @param {Array<object>} incomingResults 欲寫入/更新的批次結果陣列
+ * @param {object} options
+ * @param {number} options.tabId
+ * @param {string} options.sessionId
+ * @param {object} [options.registry] 可選的 Session Registry
+ * @returns {{ applied: boolean, nextResults: Array<object> }}
+ */
+export function applyNovelResultUpsertIfCurrent(currentResults, incomingResults, { tabId, sessionId, registry }) {
+    const isCurrent = registry ? registry.isCurrentSession(tabId, sessionId) : true;
+    if (!isCurrent) {
+        return {
+            applied: false,
+            nextResults: Array.isArray(currentResults) ? currentResults : []
+        };
+    }
+    return {
+        applied: true,
+        nextResults: upsertNovelResultItems(currentResults, incomingResults)
+    };
+}

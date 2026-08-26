@@ -16,7 +16,7 @@ import { mapNovelTranslationResults } from './novel-result-mapping.js';
 import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellation.js';
 import { saveNovelSessionState, getNovelSessionStates, removeNovelSessionState, restoreNovelSessionRegistry } from './novel-session-state.js';
 import { createNovelJobCheckpoint, getNovelJobCheckpoints, saveNovelJobCheckpoint, submitNovelJobCheckpointAtomic, updateNovelJobCheckpoint, removeNovelJobCheckpoint, removeNovelJobCheckpointsForTab, normalizeRestoredNovelJob, getNovelJobBatchItems, selectNextRunnableNovelJob } from './novel-job-checkpoint.js';
-import { upsertNovelResultItems } from './novel-result-store.js';
+import { upsertNovelResultItems, applyNovelResultUpsertIfCurrent } from './novel-result-store.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -268,9 +268,13 @@ async function processDurableNovelJobs() {
     if (_localNovelJobProcessingLock) return;
     _localNovelJobProcessingLock = true;
 
-    await state.set('isProcessingNovel', true);
-
     try {
+        try {
+            await state.set('isProcessingNovel', true);
+        } catch (uiErr) {
+            log.warn('Background', '更新 isProcessingNovel UI 狀態異常 (不影響排程):', uiErr);
+        }
+
         while (true) {
             // 1. 取得當前活躍分頁集合與 Jobs Checkpoints
             let activeTabIdSet = null;
@@ -317,7 +321,7 @@ async function processDurableNovelJobs() {
                     continue;
                 }
 
-                // 1. Idempotent Upsert novelResults (若非整批失敗)
+                // 1. Ownership-aware Upsert novelResults (若非整批失敗)
                 if (!existingBatch.isFailed) {
                     const incomingItems = batchItems.map((item, offset) => ({
                         sessionId: job.sessionId,
@@ -326,7 +330,23 @@ async function processDurableNovelJobs() {
                         original: item.text,
                         translation: existingBatch.translations[offset] || '（翻譯失敗）'
                     }));
-                    await state.update('novelResults', (current = []) => upsertNovelResultItems(current, incomingItems));
+
+                    let commitApplied = false;
+                    await state.update('novelResults', (current = []) => {
+                        const res = applyNovelResultUpsertIfCurrent(current, incomingItems, {
+                            tabId: job.tabId,
+                            sessionId: job.sessionId,
+                            registry: novelCancellationRegistry
+                        });
+                        commitApplied = res.applied;
+                        return res.nextResults;
+                    });
+
+                    if (!commitApplied) {
+                        log.info('Background', `[Durable Job Replay] Session ${job.sessionId} 在 novelResults 寫入期間已過期，放棄注入`);
+                        await removeNovelJobCheckpoint(job.sessionId);
+                        continue;
+                    }
                 }
 
                 // Replay Guard 3: Upsert 後 / Inject 前檢查
@@ -557,7 +577,7 @@ async function processDurableNovelJobs() {
                 continue;
             }
 
-            // Local Commit 執行 (Upsert novelResults)
+            // Local Commit 執行 (Ownership-aware Upsert novelResults)
             if (!mappedResult.isFailed) {
                 const incomingItems = batchItems.map((item, offset) => ({
                     sessionId: job.sessionId,
@@ -566,7 +586,23 @@ async function processDurableNovelJobs() {
                     original: item.text,
                     translation: mappedResult.translations[offset] || '（翻譯失敗）'
                 }));
-                await state.update('novelResults', (current = []) => upsertNovelResultItems(current, incomingItems));
+
+                let commitApplied = false;
+                await state.update('novelResults', (current = []) => {
+                    const res = applyNovelResultUpsertIfCurrent(current, incomingItems, {
+                        tabId: job.tabId,
+                        sessionId: job.sessionId,
+                        registry: novelCancellationRegistry
+                    });
+                    commitApplied = res.applied;
+                    return res.nextResults;
+                });
+
+                if (!commitApplied) {
+                    log.warn('Background', `[Durable Job] Session ${job.sessionId} 在 novelResults 寫入期間已過期，放棄注入`);
+                    await removeNovelJobCheckpoint(job.sessionId);
+                    continue;
+                }
             }
 
             // Fresh Guard 2: novelResults upsert 後 / inject 前檢查
@@ -653,13 +689,29 @@ async function processDurableNovelJobs() {
         }
     } catch (globalErr) {
         log.error('Background', 'Durable Novel Job 調度異常:', globalErr);
-        await state.set('novelProgress', { status: `[系統錯誤] ${globalErr.message}` });
+        try {
+            await state.set('novelProgress', { status: `[系統錯誤] ${globalErr.message}` });
+        } catch (_) {}
     } finally {
+        // 1. Best-effort UI 狀態清理 (避免失敗中斷後續 lock release 與 pending kick)
+        try {
+            await state.set('isProcessingNovel', false);
+        } catch (uiErr) {
+            log.warn('Background', '清理 isProcessingNovel 狀態失敗:', uiErr);
+        }
+        try {
+            await state.set('novelProgress', null);
+        } catch (uiErr) {
+            log.warn('Background', '清理 novelProgress 狀態失敗:', uiErr);
+        }
+
+        // 2. UI 清理完畢後，才正式釋放 scheduler lock
         _localNovelJobProcessingLock = false;
-        await state.set('isProcessingNovel', false);
-        await state.set('novelProgress', null);
-        if (_novelJobSchedulerKickPending) {
-            _novelJobSchedulerKickPending = false;
+
+        // 3. 取出並處理 pending kick
+        const shouldKick = _novelJobSchedulerKickPending;
+        _novelJobSchedulerKickPending = false;
+        if (shouldKick) {
             queueMicrotask(() => {
                 requestDurableNovelJobProcessing();
             });
