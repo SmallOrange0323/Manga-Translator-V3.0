@@ -100,6 +100,29 @@ export async function executeFallbackImages({
 }
 
 /**
+ * 執行批次 OCR 失敗後的逐張 fallback 重試，保證在 STOP 觸發時立即中斷，不再發送後續 API 請求
+ */
+export async function executeOcrFallbackImages({
+    base64List,
+    extractSingle,
+    shouldContinue = async () => true
+}) {
+    const results = Array(base64List.length).fill('');
+    for (let idx = 0; idx < base64List.length; idx++) {
+        if (!await shouldContinue()) break;
+        const b64 = base64List[idx];
+        if (!b64) continue;
+        try {
+            results[idx] = await extractSingle(b64, idx);
+        } catch (err) {
+            results[idx] = '';
+        }
+        if (!await shouldContinue()) break;
+    }
+    return results;
+}
+
+/**
  * 判斷 Two-step Stage 1 (OCR) 結束後是否允許進入 Stage 1.5 (全域劇本分析)
  */
 export function shouldProceedToStage15({ wasStopped, isStopping }) {

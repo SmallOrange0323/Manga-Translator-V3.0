@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 
@@ -1812,6 +1812,9 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         // 1. 取得本批預先壓縮好的 Base64
         const base64List = await nextOcrBatchPromise;
 
+        // 預載結束後、發起任何 OCR API 之前，立即再次檢查 isStopping
+        if (await state.get('isStopping')) break;
+
         // 2. 雙緩衝管線：若有下一批，立即在發送 API 前啟動背景預載預壓
         const nextOcrStart = i + ocrBatchSize;
         if (nextOcrStart < images.length) {
@@ -1831,14 +1834,11 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 });
             } catch (batchOcrErr) {
                 log.warn('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 失敗，嘗試逐張重試: ${batchOcrErr.message}`);
-                batchScripts = await Promise.all(base64List.map(async (b64, idx) => {
-                    if (!b64) return '';
-                    try {
-                        return await extractTextFromImage(b64, { model: ocrModelName });
-                    } catch (err) {
-                        return '';
-                    }
-                }));
+                batchScripts = await executeOcrFallbackImages({
+                    base64List,
+                    extractSingle: (b64) => extractTextFromImage(b64, { model: ocrModelName }),
+                    shouldContinue: async () => !(await state.get('isStopping'))
+                });
             }
         }
 

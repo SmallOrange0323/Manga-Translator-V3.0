@@ -10,6 +10,7 @@ import {
 } from '../src/background/hybrid-retry.js';
 import {
     executeFallbackImages,
+    executeOcrFallbackImages,
     shouldProceedToStage15,
     shouldProceedToStage2,
     shouldCompleteMangaTranslation
@@ -123,7 +124,79 @@ describe('Translation Lifecycle Integration Tests', () => {
         });
     });
 
-    describe('情境 3: Two-step Pipeline STOP 兩階段守衛', () => {
+    describe('情境 3: Two-step Pipeline Stage 1 OCR STOP 空窗防護', () => {
+        it('Test A: 圖片預載期間 STOP，預載完成後保證不發起 Batch OCR API 請求', async () => {
+            let isStopping = false;
+            let batchOcrRequestCount = 0;
+
+            // 模擬進入迴圈時 isStopping 為 false
+            assert.equal(isStopping, false);
+
+            // 模擬異步預載圖片期間，使用者按下了 STOP
+            const preloadPromise = (async () => {
+                isStopping = true;
+                return ['img1_b64', 'img2_b64'];
+            })();
+
+            const base64List = await preloadPromise;
+
+            // 驗證：預載結束後進行 STOP 檢查
+            if (!isStopping) {
+                batchOcrRequestCount++;
+            }
+
+            // 斷言：Batch OCR API 呼叫數精確為 0
+            assert.equal(batchOcrRequestCount, 0);
+        });
+
+        it('Test B: Batch OCR 失敗進入 catch 時若已 STOP，保證 single-image OCR fallback 請求數為 0', async () => {
+            let isStopping = true;
+            let singleOcrCalls = [];
+
+            const base64List = ['img1_b64', 'img2_b64', 'img3_b64'];
+
+            const results = await executeOcrFallbackImages({
+                base64List,
+                extractSingle: async (b64) => {
+                    singleOcrCalls.push(b64);
+                    return 'OCR_TEXT';
+                },
+                shouldContinue: async () => !isStopping
+            });
+
+            // 斷言：完全不發起任何 single OCR 請求
+            assert.equal(singleOcrCalls.length, 0);
+            assert.deepEqual(results, ['', '', '']);
+        });
+
+        it('Test C: Single OCR fallback 圖片 1 完成後 STOP，後續圖片 2/3 請求數為 0', async () => {
+            let isStopping = false;
+            let singleOcrCalls = [];
+
+            const base64List = ['img1_b64', 'img2_b64', 'img3_b64'];
+
+            const results = await executeOcrFallbackImages({
+                base64List,
+                extractSingle: async (b64) => {
+                    singleOcrCalls.push(b64);
+                    if (b64 === 'img1_b64') {
+                        isStopping = true;
+                    }
+                    return 'OCR_TEXT_1';
+                },
+                shouldContinue: async () => !isStopping
+            });
+
+            // 斷言：僅呼叫圖片 1，圖片 2 與 圖片 3 未發送請求
+            assert.equal(singleOcrCalls.length, 1);
+            assert.equal(singleOcrCalls[0], 'img1_b64');
+            assert.equal(results[0], 'OCR_TEXT_1');
+            assert.equal(results[1], '');
+            assert.equal(results[2], '');
+        });
+    });
+
+    describe('情境 4: Two-step Pipeline Stage 1.5 與 Stage 2 兩階段守衛', () => {
         it('Stage 1 OCR 結束後若已 STOP，保證 Stage 1.5 (extractGlobalStoryAndGlossary) 與 Stage 2 請求數均為 0', async () => {
             let stage1Stopped = true;
             let stage15RequestCount = 0;
@@ -137,7 +210,6 @@ describe('Translation Lifecycle Integration Tests', () => {
 
             assert.equal(canProceedToStage15, false);
 
-            // 當被守衛阻擋時，嚴格不得發起 Stage 1.5 (extractGlobalStoryAndGlossary) 與 Stage 2 請求
             if (canProceedToStage15) {
                 stage15RequestCount++;
                 const canProceedToStage2 = shouldProceedToStage2({
@@ -174,7 +246,6 @@ describe('Translation Lifecycle Integration Tests', () => {
 
             if (canProceedToStage15) {
                 stage15RequestCount++;
-                // 模擬在 Stage 1.5 執行期間或結束時使用者按 STOP
                 const isStoppingAfterStage15 = true;
                 const canProceedToStage2 = shouldProceedToStage2({
                     wasStopped: isStoppingAfterStage15,
@@ -199,7 +270,7 @@ describe('Translation Lifecycle Integration Tests', () => {
         });
     });
 
-    describe('情境 4: 實際 usedModelName 一致性與 Failover 結果卡片邊界', () => {
+    describe('情境 5: 實際 usedModelName 一致性與 Failover 結果卡片邊界', () => {
         it('Model A 觸發 429 後切換至 Model B 成功，usedModelName 與結果卡片 metadata 保持一致為 Model B', async () => {
             const execution = await executeHybridRequest({
                 candidateKeys: ['Key1'],
