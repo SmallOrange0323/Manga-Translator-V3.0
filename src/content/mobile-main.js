@@ -5,35 +5,9 @@ import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, transla
 import { extractMangaMetadata } from './n-e-extractor.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
 
-// 本地小說批次翻譯拉取佇列、中斷旗標與當前 Session ID
-let novelBatchQueue = [];
+// 本地小說中斷旗標與當前 Session ID
 let isNovelTranslationAborted = false;
 let currentNovelSessionId = null;
-
-/**
- * 傳送下一個小說翻譯批次給背景服務，實現拉取式佇列控速
- */
-function sendNextNovelBatch() {
-    if (isNovelTranslationAborted || !currentNovelSessionId) {
-        log.info('Content-Mobile', '小說翻譯已中止或 Session 無效，停止發送後續批次');
-        return;
-    }
-    if (novelBatchQueue.length === 0) {
-        log.info('Content-Mobile', '所有小說批次已翻譯完成');
-        return;
-    }
-    const batch = novelBatchQueue.shift();
-    log.info('Content-Mobile', `發送批次任務 ${batch.batchIndex + 1}/${batch.totalBatches}，段落數: ${batch.texts.length} (Session: ${batch.sessionId || currentNovelSessionId})`);
-    chrome.runtime.sendMessage({
-        action: 'translateNovelParagraphs',
-        sessionId: batch.sessionId || currentNovelSessionId,
-        batchIndex: batch.batchIndex,
-        totalBatches: batch.totalBatches,
-        startIdx: batch.startIdx,
-        texts: batch.texts,
-        retryIndices: batch.retryIndices
-    });
-}
 
 /**
  * 啟動行動端專用 UI 系統 (Overlay Drawer 模式)
@@ -602,9 +576,8 @@ export function initMobileMode() {
     }
 
     if (request.action === 'abortNovelTranslation') {
-        log.info('Content-Mobile', '收到 abortNovelTranslation 訊息，清空本地佇列並終止');
+        log.info('Content-Mobile', '收到 abortNovelTranslation 訊息，終止本地翻譯狀態');
         isNovelTranslationAborted = true;
-        novelBatchQueue = [];
         currentNovelSessionId = null;
         window.mt_currentNovelSessionId = null;
         sendResponse({ ok: true });
@@ -619,7 +592,6 @@ export function initMobileMode() {
         }
         log.info('Content-Mobile', `收到譯文批次結果，BatchIndex: ${request.batchIndex}，是否失敗: ${request.isFailed}`);
         injectNovelBatchResult(request.batchIndex, request.translations, request.retryIndices, request.isFailed);
-        sendNextNovelBatch(); // 注入完畢，主動拉取下一批！
         sendResponse({ ok: true });
         return false;
     }
@@ -663,70 +635,62 @@ export function initMobileMode() {
     const paragraphs = getNovelParagraphs();
     if (paragraphs.length === 0) return;
     
-    // 清除舊狀態，準備新翻譯
-    chrome.storage.local.set({ 
-        novelResults: [],
-        novelQueue: [],
-        isProcessingNovel: false 
-    }, () => {
-        insertPlaceholders(paragraphs);
-        
-        // 讀取 batchSize (預設 50)
-        const BATCH_SIZE = window.mt_currentNovelBatchSize || 50;
-        
-        // 建立全新 Session ID
-        const newSessionId = createNovelSessionId();
-        currentNovelSessionId = newSessionId;
-        window.mt_currentNovelSessionId = newSessionId;
+    insertPlaceholders(paragraphs);
+    
+    // 讀取 batchSize (預設 50)
+    const BATCH_SIZE = window.mt_currentNovelBatchSize || 50;
+    
+    // 建立全新 Session ID
+    const newSessionId = createNovelSessionId();
+    currentNovelSessionId = newSessionId;
+    window.mt_currentNovelSessionId = newSessionId;
 
-        // 劃分批次，排入 novelBatchQueue
-        novelBatchQueue = [];
-        const totalBatches = Math.ceil(paragraphs.length / BATCH_SIZE);
-        
-        for (let b = 0; b < totalBatches; b++) {
-            const start = b * BATCH_SIZE;
-            const end = Math.min(start + BATCH_SIZE, paragraphs.length);
-            
-            const batchTexts = paragraphs.slice(start, end).map((p, offset) => {
-                const globalIdx = start + offset;
-                return getParagraphText(globalIdx);
-            });
-            
-            novelBatchQueue.push({
-                sessionId: newSessionId,
-                batchIndex: b,
-                totalBatches,
-                startIdx: start,
-                texts: batchTexts
-            });
+    // 構造完整 items 陣列 (一次提交完整 Job)
+    const items = paragraphs.map((p, idx) => ({
+        idx,
+        text: getParagraphText(idx)
+    }));
+    
+    // 明確發送 BEGIN_NOVEL_SESSION 註冊新 Session
+    chrome.runtime.sendMessage({
+        action: 'BEGIN_NOVEL_SESSION',
+        sessionId: newSessionId,
+        pageUrl: location.href
+    }, (response) => {
+        if (isNovelTranslationAborted) return;
+        if (currentNovelSessionId !== newSessionId || response?.sessionId !== newSessionId) {
+            log.warn('Content-Mobile', `忽略過期或不匹配的 BEGIN_NOVEL_SESSION ACK (當前: ${currentNovelSessionId}, 收到: ${response?.sessionId})`);
+            return;
         }
-        
-        // 明確發送 BEGIN_NOVEL_SESSION 註冊新 Session
-        chrome.runtime.sendMessage({
-            action: 'BEGIN_NOVEL_SESSION',
-            sessionId: newSessionId,
-            pageUrl: location.href
-        }, (response) => {
-            if (isNovelTranslationAborted) return;
-            if (currentNovelSessionId !== newSessionId || response?.sessionId !== newSessionId) {
-                log.warn('Content-Mobile', `忽略過期或不匹配的 BEGIN_NOVEL_SESSION ACK (當前: ${currentNovelSessionId}, 收到: ${response?.sessionId})`);
-                return;
-            }
-            if (response && response.ok) {
-                log.info('Content-Mobile', `Novel Session 已在背景註冊: ${newSessionId}`);
-                // 啟動首批拉取
-                sendNextNovelBatch();
-                // 啟動全網頁 UI 翻譯
-                translateUIElements();
-            } else {
-                log.error('Content-Mobile', 'Novel Session 註冊失敗:', response);
-            }
-        });
+        if (response && response.ok) {
+            log.info('Content-Mobile', `Novel Session 已在背景註冊: ${newSessionId}，準備提交 Durable Job...`);
+            
+            // 一次提交完整 Job 給背景 Durable Scheduler
+            chrome.runtime.sendMessage({
+                action: 'SUBMIT_NOVEL_JOB',
+                sessionId: newSessionId,
+                pageUrl: location.href,
+                kind: 'full',
+                batchSize: BATCH_SIZE,
+                items
+            }, (submitRes) => {
+                if (isNovelTranslationAborted || currentNovelSessionId !== newSessionId) return;
+                if (submitRes && submitRes.ok) {
+                    log.info('Content-Mobile', `Durable Novel Job 提交成功 (${items.length} 段落)，背景已接管執行`);
+                    // 啟動全網頁 UI 翻譯
+                    translateUIElements();
+                } else {
+                    log.error('Content-Mobile', 'Durable Novel Job 提交失敗:', submitRes);
+                }
+            });
+        } else {
+            log.error('Content-Mobile', 'Novel Session 註冊失敗:', response);
+        }
     });
   }
 
   /**
-   * 重試所有翻譯失敗的段落，利用同一個佇列機制控速
+   * 重試所有翻譯失敗的段落，透過 SUBMIT_NOVEL_JOB (kind: 'retry') 提交背景
    */
   function retryAllFailedNovels() {
       if (!currentNovelSessionId) {
@@ -742,41 +706,39 @@ export function initMobileMode() {
       log.info('Content-Mobile', `開始重譯所有失敗段落，共 ${failedIndices.length} 段 (Session: ${currentNovelSessionId})`);
       isNovelTranslationAborted = false;
       
-      // 將所有失敗的段落標記為翻譯中 ⏳
-      failedIndices.forEach(idx => {
-          const container = document.querySelector(`.mt-novel-trans[data-novel-idx="${idx}"]`);
-          if (container) {
-              container.dataset.status = 'retrying';
-              const textSpan = container.querySelector('span');
-              if (textSpan) textSpan.textContent = '⏳ 正在重譯段落...';
-              const actions = container.querySelector('.mt-novel-actions');
-              if (actions) actions.style.display = 'none';
+      const BATCH_SIZE = window.mt_currentNovelBatchSize || 50;
+      const items = failedIndices.map(idx => ({
+          idx,
+          text: getParagraphText(idx)
+      }));
+
+      // 提交 Retry Job 給背景 Durable Scheduler
+      chrome.runtime.sendMessage({
+          action: 'SUBMIT_NOVEL_JOB',
+          sessionId: currentNovelSessionId,
+          pageUrl: location.href,
+          kind: 'retry',
+          batchSize: BATCH_SIZE,
+          items
+      }, (submitRes) => {
+          if (isNovelTranslationAborted || !currentNovelSessionId) return;
+          if (submitRes && submitRes.ok) {
+              log.info('Content-Mobile', `Retry Job 提交成功 (${items.length} 段落)`);
+              // 提交成功後，將所有失敗段落 UI 標記為翻譯中 ⏳
+              failedIndices.forEach(idx => {
+                  const container = document.querySelector(`.mt-novel-trans[data-novel-idx="${idx}"]`);
+                  if (container) {
+                      container.dataset.status = 'retrying';
+                      const textSpan = container.querySelector('span');
+                      if (textSpan) textSpan.textContent = '⏳ 正在重譯段落...';
+                      const actions = container.querySelector('.mt-novel-actions');
+                      if (actions) actions.style.display = 'none';
+                  }
+              });
+          } else {
+              log.error('Content-Mobile', 'Retry Job 提交失敗:', submitRes);
           }
       });
-      
-      const BATCH_SIZE = window.mt_currentNovelBatchSize || 50;
-      novelBatchQueue = [];
-      const totalBatches = Math.ceil(failedIndices.length / BATCH_SIZE);
-      
-      for (let b = 0; b < totalBatches; b++) {
-          const start = b * BATCH_SIZE;
-          const end = Math.min(start + BATCH_SIZE, failedIndices.length);
-          const batchIndices = failedIndices.slice(start, end);
-          
-          const batchTexts = batchIndices.map(idx => getParagraphText(idx));
-          
-          novelBatchQueue.push({
-              sessionId: currentNovelSessionId,
-              batchIndex: b,
-              totalBatches,
-              startIdx: start,
-              texts: batchTexts,
-              retryIndices: batchIndices
-          });
-      }
-      
-      // 啟動重試拉取 (沿用原 Session，不發送 BEGIN_NOVEL_SESSION)
-      sendNextNovelBatch();
   }
 
   log.info('Content-Mobile', 'Mobile Overlay Drawer ready.');

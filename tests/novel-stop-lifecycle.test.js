@@ -231,12 +231,15 @@ describe('Novel Mode: STOP / Abort Lifecycle & Per-Tab Isolation Tests', () => {
         });
     });
 
-    describe('Test 13: 靜態程式碼防護：processNovelQueue 函式體內絕無 isStopping 依賴', () => {
-        it('讀取 src/background/index.js 確認 processNovelQueue 實作中未調用 isStopping', () => {
+    describe('Test 13: 靜態程式碼防護：processDurableNovelJobs / processNovelQueue 函式體內絕無 isStopping 依賴', () => {
+        it('讀取 src/background/index.js 確認小說處理器實作中未調用 isStopping', () => {
             const indexPath = path.resolve(__dirname, '../src/background/index.js');
             const code = fs.readFileSync(indexPath, 'utf-8');
 
-            const startIdx = code.indexOf('async function processNovelQueue()');
+            let startIdx = code.indexOf('async function processDurableNovelJobs()');
+            if (startIdx === -1) {
+                startIdx = code.indexOf('async function processNovelQueue()');
+            }
             const endIdx = code.indexOf('chrome.runtime.onMessage.addListener', startIdx);
             assert.equal(startIdx !== -1, true);
             assert.equal(endIdx !== -1, true);
