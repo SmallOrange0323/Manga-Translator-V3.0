@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
@@ -8,6 +8,7 @@ import {
     createNovelJobCheckpoint,
     getNovelJobCheckpoints,
     saveNovelJobCheckpoint,
+    submitNovelJobCheckpointAtomic,
     updateNovelJobCheckpoint,
     removeNovelJobCheckpoint,
     removeNovelJobCheckpointsForTab,
@@ -64,7 +65,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
     });
 
     // ─────────────────────────────────────────────────────────
-    // 一、 Checkpoint 結構與白名單驗證 (1 ~ 9)
+    // 一、 Checkpoint 結構與白名單驗證 (1 ~ 9 + K ~ P)
     // ─────────────────────────────────────────────────────────
     describe('1. Checkpoint 結構與資料淨化', () => {
         it('Test 1: Full job sanitizer 保留合法 whitelist 欄位', () => {
@@ -98,6 +99,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
                 version: 1,
                 sessionId: 'sess_123',
                 tabId: 10,
+                kind: 'full',
                 batchSize: 50,
                 apiKey: 'AIzaSySecretApiKey',
                 oauthToken: 'bearer_token_xxx',
@@ -136,6 +138,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
 
         it('Test 4: Full items 嚴格驗證 idx 連續 (0..N-1) 且有效', () => {
             const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
                 sessionId: 'sess_1',
                 tabId: 1,
                 kind: 'full',
@@ -152,6 +155,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
 
         it('Test 5: Full items 若缺少中間 index (如 0, 2) 則 reject', () => {
             const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
                 sessionId: 'sess_1',
                 tabId: 1,
                 kind: 'full',
@@ -166,6 +170,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
 
         it('Test 6: Full items 若出現重複 idx 則 reject', () => {
             const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
                 sessionId: 'sess_1',
                 tabId: 1,
                 kind: 'full',
@@ -180,6 +185,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
 
         it('Test 7: Retry items 支援非連續 idx (例如 7, 12)', () => {
             const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
                 sessionId: 'sess_1',
                 tabId: 1,
                 kind: 'retry',
@@ -196,6 +202,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
 
         it('Test 8: Retry items 若有重複 idx 則 reject', () => {
             const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
                 sessionId: 'sess_1',
                 tabId: 1,
                 kind: 'retry',
@@ -209,9 +216,108 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
         });
 
         it('Test 9: 無效的 batchSize (<= 0 或 non-integer) 則 reject', () => {
-            expect(sanitizeNovelJobCheckpoint({ sessionId: 's', tabId: 1, batchSize: 0, items: [{ idx: 0, text: 't' }] })).toBeNull();
-            expect(sanitizeNovelJobCheckpoint({ sessionId: 's', tabId: 1, batchSize: -5, items: [{ idx: 0, text: 't' }] })).toBeNull();
-            expect(sanitizeNovelJobCheckpoint({ sessionId: 's', tabId: 1, batchSize: 'abc', items: [{ idx: 0, text: 't' }] })).toBeNull();
+            expect(sanitizeNovelJobCheckpoint({ version: 1, sessionId: 's', tabId: 1, kind: 'full', batchSize: 0, items: [{ idx: 0, text: 't' }] })).toBeNull();
+            expect(sanitizeNovelJobCheckpoint({ version: 1, sessionId: 's', tabId: 1, kind: 'full', batchSize: -5, items: [{ idx: 0, text: 't' }] })).toBeNull();
+            expect(sanitizeNovelJobCheckpoint({ version: 1, sessionId: 's', tabId: 1, kind: 'full', batchSize: 'abc', items: [{ idx: 0, text: 't' }] })).toBeNull();
+        });
+
+        it('Test K: expected batch count = 2, translations length = 1 ➔ saved batch entry 被丟棄', () => {
+            const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
+                sessionId: 's',
+                tabId: 1,
+                kind: 'full',
+                batchSize: 2,
+                items: [{ idx: 0, text: 'A' }, { idx: 1, text: 'B' }],
+                batches: {
+                    "0": {
+                        translations: ['只有一段譯文'], // 預期 2 段
+                        committed: false
+                    }
+                }
+            });
+            expect(clean).not.toBeNull();
+            expect(clean.batches["0"]).toBeUndefined();
+        });
+
+        it('Test L: translations 包含 non-string ➔ saved batch entry 被丟棄，絕不轉為空字串', () => {
+            const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
+                sessionId: 's',
+                tabId: 1,
+                kind: 'full',
+                batchSize: 1,
+                items: [{ idx: 0, text: 'A' }],
+                batches: {
+                    "0": {
+                        translations: [null],
+                        committed: false
+                    }
+                }
+            });
+            expect(clean).not.toBeNull();
+            expect(clean.batches["0"]).toBeUndefined();
+        });
+
+        it('Test M: out-of-range batch key 負數或超過 totalBatches 被丟棄', () => {
+            const clean = sanitizeNovelJobCheckpoint({
+                version: 1,
+                sessionId: 's',
+                tabId: 1,
+                kind: 'full',
+                batchSize: 2,
+                items: [{ idx: 0, text: 'A' }],
+                batches: {
+                    "-1": { translations: ['A'] },
+                    "5": { translations: ['A'] },
+                    "abc": { translations: ['A'] }
+                }
+            });
+            expect(clean).not.toBeNull();
+            expect(Object.keys(clean.batches).length).toBe(0);
+        });
+
+        it('Test N: unknown kind (非 full/retry) ➔ entire job reject 回傳 null', () => {
+            expect(sanitizeNovelJobCheckpoint({
+                version: 1,
+                sessionId: 's',
+                tabId: 1,
+                kind: 'unknown_kind',
+                batchSize: 50,
+                items: [{ idx: 0, text: 'A' }]
+            })).toBeNull();
+        });
+
+        it('Test O: version !== 1 ➔ reject 回傳 null', () => {
+            expect(sanitizeNovelJobCheckpoint({
+                version: 2,
+                sessionId: 's',
+                tabId: 1,
+                kind: 'full',
+                batchSize: 50,
+                items: [{ idx: 0, text: 'A' }]
+            })).toBeNull();
+        });
+
+        it('Test P: malformed committed=true batch ➔ normalize 後仍視為未完成', () => {
+            const rawJob = {
+                version: 1,
+                sessionId: 's',
+                tabId: 1,
+                kind: 'full',
+                batchSize: 2,
+                items: [{ idx: 0, text: 'A' }, { idx: 1, text: 'B' }],
+                batches: {
+                    "0": {
+                        translations: ['只有一段'], // malformed
+                        committed: true
+                    }
+                }
+            };
+            const restored = normalizeRestoredNovelJob(rawJob);
+            expect(restored).not.toBeNull();
+            expect(restored.nextBatchIndex).toBe(0); // 批次 0 被丟棄，需重新翻譯
+            expect(restored.status).toBe('pending');
         });
     });
 
@@ -486,7 +592,7 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
     });
 
     // ─────────────────────────────────────────────────────────
-    // 五、 Session Lifecycle、STOP 與 Tab 關閉 (27 ~ 32)
+    // 五、 Session Lifecycle、STOP 與 Tab 關閉 (27 ~ 32 + A ~ D)
     // ─────────────────────────────────────────────────────────
     describe('5. Session Lifecycle、STOP 與 Tab 關閉', () => {
         it('Test 27: Stale Session Job ➔ selectNextRunnableNovelJob 自動略過', () => {
@@ -563,6 +669,40 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
             const activeTabs = new Set([1, 2, 3]); // 99 不在 activeTabs 內
             const next = selectNextRunnableNovelJob(jobsMap, registry, activeTabs);
             expect(next).toBeNull();
+        });
+
+        it('Test A: Fresh result 已 checkpoint 後使用者 STOP ➔ local commit 階段 guard 阻斷', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 's1');
+            // 模擬已 checkpoint 成功後收到 STOP
+            registry.cancel(1);
+
+            expect(registry.isCurrentSession(1, 's1')).toBe(false);
+        });
+
+        it('Test B: Replay committed=false 開始前使用者 STOP ➔ Replay guard 阻斷', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 's1');
+            registry.cancel(1);
+
+            expect(registry.isCurrentSession(1, 's1')).toBe(false);
+        });
+
+        it('Test C: AAA replay 期間分頁建立 BBB ➔ AAA 判定 stale，阻斷寫入', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 'AAA');
+            registry.begin(1, 'BBB'); // 切換至 BBB
+
+            expect(registry.isCurrentSession(1, 'AAA')).toBe(false);
+            expect(registry.isCurrentSession(1, 'BBB')).toBe(true);
+        });
+
+        it('Test D: Tab 關閉後 ➔ stale replay 阻斷 commit', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 's1');
+            registry.clear(1); // 關閉分頁
+
+            expect(registry.isCurrentSession(1, 's1')).toBe(false);
         });
     });
 
@@ -648,9 +788,96 @@ describe('Novel Mode: Background-owned Durable Job & Checkpoint Architecture', (
     });
 
     // ─────────────────────────────────────────────────────────
-    // 七、 前台 Content Script 架構靜態檢查 (38 ~ 44)
+    // 七、 原子化提交排他性 (Atomic Submit) (Q ~ V)
     // ─────────────────────────────────────────────────────────
-    describe('7. 前台 Content Script 架構靜態檢查', () => {
+    describe('7. 原子化提交排他性 (Atomic SUBMIT)', () => {
+        it('Test Q: Active Full Job 存在時，第二個 Full SUBMIT 被拒絕 (job-in-progress)', async () => {
+            const job1 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            job1.status = 'processing';
+            await saveNovelJobCheckpoint(job1);
+
+            const job2 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            const res = await submitNovelJobCheckpointAtomic(job2);
+            expect(res.ok).toBe(false);
+            expect(res.status).toBe('job-in-progress');
+        });
+
+        it('Test R: Active Full Job 存在時，Retry SUBMIT 被拒絕 (job-in-progress)', async () => {
+            const job1 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            job1.status = 'processing';
+            await saveNovelJobCheckpoint(job1);
+
+            const job2 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'retry', items: [{ idx: 0, text: 'A' }] });
+            const res = await submitNovelJobCheckpointAtomic(job2);
+            expect(res.ok).toBe(false);
+            expect(res.status).toBe('job-in-progress');
+        });
+
+        it('Test S: Completed Full Job 存在時，Retry SUBMIT 允許取代 checkpoint', async () => {
+            const job1 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            job1.status = 'completed';
+            await saveNovelJobCheckpoint(job1);
+
+            const retryJob = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'retry', items: [{ idx: 0, text: 'A' }] });
+            const res = await submitNovelJobCheckpointAtomic(retryJob);
+            expect(res.ok).toBe(true);
+            expect(res.job.kind).toBe('retry');
+
+            const all = await getNovelJobCheckpoints();
+            expect(all['s1'].kind).toBe('retry');
+        });
+
+        it('Test T: Completed Full Job 存在時，同一 Session 的第二個 Full SUBMIT 被拒絕 (job-already-completed)', async () => {
+            const job1 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            job1.status = 'completed';
+            await saveNovelJobCheckpoint(job1);
+
+            const fullJob = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            const res = await submitNovelJobCheckpointAtomic(fullJob);
+            expect(res.ok).toBe(false);
+            expect(res.status).toBe('job-already-completed');
+        });
+
+        it('Test U: 兩個 concurrent SUBMIT 同 Session ➔ 最多一個成功建立 active job', async () => {
+            const job1 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            const job2 = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+
+            const [res1, res2] = await Promise.all([
+                submitNovelJobCheckpointAtomic(job1),
+                submitNovelJobCheckpointAtomic(job2)
+            ]);
+
+            const successes = [res1, res2].filter(r => r.ok);
+            const failures = [res1, res2].filter(r => !r.ok);
+            expect(successes.length).toBe(1);
+            expect(failures.length).toBe(1);
+        });
+
+        it('Test V: STOP 發生在 submit save 期間 ➔ post-save guard 偵測 stale 並移除 checkpoint', async () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(1, 's1');
+
+            const job = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'full', items: [{ idx: 0, text: 'A' }] });
+            const saveRes = await submitNovelJobCheckpointAtomic(job);
+            expect(saveRes.ok).toBe(true);
+
+            // 模擬此時收到 STOP
+            registry.cancel(1);
+
+            // post-save guard 執行清理
+            if (!registry.isCurrentSession(1, 's1')) {
+                await removeNovelJobCheckpoint('s1');
+            }
+
+            const all = await getNovelJobCheckpoints();
+            expect(all['s1']).toBeUndefined();
+        });
+    });
+
+    // ─────────────────────────────────────────────────────────
+    // 八、 前台 Content Script 架構靜態檢查 (38 ~ 44)
+    // ─────────────────────────────────────────────────────────
+    describe('8. 前台 Content Script 架構靜態檢查', () => {
         it('Test 38: Desktop production source 不再有 novelBatchQueue 變數', () => {
             const code = fs.readFileSync(path.resolve(__dirname, '../src/content/desktop-main.js'), 'utf-8');
             expect(code.includes('let novelBatchQueue')).toBe(false);

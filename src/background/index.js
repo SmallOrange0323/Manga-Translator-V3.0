@@ -15,7 +15,7 @@ import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretr
 import { mapNovelTranslationResults } from './novel-result-mapping.js';
 import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellation.js';
 import { saveNovelSessionState, getNovelSessionStates, removeNovelSessionState, restoreNovelSessionRegistry } from './novel-session-state.js';
-import { createNovelJobCheckpoint, getNovelJobCheckpoints, saveNovelJobCheckpoint, updateNovelJobCheckpoint, removeNovelJobCheckpoint, removeNovelJobCheckpointsForTab, normalizeRestoredNovelJob, getNovelJobBatchItems, selectNextRunnableNovelJob } from './novel-job-checkpoint.js';
+import { createNovelJobCheckpoint, getNovelJobCheckpoints, saveNovelJobCheckpoint, submitNovelJobCheckpointAtomic, updateNovelJobCheckpoint, removeNovelJobCheckpoint, removeNovelJobCheckpointsForTab, normalizeRestoredNovelJob, getNovelJobBatchItems, selectNextRunnableNovelJob } from './novel-job-checkpoint.js';
 import { upsertNovelResultItems } from './novel-result-store.js';
 
 let capturedScreenshotForSelection = null;
@@ -162,7 +162,11 @@ state.init().then(async () => {
                 // 正規化與狀態修復 (inFlight 歸零，重算 nextBatchIndex)
                 const normalized = normalizeRestoredNovelJob(rawJob);
                 if (normalized) {
-                    await saveNovelJobCheckpoint(normalized);
+                    const saved = await saveNovelJobCheckpoint(normalized);
+                    if (!saved) {
+                        log.error('Background', `[Novel Startup] 保存正規化 Job ${sessId} 失敗，略過本 Job`);
+                        continue;
+                    }
                     if (normalized.status !== 'completed') {
                         runnableCount++;
                     }
@@ -171,7 +175,7 @@ state.init().then(async () => {
 
             if (runnableCount > 0) {
                 log.info('Background', `[Novel Startup] 偵測到 ${runnableCount} 個未完成的 Durable Novel Jobs，啟動調度器恢復...`);
-                processDurableNovelJobs();
+                requestDurableNovelJobProcessing();
             }
         } catch (jobErr) {
             log.error('Background', '[Novel Startup] 恢復 Durable Novel Jobs 失敗:', jobErr);
@@ -229,8 +233,20 @@ async function restorePretranslationCheckpoints() {
     }
 }
 
-// 同步本地鎖，保證全域單一小說 Gemini 批次執行
+// 同步本地鎖與排程喚醒旗標，保證全域單一小說 Gemini 批次執行並防止 lost-wakeup
 let _localNovelJobProcessingLock = false;
+let _novelJobSchedulerKickPending = false;
+
+/**
+ * 統一的小說 Durable Job 排程請求入口
+ */
+export function requestDurableNovelJobProcessing() {
+    if (_localNovelJobProcessingLock) {
+        _novelJobSchedulerKickPending = true;
+        return;
+    }
+    processDurableNovelJobs().catch(err => log.error('Background', 'Durable Novel Job 排程異常:', err));
+}
 
 /**
  * Background-owned Durable Novel Job 排程器
@@ -241,6 +257,8 @@ let _localNovelJobProcessingLock = false;
  * 4. Post-response Durability Barrier (API 後先持久化 mapped translations)
  * 5. Replay Local Commit (SW 重啟若已有 response checkpoint 則直接 commit，不重打 Gemini)
  * 6. Idempotent Upsert (以 sessionId + idx 為 key 寫入 novelResults)
+ * 7. 全鏈路 Session Guards (Commit 階段防止 stale 寫入與被 STOP 刪除之 Job 復活)
+ * 8. Final Commit Fail-Closed (Checkpoint 推進失敗立即中斷調度，防止 tight loop)
  */
 async function processDurableNovelJobs() {
     if (isIncognitoProcess) {
@@ -282,10 +300,23 @@ async function processDurableNovelJobs() {
 
             // ── 情況 A：Replay Local Commit (Gemini 譯文已成功保存，但之前 SW crash 尚未 commit) ──
             if (existingBatch && existingBatch.committed === false && Array.isArray(existingBatch.translations)) {
+                // Replay Guard 1: 開始前檢查
+                if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                    log.info('Background', `[Durable Job Replay] Session ${job.sessionId} 已過期或中止，清理 Checkpoint 並跳過`);
+                    await removeNovelJobCheckpoint(job.sessionId);
+                    continue;
+                }
+
                 log.info('Background', `[Durable Job Replay] 偵測到 Session ${job.sessionId} Batch ${bIdx + 1}/${totalBatches} 已有保存之譯文，執行 Local Commit Replay (跳過 Gemini API)`);
 
                 const batchItems = getNovelJobBatchItems(job, bIdx);
                 
+                // Replay Guard 2: Upsert 前檢查
+                if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                    await removeNovelJobCheckpoint(job.sessionId);
+                    continue;
+                }
+
                 // 1. Idempotent Upsert novelResults (若非整批失敗)
                 if (!existingBatch.isFailed) {
                     const incomingItems = batchItems.map((item, offset) => ({
@@ -296,6 +327,13 @@ async function processDurableNovelJobs() {
                         translation: existingBatch.translations[offset] || '（翻譯失敗）'
                     }));
                     await state.update('novelResults', (current = []) => upsertNovelResultItems(current, incomingItems));
+                }
+
+                // Replay Guard 3: Upsert 後 / Inject 前檢查
+                if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                    log.info('Background', `[Durable Job Replay] Session ${job.sessionId} 在 upsert 後中止，停止注入`);
+                    await removeNovelJobCheckpoint(job.sessionId);
+                    continue;
                 }
 
                 // 2. Best-effort 前台注入
@@ -312,10 +350,17 @@ async function processDurableNovelJobs() {
                     injectedSuccess = true;
                 } catch (_) {}
 
-                // 3. Commit Checkpoint 狀態更新
+                // Replay Guard 4: Inject 後 / Final Commit 前檢查
+                if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                    log.info('Background', `[Durable Job Replay] Session ${job.sessionId} 在 inject 後中止，停止更新 Checkpoint`);
+                    await removeNovelJobCheckpoint(job.sessionId);
+                    continue;
+                }
+
+                // 3. Commit Checkpoint 狀態更新 (必須檢查回傳值 fail closed)
                 const nextIdx = bIdx + 1;
                 const isAllDone = nextIdx >= totalBatches;
-                await updateNovelJobCheckpoint(job.sessionId, j => {
+                const committedJob = await updateNovelJobCheckpoint(job.sessionId, j => {
                     const nextBatches = { ...(j.batches || {}) };
                     nextBatches[String(bIdx)] = {
                         ...(nextBatches[String(bIdx)] || existingBatch),
@@ -330,6 +375,14 @@ async function processDurableNovelJobs() {
                         status: isAllDone ? 'completed' : 'processing'
                     };
                 });
+
+                if (!committedJob) {
+                    if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                        continue;
+                    }
+                    log.error('Background', `[Durable Job Replay] 更新 final committed checkpoint 失敗，中斷本輪調度 (Session: ${job.sessionId})`);
+                    break;
+                }
 
                 continue; // 進入下一輪調度
             }
@@ -497,7 +550,14 @@ async function processDurableNovelJobs() {
                 break;
             }
 
-            // Local Commit 執行 (Upsert novelResults ➔ Best-effort Inject ➔ Commit Checkpoint)
+            // Fresh Guard 1: Post-response checkpoint 後檢查
+            if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                log.warn('Background', `[Durable Job] Session ${job.sessionId} 在 checkpoint 後已中止，停止 local commit`);
+                await removeNovelJobCheckpoint(job.sessionId);
+                continue;
+            }
+
+            // Local Commit 執行 (Upsert novelResults)
             if (!mappedResult.isFailed) {
                 const incomingItems = batchItems.map((item, offset) => ({
                     sessionId: job.sessionId,
@@ -507,6 +567,13 @@ async function processDurableNovelJobs() {
                     translation: mappedResult.translations[offset] || '（翻譯失敗）'
                 }));
                 await state.update('novelResults', (current = []) => upsertNovelResultItems(current, incomingItems));
+            }
+
+            // Fresh Guard 2: novelResults upsert 後 / inject 前檢查
+            if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                log.warn('Background', `[Durable Job] Session ${job.sessionId} 在 upsert 後已中止，停止注入`);
+                await removeNovelJobCheckpoint(job.sessionId);
+                continue;
             }
 
             let injectedSuccess = false;
@@ -522,10 +589,17 @@ async function processDurableNovelJobs() {
                 injectedSuccess = true;
             } catch (_) {}
 
+            // Fresh Guard 3: inject 後 / final commit 前檢查
+            if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                log.warn('Background', `[Durable Job] Session ${job.sessionId} 在 inject 後已中止，停止更新 Checkpoint`);
+                await removeNovelJobCheckpoint(job.sessionId);
+                continue;
+            }
+
             const nextIdx = bIdx + 1;
             const isAllDone = nextIdx >= totalBatches;
 
-            await updateNovelJobCheckpoint(job.sessionId, j => {
+            const finalCommitJob = await updateNovelJobCheckpoint(job.sessionId, j => {
                 const nextBatches = { ...(j.batches || {}) };
                 if (nextBatches[String(bIdx)]) {
                     nextBatches[String(bIdx)].committed = true;
@@ -539,6 +613,14 @@ async function processDurableNovelJobs() {
                     status: isAllDone ? 'completed' : 'processing'
                 };
             });
+
+            if (!finalCommitJob) {
+                if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                    continue;
+                }
+                log.error('Background', `[Durable Job] 更新 final committed checkpoint 失敗，中斷本輪調度 (Session: ${job.sessionId})`);
+                break;
+            }
 
             // 異步術語萃取 (非阻塞)
             if (!mappedResult.isFailed && !isIncognitoTask && mangaKey && novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
@@ -576,6 +658,12 @@ async function processDurableNovelJobs() {
         _localNovelJobProcessingLock = false;
         await state.set('isProcessingNovel', false);
         await state.set('novelProgress', null);
+        if (_novelJobSchedulerKickPending) {
+            _novelJobSchedulerKickPending = false;
+            queueMicrotask(() => {
+                requestDurableNovelJobProcessing();
+            });
+        }
     }
 }
 
@@ -678,6 +766,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return false;
       }
 
+      // 提交前 Session Guard
       if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
           log.info('Background', `[Novel Job] 拒絕非當前 Session 的 SUBMIT_NOVEL_JOB (tabId: ${tabId}, sessionId: ${sessionId})`);
           sendResponse({ ok: false, status: 'stale-session', error: 'Stale session' });
@@ -686,16 +775,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       (async () => {
           try {
-              // 檢查同一 Session 是否已有進行中的 Job
-              const existingJobs = await getNovelJobCheckpoints();
-              const existing = existingJobs[sessionId];
-              if (existing && existing.status !== 'completed' && kind === 'retry') {
-                  log.warn('Background', `[Novel Job] Session ${sessionId} 既有 Job 仍在執行中，拒絕並發 retry job`);
-                  sendResponse({ ok: false, status: 'job-in-progress', error: 'Previous job is still in progress' });
-                  return;
-              }
-
-              // 建立並儲存 Checkpoint
               const newJob = createNovelJobCheckpoint({
                   sessionId,
                   tabId,
@@ -711,17 +790,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   return;
               }
 
-              const saved = await saveNovelJobCheckpoint(newJob);
-              if (!saved) {
-                  log.error('Background', '[Novel Job] 持久化 Novel Job Checkpoint 失敗 (storage.session 不可用或寫入失敗)');
-                  sendResponse({ ok: false, error: 'Failed to persist novel job checkpoint' });
+              // 提交前再次驗證 Session
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  sendResponse({ ok: false, status: 'stale-session', error: 'Stale session' });
+                  return;
+              }
+
+              // 原子化提交 (包含 active/completed 狀態排他檢查)
+              const submitResult = await submitNovelJobCheckpointAtomic(newJob);
+              if (!submitResult.ok) {
+                  sendResponse(submitResult);
+                  return;
+              }
+
+              // 提交後 Guard：檢查在持久化排隊期間是否已被 STOP / 切換
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  log.warn('Background', `[Novel Job] Session ${sessionId} 在提交期間已中止，立即清理 Checkpoint`);
+                  await removeNovelJobCheckpoint(sessionId);
+                  sendResponse({ ok: false, status: 'stale-session', error: 'Stale session' });
                   return;
               }
 
               log.info('Background', `[Novel Job] 成功建立 Durable Job (kind: ${newJob.kind}, items: ${items.length}, batches: ${Math.ceil(items.length / newJob.batchSize)})`);
 
-              // 啟動 Durable Job 排程器
-              processDurableNovelJobs();
+              // 透過統一入口啟動 Durable Job 排程器
+              requestDurableNovelJobProcessing();
 
               sendResponse({ ok: true, sessionId, tabId, totalItems: items.length });
           } catch (err) {

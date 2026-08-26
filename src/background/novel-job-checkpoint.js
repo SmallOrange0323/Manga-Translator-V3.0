@@ -6,7 +6,9 @@
  * 1. 僅允許使用 chrome.storage.session，嚴禁 fallback 到 chrome.storage.local。
  * 2. 所有 whole-map 寫入均透過 module-level Promise mutation chain 序列化。
  * 3. 嚴格白名單過濾，絕不保存 API Key、OAuth token、Prompt、Glossary 或原始請求體。
- * 4. 提供 normalizeRestoredNovelJob 實現崩潰恢復後的狀態自修復。
+ * 4. 嚴格驗證 version (=== 1)、kind ('full' | 'retry')、batch key (0..totalBatches-1) 與 translations 長度/型別。
+ * 5. 提供 submitNovelJobCheckpointAtomic 實現同 Session 并發檢查與原子化提交。
+ * 6. 提供 normalizeRestoredNovelJob 實現崩潰恢復後的狀態自修復。
  */
 
 import { log } from '../utils/logger.js';
@@ -42,7 +44,10 @@ export function getStorageSession() {
 export function sanitizeNovelJobCheckpoint(raw) {
     if (!raw || typeof raw !== 'object') return null;
 
-    const version = Number(raw.version) || 1;
+    // 嚴格限定 version 為 1
+    if (raw.version !== 1) return null;
+    const version = 1;
+
     const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId.trim() : '';
     if (!sessionId) return null;
 
@@ -50,7 +55,10 @@ export function sanitizeNovelJobCheckpoint(raw) {
     if (!Number.isInteger(tabId) || tabId <= 0) return null;
 
     const pageUrl = typeof raw.pageUrl === 'string' ? raw.pageUrl : '';
-    const kind = (raw.kind === 'retry') ? 'retry' : 'full';
+    
+    // 嚴格限定 kind 為 'full' 或 'retry'
+    if (raw.kind !== 'full' && raw.kind !== 'retry') return null;
+    const kind = raw.kind;
     
     const batchSize = Number(raw.batchSize);
     if (!Number.isInteger(batchSize) || batchSize <= 0) return null;
@@ -83,23 +91,49 @@ export function sanitizeNovelJobCheckpoint(raw) {
         });
     }
 
+    const totalBatches = Math.ceil(cleanItems.length / batchSize);
+
     const nextBatchIndex = Number.isInteger(raw.nextBatchIndex) && raw.nextBatchIndex >= 0 ? raw.nextBatchIndex : 0;
     const inFlightBatchIndex = (Number.isInteger(raw.inFlightBatchIndex) && raw.inFlightBatchIndex >= 0) 
         ? raw.inFlightBatchIndex 
         : null;
 
-    // 淨化 batches 物件
+    // 嚴格淨化 batches 物件
     const cleanBatches = {};
     if (raw.batches && typeof raw.batches === 'object') {
         for (const [bKey, bVal] of Object.entries(raw.batches)) {
             if (!bVal || typeof bVal !== 'object') continue;
-            if (!Array.isArray(bVal.translations)) continue;
 
-            // 確保 translations 陣列內皆為 string
-            const cleanTranslations = bVal.translations.map(t => (typeof t === 'string' ? t : ''));
+            // 驗證 batch key 必須是合法整數且在 0..totalBatches-1 範圍內
+            const bIndex = Number(bKey);
+            if (!Number.isInteger(bIndex) || bIndex < 0 || bIndex >= totalBatches || String(bIndex) !== bKey) {
+                continue; // 丟棄非法 key
+            }
+
+            // 計算該批次預期的項目數量
+            const start = bIndex * batchSize;
+            const end = Math.min(start + batchSize, cleanItems.length);
+            const expectedCount = end - start;
+
+            // 驗證 translations 陣列長度與內部元素皆為 string
+            if (!Array.isArray(bVal.translations) || bVal.translations.length !== expectedCount) {
+                continue; // 長度不符，視為 malformed 丟棄
+            }
+
+            let allStrings = true;
+            for (let tIdx = 0; tIdx < bVal.translations.length; tIdx++) {
+                if (typeof bVal.translations[tIdx] !== 'string') {
+                    allStrings = false;
+                    break;
+                }
+            }
+
+            if (!allStrings) {
+                continue; // 包含非字串，丟棄
+            }
 
             cleanBatches[bKey] = {
-                translations: cleanTranslations,
+                translations: [...bVal.translations],
                 isFailed: Boolean(bVal.isFailed),
                 committed: Boolean(bVal.committed),
                 injected: Boolean(bVal.injected),
@@ -214,6 +248,55 @@ export function saveNovelJobCheckpoint(job) {
         } catch (e) {
             log.error('NovelJobCheckpoint', `保存 Job ${clean.sessionId} 失敗:`, e);
             return false;
+        }
+    });
+}
+
+/**
+ * 原子化提交新的 Job Checkpoint (檢查同 Session active/completed 狀態並決定接受/拒絕/取代)
+ * @param {object} newJob 
+ * @returns {Promise<{ok: boolean, job?: object, status?: string, error?: string}>}
+ */
+export function submitNovelJobCheckpointAtomic(newJob) {
+    const clean = sanitizeNovelJobCheckpoint({ ...newJob, updatedAt: Date.now() });
+    if (!clean) return Promise.resolve({ ok: false, error: 'Failed to sanitize job items or parameters' });
+
+    return enqueueJobMutation(async () => {
+        const storage = getStorageSession();
+        if (!storage) return { ok: false, error: 'storage.session unavailable' };
+
+        try {
+            const rawMap = await new Promise((resolve) => {
+                storage.get(NOVEL_JOBS_KEY, (res) => resolve(res?.[NOVEL_JOBS_KEY] || {}));
+            });
+            const currentMap = (rawMap && typeof rawMap === 'object') ? { ...rawMap } : {};
+            const existing = currentMap[clean.sessionId];
+
+            if (existing) {
+                // 若既有 Job 仍在執行中 (pending / processing)，拒絕任何新提交 (full 或 retry)
+                if (existing.status !== 'completed') {
+                    return { ok: false, status: 'job-in-progress', error: 'Previous job is still in progress' };
+                }
+                // 若既有 Job 已 completed，且新 Job 是 full ➔ 拒絕 (新完整翻譯應開啟新 Session)
+                if (clean.kind === 'full') {
+                    return { ok: false, status: 'job-already-completed', error: 'Full job already completed for this session' };
+                }
+                // 若既有 Job 已 completed，且新 Job 是 retry ➔ 允許取代舊的 completed checkpoint
+            }
+
+            currentMap[clean.sessionId] = clean;
+
+            await new Promise((resolve, reject) => {
+                storage.set({ [NOVEL_JOBS_KEY]: currentMap }, () => {
+                    if (chrome.runtime?.lastError) reject(chrome.runtime.lastError);
+                    else resolve();
+                });
+            });
+
+            return { ok: true, job: clean };
+        } catch (e) {
+            log.error('NovelJobCheckpoint', `原子化提交 Job ${clean.sessionId} 失敗:`, e);
+            return { ok: false, error: e.message };
         }
     });
 }
