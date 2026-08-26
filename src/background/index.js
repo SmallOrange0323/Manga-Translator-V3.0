@@ -480,16 +480,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
           try {
               log.info('Background', `[Novel Session] 分頁 ${tabId} 建立/切換新 Session: ${sessionId}`);
+              
               // 1. 記憶體 Registry 更新
               novelCancellationRegistry.begin(tabId, sessionId);
+              
               // 2. storage.session 持久化 Session Identity
-              await saveNovelSessionState({ tabId, sessionId, pageUrl: pageUrl || '', cancelled: false });
+              const persisted = await saveNovelSessionState({ 
+                  tabId, 
+                  sessionId, 
+                  pageUrl: pageUrl || '', 
+                  cancelled: false 
+              });
+
+              if (!persisted) {
+                  log.error('Background', `[Novel Session] 分頁 ${tabId} Session 持久化失敗，清除記憶體註冊`);
+                  novelCancellationRegistry.clear(tabId);
+                  sendResponse({ ok: false, error: 'Failed to persist novel session identity (storage.session unavailable or save failed)' });
+                  return;
+              }
+
               // 3. 原子化修剪舊佇列任務 (防 lost update)
               await state.update('novelQueue', (currentQueue = []) => {
                   const safeQueue = Array.isArray(currentQueue) ? currentQueue : Object.values(currentQueue || {});
                   return pruneQueueForTab(safeQueue, tabId);
               });
-              // 4. 全部持久化與狀態過渡完成後才發送 ACK
+
+              // 4. Session Transition Guard：檢查在持久化與修剪期間，是否已被更新的 BEGIN 超越 (superseded)
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  log.warn('Background', `[Novel Session] 分頁 ${tabId} 的 Session ${sessionId} 已被更新的 Session 超越，拒絕發送成功 ACK`);
+                  sendResponse({ ok: false, status: 'superseded-session', error: 'Session was superseded' });
+                  return;
+              }
+
+              // 5. 全部持久化、修剪與 Session 驗證確認無誤後才發送 ACK
               sendResponse({ ok: true, sessionId, tabId });
           } catch (err) {
               log.error('Background', 'BEGIN_NOVEL_SESSION 處理失敗:', err);
@@ -1289,22 +1312,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           (async () => {
               try {
                   log.info('Background', `[Novel] 中止分頁 ${targetTabId} 的小説翻譯任務`);
+                  // 1. 記憶體 registry 優先 cancel (保證 STOP 立即生效)
                   novelCancellationRegistry.cancel(targetTabId);
+                  
+                  // 2. 嘗試持久化 cancelled 狀態
                   const activeSessionId = novelCancellationRegistry.getActiveSessionId(targetTabId);
+                  let persistenceWarning = false;
                   if (activeSessionId) {
-                      await saveNovelSessionState({ tabId: targetTabId, sessionId: activeSessionId, cancelled: true });
+                      const persisted = await saveNovelSessionState({ 
+                          tabId: targetTabId, 
+                          sessionId: activeSessionId, 
+                          cancelled: true 
+                      });
+                      if (!persisted) {
+                          persistenceWarning = true;
+                      }
                   }
-                  // 修剪持久化佇列，移除該分頁尚未執行的任務
+
+                  // 3. 修剪持久化佇列，移除該分頁尚未執行的任務
                   await state.update('novelQueue', (currentQueue = []) => {
                       const safeQueue = Array.isArray(currentQueue) ? currentQueue : Object.values(currentQueue || {});
                       return pruneQueueForTab(safeQueue, targetTabId);
                   });
-                  // 對此分頁的 content script 發送中止指令
+
+                  // 4. 對此分頁的 content script 發送中止指令
                   chrome.tabs.sendMessage(targetTabId, { action: 'abortNovelTranslation' }).catch(() => {});
-                  sendResponse({ ok: true });
+                  sendResponse({ ok: true, persistenceWarning });
               } catch (err) {
                   log.error('Background', 'abortNovelTranslation 處理失敗:', err);
-                  sendResponse({ ok: false, error: err.message });
+                  // 即使發生錯誤，STOP 記憶體中斷仍維持成立
+                  sendResponse({ ok: true, error: err.message });
               }
           })();
           return true; // 保持非同步通道，等待持久化完成才 ACK

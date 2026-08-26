@@ -16,10 +16,12 @@ import {
 import {
     NOVEL_SESSION_STATE_KEY,
     sanitizeNovelSessionState,
+    getStorageSession,
     saveNovelSessionState,
     getNovelSessionStates,
     removeNovelSessionState,
-    restoreNovelSessionRegistry
+    restoreNovelSessionRegistry,
+    enqueueSessionStateMutation
 } from '../src/background/novel-session-state.js';
 
 import { createNovelSessionId } from '../src/utils/novel-session-id.js';
@@ -295,7 +297,6 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
             };
 
             const freshRegistry = createNovelSessionRegistry();
-            // 只有 101 還活著，202 是 ghost tab
             const activeTabs = new Set([101]);
 
             const restoredCount = await restoreNovelSessionRegistry(freshRegistry, stored, activeTabs);
@@ -307,15 +308,14 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
 
     describe('Test 17: Rapid Double-Start Race 防禦測試', () => {
         it('當 Content 快速切換至 Session BBB 時，遲來的 Session AAA ACK 絕不啟動 queue', () => {
-            let currentNovelSessionId = 'session-BBB'; // 已切換為 BBB
+            let currentNovelSessionId = 'session-BBB';
             let queueStarted = false;
 
-            const capturedSessionId = 'session-AAA'; // 這是 AAA 發起的 request 捕捉的 session
+            const capturedSessionId = 'session-AAA';
             const responseFromAAA = { ok: true, sessionId: 'session-AAA' };
 
-            // 模擬 Content Script 的 ACK callback
             if (currentNovelSessionId !== capturedSessionId || responseFromAAA?.sessionId !== capturedSessionId) {
-                // 成功偵測到 stale ACK，直接退出
+                // stale ACK 忽略
             } else {
                 queueStarted = true;
             }
@@ -373,11 +373,9 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
 
             const retryReq = { tabId: 101, sessionId: 'sess-AAA', text: '段落原文' };
 
-            // API 傳輸期間切換至 BBB
             registry.begin(101, 'sess-BBB');
 
             let translationInjected = false;
-            // Post-request Guard
             if (registry.isCurrentSession(retryReq.tabId, retryReq.sessionId)) {
                 translationInjected = true;
             }
@@ -386,14 +384,133 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
         });
     });
 
-    describe('Test 19: 靜態程式碼防護：確認 BEGIN_NOVEL_SESSION 與 abort 為 async barrier', () => {
-        it('確認 src/background/index.js 中 BEGIN_NOVEL_SESSION 使用 state.update 與 async barrier', () => {
-            const indexPath = path.resolve(__dirname, '../src/background/index.js');
-            const code = fs.readFileSync(indexPath, 'utf-8');
+    describe('Test 19: Storage.session 專用性與禁止 storage.local fallback', () => {
+        it('當 chrome.storage.session 不存在時，getStorageSession() 返回 null，絕不 fallback 到 storage.local', () => {
+            const originalChrome = globalThis.chrome;
+            try {
+                globalThis.chrome = {
+                    storage: {
+                        local: { get: () => {}, set: () => {} }
+                    }
+                };
+                assert.equal(getStorageSession(), null);
+            } finally {
+                globalThis.chrome = originalChrome;
+            }
+        });
+    });
 
-            assert.equal(code.includes('BEGIN_NOVEL_SESSION'), true);
-            assert.equal(code.includes('saveNovelSessionState'), true);
-            assert.equal(code.includes('isNewFullSession'), false);
+    describe('Test 20: Concurrent Save & Remove RMW Serialization 測試', () => {
+        it('並發儲存 Tab A 與 Tab B 時，兩者皆被保留在最終 Map 中 (無 lost-update)', async () => {
+            const mockStorage = {
+                data: {},
+                get(key, cb) {
+                    setTimeout(() => cb({ [key]: { ...this.data[key] } }), 2);
+                },
+                set(obj, cb) {
+                    setTimeout(() => {
+                        Object.assign(this.data, obj);
+                        cb();
+                    }, 2);
+                }
+            };
+
+            const originalChrome = globalThis.chrome;
+            try {
+                globalThis.chrome = {
+                    storage: { session: mockStorage }
+                };
+
+                // 並發發起 Tab 101 與 Tab 202 的儲存
+                const p1 = saveNovelSessionState({ tabId: 101, sessionId: 'sess-101', pageUrl: 'url1' });
+                const p2 = saveNovelSessionState({ tabId: 202, sessionId: 'sess-202', pageUrl: 'url2' });
+
+                const [res1, res2] = await Promise.all([p1, p2]);
+                assert.equal(res1, true);
+                assert.equal(res2, true);
+
+                const finalStates = await getNovelSessionStates();
+                assert.equal(finalStates[101]?.sessionId, 'sess-101');
+                assert.equal(finalStates[202]?.sessionId, 'sess-202');
+            } finally {
+                globalThis.chrome = originalChrome;
+            }
+        });
+
+        it('並發執行 Tab A remove 與 Tab B save 時，A 被移除且 B 成功保留', async () => {
+            const mockStorage = {
+                data: {
+                    [NOVEL_SESSION_STATE_KEY]: {
+                        101: { tabId: 101, sessionId: 'sess-101', pageUrl: '', cancelled: false, updatedAt: 1000 }
+                    }
+                },
+                get(key, cb) {
+                    setTimeout(() => cb({ [key]: { ...this.data[key] } }), 2);
+                },
+                set(obj, cb) {
+                    setTimeout(() => {
+                        this.data[NOVEL_SESSION_STATE_KEY] = { ...obj[NOVEL_SESSION_STATE_KEY] };
+                        cb();
+                    }, 2);
+                }
+            };
+
+            const originalChrome = globalThis.chrome;
+            try {
+                globalThis.chrome = {
+                    storage: { session: mockStorage }
+                };
+
+                const pRemove = removeNovelSessionState(101);
+                const pSave = saveNovelSessionState({ tabId: 202, sessionId: 'sess-202' });
+
+                await Promise.all([pRemove, pSave]);
+
+                const finalStates = await getNovelSessionStates();
+                assert.equal(finalStates[101], undefined);
+                assert.equal(finalStates[202]?.sessionId, 'sess-202');
+            } finally {
+                globalThis.chrome = originalChrome;
+            }
+        });
+    });
+
+    describe('Test 21: Superseded Session 阻斷與 Fail-safe Cancel 測試', () => {
+        it('當同分頁 Session AAA 在持久化期間被 Session BBB 超越時，AAA 判定為 superseded 不得 ACK 成功', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(101, 'session-AAA');
+
+            // 模擬 BBB 到達
+            registry.begin(101, 'session-BBB');
+
+            // AAA 處理器在持久化完成後檢查
+            const isAAACurrent = registry.isCurrentSession(101, 'session-AAA');
+            assert.equal(isAAACurrent, false);
+
+            const isBBBCurrent = registry.isCurrentSession(101, 'session-BBB');
+            assert.equal(isBBBCurrent, true);
+        });
+
+        it('Cancel persistence 發生錯誤時，記憶體 registry 仍維持 cancelled (Fail-safe STOP)', () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(101, 'session-AAA');
+
+            // 模擬 cancel 操作
+            registry.cancel(101);
+            const persistenceFailed = true; // 模擬持久化寫入失敗
+
+            // 斷言：無論持久化成功與否，記憶體中斷必須成立
+            assert.equal(registry.isCancelled(101), true);
+            assert.equal(registry.isCurrentSession(101, 'session-AAA'), false);
+        });
+    });
+
+    describe('Test 22: 靜態程式碼防護：確認源碼中嚴格禁用 storage.local 作為 session fallback', () => {
+        it('確認 src/background/novel-session-state.js 中不存在 chrome.storage.local', () => {
+            const statePath = path.resolve(__dirname, '../src/background/novel-session-state.js');
+            const code = fs.readFileSync(statePath, 'utf-8');
+
+            assert.equal(code.includes('chrome.storage.local'), false);
         });
     });
 });

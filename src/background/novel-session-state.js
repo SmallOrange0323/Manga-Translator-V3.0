@@ -5,12 +5,25 @@
  * 核心原則：
  * 1. 僅保存極小的 Session Identity 白名單欄位 (tabId, sessionId, pageUrl, cancelled, updatedAt)。
  * 2. 嚴格禁止持久化小說原文、譯文、結果陣列、API Key、OAuth token、Prompt 或詞庫等任何敏感/大型資料。
- * 3. 支援 SW 重啟時從 storage.session 恢復 registry，並主動清理不存在的 Ghost Tab。
+ * 3. 嚴格限定使用 session storage，絕不 fallback 到持久化 local 儲存。
+ * 4. 所有 read-modify-write 均透過 module-level mutation chain 序列化，防止並發覆蓋 (Lost Update)。
+ * 5. 支援 SW 重啟時從 storage.session 恢復 registry，並主動清理不存在的 Ghost Tab。
  */
 
 import { log } from '../utils/logger.js';
 
 export const NOVEL_SESSION_STATE_KEY = 'mt_novel_session_state_v1';
+
+/**
+ * 模組層級的 Mutation Promise Chain，保證同一 SW 實例內所有 Session State 讀改寫序列化
+ */
+let sessionStateMutationChain = Promise.resolve();
+
+export function enqueueSessionStateMutation(operation) {
+    const run = sessionStateMutationChain.then(operation, operation);
+    sessionStateMutationChain = run.catch(() => {});
+    return run;
+}
 
 /**
  * 嚴格白名單淨化單一 Session State 記錄
@@ -42,21 +55,17 @@ export function sanitizeNovelSessionState(raw) {
 }
 
 /**
- * 安全存取 storage.session
+ * 安全存取 storage.session (嚴格限定 session storage)
  */
-function getStorageSession() {
+export function getStorageSession() {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) {
         return chrome.storage.session;
-    }
-    // Fallback 到 local 若環境不支援 session storage
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        return chrome.storage.local;
     }
     return null;
 }
 
 /**
- * 讀取所有持久化的 Novel Session States
+ * 讀取所有持久化的 Novel Session States (純讀取，不加鎖)
  * @returns {Promise<Object.<number, object>>}
  */
 export async function getNovelSessionStates() {
@@ -85,65 +94,83 @@ export async function getNovelSessionStates() {
 }
 
 /**
- * 保存或更新特定分頁的 Session Identity
+ * 保存或更新特定分頁的 Session Identity (透過 mutation queue 序列化)
  * @param {object} params 
  * @param {number|string} params.tabId
  * @param {string} params.sessionId
  * @param {string} [params.pageUrl]
  * @param {boolean} [params.cancelled]
+ * @param {string|null} [params.expectedCurrentSessionId]
  * @returns {Promise<boolean>}
  */
-export async function saveNovelSessionState({ tabId, sessionId, pageUrl = '', cancelled = false }) {
+export function saveNovelSessionState({ tabId, sessionId, pageUrl = '', cancelled = false, expectedCurrentSessionId = null }) {
     const clean = sanitizeNovelSessionState({ tabId, sessionId, pageUrl, cancelled, updatedAt: Date.now() });
-    if (!clean) return false;
+    if (!clean) return Promise.resolve(false);
 
-    const storage = getStorageSession();
-    if (!storage) return false;
+    return enqueueSessionStateMutation(async () => {
+        const storage = getStorageSession();
+        if (!storage) return false;
 
-    try {
-        const currentMap = await getNovelSessionStates();
-        currentMap[clean.tabId] = clean;
-        await new Promise((resolve, reject) => {
-            storage.set({ [NOVEL_SESSION_STATE_KEY]: currentMap }, () => {
-                if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-                else resolve();
+        try {
+            const rawMap = await new Promise((resolve) => {
+                storage.get(NOVEL_SESSION_STATE_KEY, (res) => resolve(res?.[NOVEL_SESSION_STATE_KEY] || {}));
             });
-        });
-        return true;
-    } catch (e) {
-        log.error('NovelSessionState', `保存分頁 ${tabId} 的 session state 失敗:`, e);
-        return false;
-    }
-}
+            const currentMap = (rawMap && typeof rawMap === 'object') ? { ...rawMap } : {};
 
-/**
- * 移除特定分頁的 Session Identity
- * @param {number|string} tabId 
- * @returns {Promise<boolean>}
- */
-export async function removeNovelSessionState(tabId) {
-    const numericTabId = Number(tabId);
-    if (!Number.isInteger(numericTabId) || numericTabId <= 0) return false;
+            // 舊 Session 覆蓋防禦：若 storage 中該 Tab 已被更新的 Session 覆蓋，且與 expected 不一致則跳過
+            const existing = currentMap[clean.tabId];
+            if (existing && existing.sessionId !== clean.sessionId && expectedCurrentSessionId && existing.sessionId === expectedCurrentSessionId) {
+                return true;
+            }
 
-    const storage = getStorageSession();
-    if (!storage) return false;
-
-    try {
-        const currentMap = await getNovelSessionStates();
-        if (currentMap[numericTabId]) {
-            delete currentMap[numericTabId];
+            currentMap[clean.tabId] = clean;
             await new Promise((resolve, reject) => {
                 storage.set({ [NOVEL_SESSION_STATE_KEY]: currentMap }, () => {
-                    if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+                    if (chrome.runtime?.lastError) reject(chrome.runtime.lastError);
                     else resolve();
                 });
             });
+            return true;
+        } catch (e) {
+            log.error('NovelSessionState', `保存分頁 ${tabId} 的 session state 失敗:`, e);
+            return false;
         }
-        return true;
-    } catch (e) {
-        log.warn('NovelSessionState', `移除分頁 ${tabId} 的 session state 失敗:`, e);
-        return false;
-    }
+    });
+}
+
+/**
+ * 移除特定分頁的 Session Identity (透過 mutation queue 序列化)
+ * @param {number|string} tabId 
+ * @returns {Promise<boolean>}
+ */
+export function removeNovelSessionState(tabId) {
+    const numericTabId = Number(tabId);
+    if (!Number.isInteger(numericTabId) || numericTabId <= 0) return Promise.resolve(false);
+
+    return enqueueSessionStateMutation(async () => {
+        const storage = getStorageSession();
+        if (!storage) return false;
+
+        try {
+            const rawMap = await new Promise((resolve) => {
+                storage.get(NOVEL_SESSION_STATE_KEY, (res) => resolve(res?.[NOVEL_SESSION_STATE_KEY] || {}));
+            });
+            if (rawMap && typeof rawMap === 'object' && rawMap[numericTabId]) {
+                const currentMap = { ...rawMap };
+                delete currentMap[numericTabId];
+                await new Promise((resolve, reject) => {
+                    storage.set({ [NOVEL_SESSION_STATE_KEY]: currentMap }, () => {
+                        if (chrome.runtime?.lastError) reject(chrome.runtime.lastError);
+                        else resolve();
+                    });
+                });
+            }
+            return true;
+        } catch (e) {
+            log.warn('NovelSessionState', `移除分頁 ${tabId} 的 session state 失敗:`, e);
+            return false;
+        }
+    });
 }
 
 /**
