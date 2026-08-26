@@ -19,11 +19,52 @@ class StateManager {
     this.apiKeys = [];
     this.currentKeyIndex = 0;
     this.updateLocks = new Map();
+    this.storageListenerRegistered = false;
+    this.changeSubscribers = new Set();
+  }
+
+  /**
+   * 確保 chrome.storage.onChanged 監聽器只註冊一次
+   * 自動同步外部 context 的 storage 變更至本地快取與 API Key 池
+   */
+  ensureStorageListener() {
+    if (this.storageListenerRegistered) return;
+
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, namespace) => {
+        if (namespace !== 'local') return;
+
+        for (const [key, change] of Object.entries(changes)) {
+          if (change.newValue === undefined) {
+            delete this.cache[key];
+          } else {
+            this.cache[key] = change.newValue;
+          }
+
+          if (key === 'apiKey') {
+            this.refreshApiKeyPool();
+          } else {
+            log.state(key, 'Changed (External)', change.newValue);
+          }
+        }
+
+        // 依序通知所有訂閱者
+        for (const callback of this.changeSubscribers) {
+          try {
+            callback(changes);
+          } catch (err) {
+            log.error('StateManager', 'Error in onChanged subscriber callback:', err);
+          }
+        }
+      });
+
+      this.storageListenerRegistered = true;
+    }
   }
 
   /**
    * 初始化：從 Storage 讀取所有資料到快取
-   * 使用 Promise 鎖確保全球只執行一次
+   * 使用 Promise 鎖確保只執行一次，並自動註冊 storage 監聽器
    */
   async init() {
     if (this.isInitialized) return Promise.resolve();
@@ -35,6 +76,9 @@ class StateManager {
         
         // 初始化 API Key 池
         this.refreshApiKeyPool();
+
+        // 自動確保 storage listener 已註冊，跨 context 即時同步
+        this.ensureStorageListener();
 
         this.isInitialized = true;
         this.initPromise = null;
@@ -76,9 +120,20 @@ class StateManager {
     const current = previous.then(async () => {
       const data = await chrome.storage.local.get(key);
       const newVal = await updater(data[key]);
-      this.cache[key] = newVal;
+      if (newVal === undefined) {
+        delete this.cache[key];
+      } else {
+        this.cache[key] = newVal;
+      }
+
+      if (key === 'apiKey') {
+        this.refreshApiKeyPool();
+      }
+
       await chrome.storage.local.set({ [key]: newVal });
-      log.state(key, 'Updated (Serialized)', newVal);
+      if (key !== 'apiKey') {
+        log.state(key, 'Updated (Serialized)', newVal);
+      }
       return newVal;
     });
     const settled = current.catch(() => {});
@@ -97,9 +152,20 @@ class StateManager {
    * @param {any} value 
    */
   async set(key, value) {
-    this.cache[key] = value;
+    if (value === undefined) {
+      delete this.cache[key];
+    } else {
+      this.cache[key] = value;
+    }
+
+    if (key === 'apiKey') {
+      this.refreshApiKeyPool();
+    }
+
     await chrome.storage.local.set({ [key]: value });
-    log.state(key, 'Set', value);
+    if (key !== 'apiKey') {
+      log.state(key, 'Set', value);
+    }
   }
 
   /**
@@ -109,7 +175,15 @@ class StateManager {
    * @param {number} delay 毫秒數
    */
   async setThrottled(key, value, delay = 200) {
-    this.cache[key] = value;
+    if (value === undefined) {
+      delete this.cache[key];
+    } else {
+      this.cache[key] = value;
+    }
+
+    if (key === 'apiKey') {
+      this.refreshApiKeyPool();
+    }
     
     if (this.throttleTimers[key]) return; // 已有排定的寫入，略過此波
 
@@ -120,11 +194,16 @@ class StateManager {
   }
 
   /**
-   * 重新從 raw apiKey 字串解析金鑰池
+   * 重新從 raw apiKey 字串解析金鑰池，並保證 currentKeyIndex 安全邊界
    */
   refreshApiKeyPool() {
     const rawKeys = this.cache['apiKey'] || '';
     this.apiKeys = rawKeys.split('\n').map(k => k.trim()).filter(k => k);
+    if (this.apiKeys.length === 0) {
+      this.currentKeyIndex = 0;
+    } else {
+      this.currentKeyIndex = this.currentKeyIndex % this.apiKeys.length;
+    }
     log.info('StateManager', `API Key Pool refreshed: ${this.apiKeys.length} keys`);
   }
 
@@ -154,26 +233,14 @@ class StateManager {
   }
 
   /**
-   * 監聽狀態變更的便捷封裝
+   * 監聽狀態變更的便捷封裝 (Subscriber 模式，避免重複註冊 storage listener)
+   * @param {function} callback 
+   * @returns {function} 取消訂閱函式
    */
   onChanged(callback) {
-    chrome.storage.onChanged.addListener((changes, namespace) => {
-      if (namespace === 'local') {
-        // 更新本地快取以保持同步
-        for (let key in changes) {
-          this.cache[key] = changes[key].newValue;
-          
-          // 如果是 apiKey 變更，同步更新金鑰池
-          if (key === 'apiKey') {
-            this.refreshApiKeyPool();
-          } else {
-            // apiKey 以外的變更記錄到 log (避免在 onChanged 裡印出 key)
-            log.state(key, 'Changed (External)', changes[key].newValue);
-          }
-        }
-        callback(changes);
-      }
-    });
+    this.ensureStorageListener();
+    this.changeSubscribers.add(callback);
+    return () => this.changeSubscribers.delete(callback);
   }
 }
 
