@@ -236,7 +236,6 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
                 pageUrl: 'https://example.com/novel/1',
                 cancelled: false,
                 updatedAt: 12345678,
-                // 非法欄位
                 texts: ['秘密小說原文'],
                 translations: ['機密譯文'],
                 apiKey: 'AIzaSyFakeKey123',
@@ -421,7 +420,6 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
                     storage: { session: mockStorage }
                 };
 
-                // 並發發起 Tab 101 與 Tab 202 的儲存
                 const p1 = saveNovelSessionState({ tabId: 101, sessionId: 'sess-101', pageUrl: 'url1' });
                 const p2 = saveNovelSessionState({ tabId: 202, sessionId: 'sess-202', pageUrl: 'url2' });
 
@@ -480,10 +478,8 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
             const registry = createNovelSessionRegistry();
             registry.begin(101, 'session-AAA');
 
-            // 模擬 BBB 到達
             registry.begin(101, 'session-BBB');
 
-            // AAA 處理器在持久化完成後檢查
             const isAAACurrent = registry.isCurrentSession(101, 'session-AAA');
             assert.equal(isAAACurrent, false);
 
@@ -495,18 +491,46 @@ describe('Novel Mode: Explicit Session Identity & Lifecycle Registry Tests', () 
             const registry = createNovelSessionRegistry();
             registry.begin(101, 'session-AAA');
 
-            // 模擬 cancel 操作
             registry.cancel(101);
-            const persistenceFailed = true; // 模擬持久化寫入失敗
 
-            // 斷言：無論持久化成功與否，記憶體中斷必須成立
             assert.equal(registry.isCancelled(101), true);
             assert.equal(registry.isCurrentSession(101, 'session-AAA'), false);
         });
     });
 
-    describe('Test 22: 靜態程式碼防護：確認源碼中嚴格禁用 storage.local 作為 session fallback', () => {
-        it('確認 src/background/novel-session-state.js 中不存在 chrome.storage.local', () => {
+    describe('Test 22: Stale persistence failure must not clear newer session (Ownership-aware rollback)', () => {
+        it('當 AAA 持久化失敗進行 rollback 時，若當前 active session 已是 BBB，AAA 絕不清除 BBB', () => {
+            const registry = createNovelSessionRegistry();
+            const tabId = 101;
+
+            // 1. begin AAA
+            registry.begin(tabId, 'session-AAA');
+            assert.equal(registry.getActiveSessionId(tabId), 'session-AAA');
+
+            // 2. 模擬 AAA persistence 進行中，此時使用者快速發起 BBB
+            registry.begin(tabId, 'session-BBB');
+            assert.equal(registry.getActiveSessionId(tabId), 'session-BBB');
+
+            // 3. 模擬 AAA persistence failure 觸發 rollback policy
+            const aaaSessionId = 'session-AAA';
+            let aaaAckResponse = null;
+
+            // 執行 Background 中的 ownership-aware rollback 邏輯
+            if (registry.getActiveSessionId(tabId) === aaaSessionId) {
+                registry.clear(tabId);
+            }
+            aaaAckResponse = { ok: false, error: 'Failed to persist novel session identity' };
+
+            // 4. 驗證：AAA ACK 失敗，但 Registry 的 active session 依然完好保持為 BBB
+            assert.equal(aaaAckResponse.ok, false);
+            assert.equal(registry.getActiveSessionId(tabId), 'session-BBB');
+            assert.equal(registry.isCurrentSession(tabId, 'session-BBB'), true);
+            assert.equal(registry.isCurrentSession(tabId, 'session-AAA'), false);
+        });
+    });
+
+    describe('Test 23: 靜態程式碼防護：確認源碼中嚴格禁用 storage.local 作為 session fallback', () => {
+        it('確認 src/background/novel-session-state.js 中不存在 chrome.storage.local 引用', () => {
             const statePath = path.resolve(__dirname, '../src/background/novel-session-state.js');
             const code = fs.readFileSync(statePath, 'utf-8');
 

@@ -100,10 +100,9 @@ export async function getNovelSessionStates() {
  * @param {string} params.sessionId
  * @param {string} [params.pageUrl]
  * @param {boolean} [params.cancelled]
- * @param {string|null} [params.expectedCurrentSessionId]
  * @returns {Promise<boolean>}
  */
-export function saveNovelSessionState({ tabId, sessionId, pageUrl = '', cancelled = false, expectedCurrentSessionId = null }) {
+export function saveNovelSessionState({ tabId, sessionId, pageUrl = '', cancelled = false }) {
     const clean = sanitizeNovelSessionState({ tabId, sessionId, pageUrl, cancelled, updatedAt: Date.now() });
     if (!clean) return Promise.resolve(false);
 
@@ -116,12 +115,6 @@ export function saveNovelSessionState({ tabId, sessionId, pageUrl = '', cancelle
                 storage.get(NOVEL_SESSION_STATE_KEY, (res) => resolve(res?.[NOVEL_SESSION_STATE_KEY] || {}));
             });
             const currentMap = (rawMap && typeof rawMap === 'object') ? { ...rawMap } : {};
-
-            // 舊 Session 覆蓋防禦：若 storage 中該 Tab 已被更新的 Session 覆蓋，且與 expected 不一致則跳過
-            const existing = currentMap[clean.tabId];
-            if (existing && existing.sessionId !== clean.sessionId && expectedCurrentSessionId && existing.sessionId === expectedCurrentSessionId) {
-                return true;
-            }
 
             currentMap[clean.tabId] = clean;
             await new Promise((resolve, reject) => {

@@ -493,8 +493,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               });
 
               if (!persisted) {
-                  log.error('Background', `[Novel Session] 分頁 ${tabId} Session 持久化失敗，清除記憶體註冊`);
-                  novelCancellationRegistry.clear(tabId);
+                  log.error('Background', `[Novel Session] 分頁 ${tabId} Session ${sessionId} 持久化失敗`);
+                  // Ownership-aware rollback: 只有當目前活躍 Session 仍為自己時才清除記憶體註冊
+                  if (novelCancellationRegistry.getActiveSessionId(tabId) === sessionId) {
+                      novelCancellationRegistry.clear(tabId);
+                  }
                   sendResponse({ ok: false, error: 'Failed to persist novel session identity (storage.session unavailable or save failed)' });
                   return;
               }
