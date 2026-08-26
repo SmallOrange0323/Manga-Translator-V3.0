@@ -3,6 +3,7 @@ import { state } from '../utils/state.js';
 import { loadGlossary, saveGlossary, deduplicateGlossaries, GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
 import * as Constants from '../utils/constants.js';
 import { getAuthToken, performBiDirectionalSync } from '../utils/sync.js';
+import { saveApiKeyPoolIfChanged } from '../utils/sync-policy.js';
 
 let currentSelectedMangaKey = null;
 const MAX_KEYS = 10;
@@ -214,8 +215,7 @@ async function initApiKeyManager() {
     async function saveCurrentApiKeys() {
         const inputs = apiKeysContainer.querySelectorAll('.api-key-input');
         const keys = Array.from(inputs).map(i => i.value.trim()).filter(k => k).join('\n');
-        await state.set('apiKey', keys);
-        await state.set('settingsLastModified', Date.now());
+        await saveApiKeyPoolIfChanged(keys, state);
     }
 
     function reindexKeys() {
@@ -282,7 +282,8 @@ function setupEventHandlers() {
             const keyInputs = apiKeysContainer.querySelectorAll('.api-key-input');
             const keys = Array.from(keyInputs).map(i => i.value.trim()).filter(k => k).join('\n');
             
-            await state.set('apiKey', keys);
+            // 只有在 API Key Pool 真正改變時才更新 apiKey 與 apiKeyLastModified
+            await saveApiKeyPoolIfChanged(keys, state);
             await state.set('translationMode', document.getElementById('translationMode').value);
             await state.set('modelName', document.getElementById('modelName').value);
             await state.set('fallbackModelName', document.getElementById('fallbackModelName').value);
