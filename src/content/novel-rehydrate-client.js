@@ -70,6 +70,7 @@ export function createNovelRehydrateController() {
     let phase = 'checking'; // 'checking' | 'rehydrated' | 'none' | 'mismatch' | 'superseded'
     let autoDisposition = 'defer'; // 'defer' | 'allow' | 'consume'
     let pendingAutoTranslate = false;
+    let candidateSessionId = null; // 追蹤從 Background 取得但尚未 Attach 的候選 Session
 
     return {
         getPhase: () => phase,
@@ -78,6 +79,7 @@ export function createNovelRehydrateController() {
         setPendingAuto: (val) => { pendingAutoTranslate = Boolean(val); },
         getAutoDisposition: () => autoDisposition,
         setAutoDisposition: (val) => { autoDisposition = val; },
+        getCandidateSessionId: () => candidateSessionId,
 
         /**
          * 統一的 AUTO_TRANSLATE_PAGE 處理政策 (供 Desktop 與 Mobile 完全共用)
@@ -96,6 +98,7 @@ export function createNovelRehydrateController() {
                 // AUTO 決定啟動新翻譯，立即將 disposition 切換為 consume 防止重複觸發
                 autoDisposition = 'consume';
                 phase = 'superseded';
+                candidateSessionId = null;
                 try {
                     if (typeof startTranslationFn === 'function') startTranslationFn();
                     return { started: true };
@@ -114,6 +117,7 @@ export function createNovelRehydrateController() {
             phase = 'superseded';
             autoDisposition = 'consume';
             pendingAutoTranslate = false;
+            candidateSessionId = null;
         },
 
         /**
@@ -124,25 +128,35 @@ export function createNovelRehydrateController() {
             phase = 'superseded';
             autoDisposition = 'consume';
             pendingAutoTranslate = false;
+            candidateSessionId = null;
         },
 
         /**
-         * 收到針對特定舊 Session 的導航終止通知時，若當前 Session 相符則清除並重新允許 AUTO
+         * 收到針對特定舊 Session 的導航終止通知時，若當前 attached 或 candidate Session 相符則清除並重新允許 AUTO
          * @param {string} targetSessionId
          * @param {string|null} currentSessionId
          * @param {Function} detachFn
          * @returns {boolean} 是否成功處理
          */
         onTargetedNavigationAbort: (targetSessionId, currentSessionId, detachFn) => {
-            if (targetSessionId && currentSessionId === targetSessionId) {
+            if (!targetSessionId) return false;
+
+            const isCurrentMatch = Boolean(currentSessionId && currentSessionId === targetSessionId);
+            const isCandidateMatch = Boolean(candidateSessionId && candidateSessionId === targetSessionId);
+
+            if (isCurrentMatch || isCandidateMatch) {
                 generation++;
                 phase = 'none';
                 autoDisposition = 'allow'; // 允許後續新章節的 AUTO
                 pendingAutoTranslate = false;
-                if (typeof detachFn === 'function') detachFn();
+                candidateSessionId = null;
+
+                if (isCurrentMatch && typeof detachFn === 'function') {
+                    detachFn();
+                }
                 return true;
             }
-            // 若當前 session 已非 targetSessionId (例如已成立 BBB 或 checking)，忽略不干擾
+            // 若當前 session 已非 targetSessionId (例如已成立 BBB 或 candidate BBB)，忽略不干擾
             return false;
         },
 
@@ -154,6 +168,7 @@ export function createNovelRehydrateController() {
             phase = 'superseded';
             autoDisposition = 'consume';
             pendingAutoTranslate = false;
+            candidateSessionId = null;
         },
 
         /**
@@ -174,6 +189,7 @@ export function createNovelRehydrateController() {
             const currentGen = ++generation;
             phase = 'checking';
             autoDisposition = 'defer';
+            candidateSessionId = null;
 
             // 1. 等待 DOM Ready
             if (document.readyState === 'loading') {
@@ -196,6 +212,7 @@ export function createNovelRehydrateController() {
             if (currentGen !== generation || phase === 'superseded') return;
 
             if (!firstSnapshot || !firstSnapshot.ok || firstSnapshot.status !== 'rehydratable') {
+                candidateSessionId = null;
                 if (firstSnapshot?.status === 'error') {
                     // 若為伺服器/通訊異常，保持 phase = 'none' 且 autoDisposition = 'consume' (Fail Closed)
                     phase = 'none';
@@ -211,6 +228,9 @@ export function createNovelRehydrateController() {
                 }
                 return;
             }
+
+            // 取得候選 sessionId (在 Exact Source Validation 前設定)
+            candidateSessionId = firstSnapshot.sessionId;
 
             // 3. Exact Source Validation (最多嘗試 initial + 2 次 retry: 0ms, 300ms, 1000ms)
             const delays = [0, 300, 1000];
@@ -248,8 +268,10 @@ export function createNovelRehydrateController() {
                     });
                 } catch (_) {}
 
-                // ABANDON await 期間可能已被使用者手動觸發 supersede，嚴格檢查 generation guard
+                // ABANDON await 期間可能已被使用者手動觸發 supersede 或 targeted abort，嚴格檢查 generation guard
                 if (currentGen !== generation || phase === 'superseded') return;
+
+                candidateSessionId = null;
 
                 // 只有在 ABANDON 確認成功清理 (ok: true) 時，才允許 pending AUTO 開啟新 Session
                 if (abandonRes && abandonRes.ok) {
@@ -270,7 +292,8 @@ export function createNovelRehydrateController() {
                 return;
             }
 
-            // 4. 比對成功 ➔ Attach Session
+            // 4. 比對成功 ➔ Attach Session (ownership 轉移給 currentSessionId，清空 candidate)
+            candidateSessionId = null;
             if (typeof onSessionAttachedFn === 'function') {
                 onSessionAttachedFn(firstSnapshot.sessionId);
             }

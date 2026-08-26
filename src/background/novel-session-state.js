@@ -69,15 +69,35 @@ export function getStorageSession() {
  * @returns {Promise<Object.<number, object>>}
  */
 export async function getNovelSessionStates() {
+    const res = await readNovelSessionStatesStrict();
+    return res.ok ? res.data : {};
+}
+
+/**
+ * 嚴格讀取所有持久化的 Novel Session States (區分 storage 失敗與真正 empty)
+ * @returns {Promise<{ok: boolean, data?: Object.<number, object>, error?: string}>}
+ */
+export async function readNovelSessionStatesStrict() {
     const storage = getStorageSession();
-    if (!storage) return {};
+    if (!storage) {
+        return { ok: false, error: 'storage.session unavailable' };
+    }
 
     try {
-        const result = await new Promise((resolve) => {
-            storage.get(NOVEL_SESSION_STATE_KEY, (res) => resolve(res || {}));
+        const result = await new Promise((resolve, reject) => {
+            storage.get(NOVEL_SESSION_STATE_KEY, (res) => {
+                if (chrome.runtime?.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message || 'storage.get runtime.lastError'));
+                } else {
+                    resolve(res || {});
+                }
+            });
         });
+
         const rawMap = result[NOVEL_SESSION_STATE_KEY];
-        if (!rawMap || typeof rawMap !== 'object') return {};
+        if (!rawMap || typeof rawMap !== 'object') {
+            return { ok: true, data: {} };
+        }
 
         const cleanMap = {};
         for (const [key, value] of Object.entries(rawMap)) {
@@ -86,10 +106,10 @@ export async function getNovelSessionStates() {
                 cleanMap[clean.tabId] = clean;
             }
         }
-        return cleanMap;
+        return { ok: true, data: cleanMap };
     } catch (e) {
-        log.warn('NovelSessionState', '讀取 session states 失敗:', e);
-        return {};
+        log.warn('NovelSessionState', '嚴格讀取 session states 失敗:', e);
+        return { ok: false, error: e.message || 'Read exception' };
     }
 }
 

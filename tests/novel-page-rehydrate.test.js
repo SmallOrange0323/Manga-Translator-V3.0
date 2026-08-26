@@ -681,6 +681,159 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
             expect(registry.isCurrentSession(10, 'tabA_sess')).toBe(false);
             expect(registry.isCurrentSession(20, 'tabB_sess')).toBe(true);
         });
+
+        // ── 5.1 Candidate Session & Pre-Attach Navigation Abort Tests (A ~ D) ──
+        it('Scenario A: attemptRehydrate 已拿到 Snapshot AAA (在 source validation 期間) 收到 targeted abort AAA ➔ 立即失效且 allow 新 AUTO', async () => {
+            const controller = createNovelRehydrateController();
+            let startCalled = false;
+
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_AAA',
+                        expectedItems: [{ idx: 0, text: '延遲比對內容' }],
+                        renderItems: [{ idx: 0, status: 'done', translation: '譯文 AAA' }]
+                    });
+                }
+            });
+
+            // 啟動 attemptRehydrate (getParagraphsFn 故意先返回不匹配，在 retry 過程中插入 abort)
+            const rehydratePromise = controller.attemptRehydrate({
+                getParagraphsFn: () => {
+                    // 在 source validation 進行時 (currentSessionId 仍為 null，但 candidateSessionId 已是 sess_AAA)
+                    expect(controller.getCandidateSessionId()).toBe('sess_AAA');
+                    // 模擬收到 targeted abort AAA
+                    const handled = controller.onTargetedNavigationAbort('sess_AAA', null, null);
+                    expect(handled).toBe(true);
+                    return [{ idx: 0, text: '不同內容' }];
+                },
+                getParagraphTextFn: () => '不同內容',
+                startNewTranslationFn: () => { startCalled = true; }
+            });
+
+            await rehydratePromise;
+
+            expect(controller.getPhase()).toBe('none');
+            expect(controller.getCandidateSessionId()).toBeNull();
+            expect(controller.getAutoDisposition()).toBe('allow');
+
+            // 新章節 AUTO 信號抵達 ➔ 成功啟動
+            const autoRes = controller.handleAutoSignal(() => { startCalled = true; });
+            expect(autoRes.started).toBe(true);
+            expect(startCalled).toBe(true);
+        });
+
+        it('Scenario B: candidate BBB 收到 targeted AAA ➔ ignored 且 BBB state 不變', async () => {
+            const controller = createNovelRehydrateController();
+
+            global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
+                if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
+                    cb({
+                        ok: true,
+                        status: 'rehydratable',
+                        sessionId: 'sess_BBB',
+                        expectedItems: [{ idx: 0, text: '內容' }],
+                        renderItems: []
+                    });
+                }
+            });
+
+            // 開始 rehydrate，在驗證階段 candidate 為 sess_BBB
+            let checkedCandidate = null;
+            await controller.attemptRehydrate({
+                getParagraphsFn: () => {
+                    checkedCandidate = controller.getCandidateSessionId();
+                    const handled = controller.onTargetedNavigationAbort('sess_AAA', null, null);
+                    expect(handled).toBe(false); // 忽略舊 AAA
+                    return [{ idx: 0, text: '內容' }];
+                },
+                getParagraphTextFn: () => '內容'
+            });
+
+            expect(checkedCandidate).toBe('sess_BBB');
+            expect(controller.getPhase()).toBe('rehydrated');
+        });
+
+        it('Scenario C & D: manual start 與 generic STOP 會清空 candidateSessionId', () => {
+            const controller1 = createNovelRehydrateController();
+            controller1.onManualStart();
+            expect(controller1.getCandidateSessionId()).toBeNull();
+
+            const controller2 = createNovelRehydrateController();
+            controller2.onGenericStop();
+            expect(controller2.getCandidateSessionId()).toBeNull();
+        });
+
+        // ── 5.2 Strict Reads & Storage Failure Invariants (E ~ H) ──
+        it('Scenario E: storage.session unavailable ➔ Strict Read 回傳 ok: false', async () => {
+            const originalSession = global.chrome.storage.session;
+            delete global.chrome.storage.session;
+
+            const { readNovelSessionStatesStrict } = await import('../src/background/novel-session-state.js');
+            const { readNovelJobCheckpointsStrict } = await import('../src/background/novel-job-checkpoint.js');
+
+            const sessRes = await readNovelSessionStatesStrict();
+            expect(sessRes.ok).toBe(false);
+            expect(sessRes.error).toContain('unavailable');
+
+            const jobRes = await readNovelJobCheckpointsStrict();
+            expect(jobRes.ok).toBe(false);
+            expect(jobRes.error).toContain('unavailable');
+
+            global.chrome.storage.session = originalSession;
+        });
+
+        it('Scenario F: storage.session.get runtime.lastError ➔ Strict Read 回傳 ok: false', async () => {
+            const originalGet = global.chrome.storage.session.get;
+            global.chrome.storage.session.get = vi.fn((key, cb) => {
+                global.chrome.runtime.lastError = { message: 'Quota exceeded or storage failed' };
+                cb({});
+                global.chrome.runtime.lastError = null;
+            });
+
+            const { readNovelSessionStatesStrict } = await import('../src/background/novel-session-state.js');
+            const { readNovelJobCheckpointsStrict } = await import('../src/background/novel-job-checkpoint.js');
+
+            const sessRes = await readNovelSessionStatesStrict();
+            expect(sessRes.ok).toBe(false);
+            expect(sessRes.error).toContain('Quota exceeded');
+
+            const jobRes = await readNovelJobCheckpointsStrict();
+            expect(jobRes.ok).toBe(false);
+
+            global.chrome.storage.session.get = originalGet;
+        });
+
+        it('Scenario G & H: 合法 read 且 key 不存在 ➔ Strict Read 回傳 ok: true 且 data = {}', async () => {
+            const { readNovelSessionStatesStrict } = await import('../src/background/novel-session-state.js');
+            const { readNovelJobCheckpointsStrict } = await import('../src/background/novel-job-checkpoint.js');
+
+            const sessRes = await readNovelSessionStatesStrict();
+            expect(sessRes.ok).toBe(true);
+            expect(sessRes.data).toEqual({});
+
+            const jobRes = await readNovelJobCheckpointsStrict();
+            expect(jobRes.ok).toBe(true);
+            expect(jobRes.data).toEqual({});
+        });
+
+        // ── 5.3 Source Code Recovery & GET Strict Read Invariants (I ~ M) ──
+        it('Scenario I, J, K: Source Code 驗證 SW Startup 使用 strict reads 且 read 失敗時傳播 recovery failure', () => {
+            const bgCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
+            expect(bgCode.includes('readNovelSessionStatesStrict()')).toBe(true);
+            expect(bgCode.includes('readNovelJobCheckpointsStrict()')).toBe(true);
+            expect(bgCode.includes('novelRecoveryResult = { ok: false, error: sessionStatesRes.error }')).toBe(true);
+            expect(bgCode.includes('novelRecoveryResult = { ok: false, error: jobsRes.error }')).toBe(true);
+        });
+
+        it('Scenario L & M: Source Code 驗證 GET_NOVEL_REHYDRATE_STATE 與 final check 使用 strict reads', () => {
+            const bgCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
+            expect(bgCode.includes("const sessionStatesRes = await readNovelSessionStatesStrict();")).toBe(true);
+            expect(bgCode.includes("const jobsRes = await readNovelJobCheckpointsStrict();")).toBe(true);
+            expect(bgCode.includes("const currentStatesRes = await readNovelSessionStatesStrict();")).toBe(true);
+        });
     });
 
     // ─────────────────────────────────────────────────────────

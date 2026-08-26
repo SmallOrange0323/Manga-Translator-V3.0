@@ -14,8 +14,8 @@ import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.
 import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
 import { mapNovelTranslationResults } from './novel-result-mapping.js';
 import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellation.js';
-import { saveNovelSessionState, getNovelSessionStates, removeNovelSessionState, removeNovelSessionStateIfMatches, restoreNovelSessionRegistry } from './novel-session-state.js';
-import { createNovelJobCheckpoint, getNovelJobCheckpoints, saveNovelJobCheckpoint, submitNovelJobCheckpointAtomic, updateNovelJobCheckpoint, removeNovelJobCheckpoint, removeNovelJobCheckpointsForTab, normalizeRestoredNovelJob, getNovelJobBatchItems, selectNextRunnableNovelJob } from './novel-job-checkpoint.js';
+import { saveNovelSessionState, getNovelSessionStates, readNovelSessionStatesStrict, removeNovelSessionState, removeNovelSessionStateIfMatches, restoreNovelSessionRegistry } from './novel-session-state.js';
+import { createNovelJobCheckpoint, getNovelJobCheckpoints, readNovelJobCheckpointsStrict, saveNovelJobCheckpoint, submitNovelJobCheckpointAtomic, updateNovelJobCheckpoint, removeNovelJobCheckpoint, removeNovelJobCheckpointsForTab, normalizeRestoredNovelJob, getNovelJobBatchItems, selectNextRunnableNovelJob } from './novel-job-checkpoint.js';
 import { upsertNovelResultItems, applyNovelResultUpsertIfCurrent } from './novel-result-store.js';
 import { isSameNovelPage, normalizeNovelPageUrl } from '../utils/novel-page-identity.js';
 import { buildNovelRehydrateSnapshot } from './novel-rehydrate.js';
@@ -192,8 +192,14 @@ async function initializeNovelRecovery() {
             } catch (tabErr) {}
 
             // 1. SW 重啟恢復：從 chrome.storage.session 恢復小說 Session Identity 註冊表並清理 Ghost Tabs
+            const sessionStatesRes = await readNovelSessionStatesStrict();
+            if (!sessionStatesRes.ok) {
+                log.error('Background', '[Novel Startup] 嚴格讀取 Session States 失敗:', sessionStatesRes.error);
+                novelRecoveryResult = { ok: false, error: sessionStatesRes.error };
+                return novelRecoveryResult;
+            }
+            const storedSessionStates = sessionStatesRes.data;
             try {
-                const storedSessionStates = await getNovelSessionStates();
                 const restoredCount = await restoreNovelSessionRegistry(novelCancellationRegistry, storedSessionStates, activeTabIdSet);
                 if (restoredCount > 0) {
                     log.info('Background', `[Novel Startup] 已從 storage.session 成功恢復 ${restoredCount} 個分頁的 Session Identity`);
@@ -203,10 +209,15 @@ async function initializeNovelRecovery() {
             }
 
             // 2. SW 重啟恢復：在啟動 Scheduler 前，嚴格驗證 Session 網址與當前 Tab URL
-            try {
-                const rawJobs = await getNovelJobCheckpoints();
-                const storedSessionStates = await getNovelSessionStates();
+            const jobsRes = await readNovelJobCheckpointsStrict();
+            if (!jobsRes.ok) {
+                log.error('Background', '[Novel Startup] 嚴格讀取 Job Checkpoints 失敗:', jobsRes.error);
+                novelRecoveryResult = { ok: false, error: jobsRes.error };
+                return novelRecoveryResult;
+            }
+            const rawJobs = jobsRes.data;
 
+            try {
                 let runnableCount = 0;
                 for (const [sessId, rawJob] of Object.entries(rawJobs)) {
                     if (!rawJob || typeof rawJob !== 'object') continue;
@@ -988,7 +999,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   return;
               }
 
-              const sessionStates = await getNovelSessionStates();
+              const sessionStatesRes = await readNovelSessionStatesStrict();
+              if (!sessionStatesRes.ok) {
+                  sendResponse({ ok: false, status: 'error', error: sessionStatesRes.error });
+                  return;
+              }
+              const sessionStates = sessionStatesRes.data;
               const sessionState = sessionStates[tabId];
 
               if (!sessionState || sessionState.cancelled || !novelCancellationRegistry.isCurrentSession(tabId, sessionState.sessionId)) {
@@ -1008,13 +1024,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   if (tabInfo && tabInfo.url) realTabUrl = tabInfo.url;
               } catch (_) {}
 
-              const jobsMap = await getNovelJobCheckpoints();
+              const jobsRes = await readNovelJobCheckpointsStrict();
+              if (!jobsRes.ok) {
+                  sendResponse({ ok: false, status: 'error', error: jobsRes.error });
+                  return;
+              }
+              const jobsMap = jobsRes.data;
               const job = jobsMap[sessionState.sessionId];
 
               const novelResults = await state.get('novelResults', []);
 
-              // 2. Final ownership re-check：在 storage 讀取後再次驗證 ownership 與 storage 一致性
-              const currentStates = await getNovelSessionStates();
+              // 2. Final ownership re-check：使用 Strict Read 再次驗證 storage 一致性
+              const currentStatesRes = await readNovelSessionStatesStrict();
+              if (!currentStatesRes.ok) {
+                  sendResponse({ ok: false, status: 'error', error: currentStatesRes.error });
+                  return;
+              }
+              const currentStates = currentStatesRes.data;
+
               if (!currentStates[tabId] || currentStates[tabId].sessionId !== sessionState.sessionId || currentStates[tabId].cancelled) {
                   sendResponse({ ok: false, status: 'stale-session' });
                   return;
@@ -3164,7 +3191,12 @@ export async function handleNovelPageNavigationChange(tabId, newUrl) {
     if (!tabId || !newUrl) return;
     try {
         await novelRecoveryReady;
-        const activeStates = await getNovelSessionStates();
+        const activeStatesRes = await readNovelSessionStatesStrict();
+        if (!activeStatesRes.ok) {
+            log.warn('Background', '早期小說導航讀取 Session States 失敗:', activeStatesRes.error);
+            return { ok: false, status: 'error', error: activeStatesRes.error };
+        }
+        const activeStates = activeStatesRes.data;
         const activeState = activeStates[tabId];
         if (activeState && !activeState.cancelled && activeState.pageUrl) {
             if (!isSameNovelPage(activeState.pageUrl, newUrl)) {
