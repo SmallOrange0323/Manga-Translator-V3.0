@@ -3,10 +3,12 @@ import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, transla
 import { toggleSelectionMode, crawlImages, triggerLazyScroll } from './manga-engine.js';
 import { log } from '../utils/logger.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
+import { createNovelRehydrateController } from './novel-rehydrate-client.js';
 
 // 本地小說中斷旗標與當前 Session ID
 let isNovelTranslationAborted = false;
 let currentNovelSessionId = null;
+const rehydrateController = createNovelRehydrateController();
 
 /**
  * 啟動電腦版專用 UI 系統
@@ -16,8 +18,9 @@ export function initDesktopMode() {
 
   // 監聽背景訊息 (電腦版專屬)
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'translateNovelPage' || request.action === 'AUTO_TRANSLATE_PAGE') {
-        log.info('Content-Desktop', `收到 ${request.action} 訊息，準備啟動翻譯`);
+    if (request.action === 'translateNovelPage') {
+        log.info('Content-Desktop', '收到手動 translateNovelPage 訊息，使 Rehydrate 失效並啟動新翻譯');
+        rehydrateController.onManualStart();
         try {
             startNovelTranslation();
             sendResponse({ started: true });
@@ -27,12 +30,38 @@ export function initDesktopMode() {
         }
     }
 
+    if (request.action === 'AUTO_TRANSLATE_PAGE') {
+        log.info('Content-Desktop', '收到 AUTO_TRANSLATE_PAGE 自動翻譯訊息');
+        const autoRes = rehydrateController.handleAutoSignal(() => {
+            startNovelTranslation();
+        });
+        sendResponse(autoRes);
+        return false;
+    }
+
     if (request.action === 'abortNovelTranslation') {
-        log.info('Content-Desktop', '收到 abortNovelTranslation 訊息，終止本地翻譯狀態');
+        log.info('Content-Desktop', '收到 abortNovelTranslation 訊息:', request);
+        if (request.reason === 'navigation' && request.sessionId) {
+            // 導航專用 targeted abort：只有目標 sessionId 相符才清理
+            const handled = rehydrateController.onTargetedNavigationAbort(
+                request.sessionId,
+                currentNovelSessionId,
+                () => {
+                    isNovelTranslationAborted = true;
+                    currentNovelSessionId = null;
+                    window.mt_currentNovelSessionId = null;
+                }
+            );
+            sendResponse({ ok: true, targeted: true, handled });
+            return false;
+        }
+
+        // Generic STOP / mode disable: 無條件終止並鎖定 AUTO
+        rehydrateController.onGenericStop();
         isNovelTranslationAborted = true;
         currentNovelSessionId = null;
         window.mt_currentNovelSessionId = null;
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, generic: true });
         return false;
     }
 
@@ -91,7 +120,27 @@ export function initDesktopMode() {
     }
   });
 
-  log.info('Content-Desktop', 'Desktop Mode initialized.');
+  log.info('Content-Desktop', 'Desktop Mode initialized. 啟動小說頁面 Rehydrate 檢測...');
+
+  // 初始化完成後，自動嘗試從背景恢復既有小說 Session (Reload Rehydrate)
+  rehydrateController.attemptRehydrate({
+      getParagraphsFn: getNovelParagraphs,
+      getParagraphTextFn: getParagraphText,
+      insertPlaceholdersFn: insertPlaceholders,
+      injectBatchResultFn: injectNovelBatchResult,
+      translateUIElementsFn: translateUIElements,
+      startNewTranslationFn: startNovelTranslation,
+      onSessionAttachedFn: (sessId) => {
+          isNovelTranslationAborted = false;
+          currentNovelSessionId = sessId;
+          window.mt_currentNovelSessionId = sessId;
+          log.info('Content-Desktop', `已成功重新連接至既有小說 Session: ${sessId}`);
+      },
+      onSessionDetachedFn: () => {
+          currentNovelSessionId = null;
+          window.mt_currentNovelSessionId = null;
+      }
+  });
 }
 
 function handleBase64Fetch(url, maxDim, sendResponse) {

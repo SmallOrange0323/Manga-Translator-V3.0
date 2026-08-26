@@ -194,15 +194,35 @@ export function createNovelJobCheckpoint({ sessionId, tabId, pageUrl = '', kind 
  * @returns {Promise<Object.<string, object>>}
  */
 export async function getNovelJobCheckpoints() {
+    const res = await readNovelJobCheckpointsStrict();
+    return res.ok ? res.data : {};
+}
+
+/**
+ * 嚴格讀取所有持久化的 Novel Jobs Checkpoints (區分 storage 失敗與真正 empty)
+ * @returns {Promise<{ok: boolean, data?: Object.<string, object>, error?: string}>}
+ */
+export async function readNovelJobCheckpointsStrict() {
     const storage = getStorageSession();
-    if (!storage) return {};
+    if (!storage) {
+        return { ok: false, error: 'storage.session unavailable' };
+    }
 
     try {
-        const result = await new Promise((resolve) => {
-            storage.get(NOVEL_JOBS_KEY, (res) => resolve(res || {}));
+        const result = await new Promise((resolve, reject) => {
+            storage.get(NOVEL_JOBS_KEY, (res) => {
+                if (chrome.runtime?.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message || 'storage.get runtime.lastError'));
+                } else {
+                    resolve(res || {});
+                }
+            });
         });
+
         const rawMap = result[NOVEL_JOBS_KEY];
-        if (!rawMap || typeof rawMap !== 'object') return {};
+        if (!rawMap || typeof rawMap !== 'object') {
+            return { ok: true, data: {} };
+        }
 
         const cleanMap = {};
         for (const [key, value] of Object.entries(rawMap)) {
@@ -211,10 +231,10 @@ export async function getNovelJobCheckpoints() {
                 cleanMap[clean.sessionId] = clean;
             }
         }
-        return cleanMap;
+        return { ok: true, data: cleanMap };
     } catch (e) {
-        log.warn('NovelJobCheckpoint', '讀取 job checkpoints 失敗:', e);
-        return {};
+        log.warn('NovelJobCheckpoint', '嚴格讀取 job checkpoints 失敗:', e);
+        return { ok: false, error: e.message || 'Read exception' };
     }
 }
 
