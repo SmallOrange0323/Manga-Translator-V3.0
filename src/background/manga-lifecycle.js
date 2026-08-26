@@ -100,7 +100,15 @@ export async function executeFallbackImages({
 }
 
 /**
- * 判斷 Two-step Stage 1 (OCR) 結束後是否允許進入 Stage 2 (Translation)
+ * 判斷 Two-step Stage 1 (OCR) 結束後是否允許進入 Stage 1.5 (全域劇本分析)
+ */
+export function shouldProceedToStage15({ wasStopped, isStopping }) {
+    if (wasStopped || isStopping) return false;
+    return true;
+}
+
+/**
+ * 判斷 Two-step Stage 1.5 結束後是否允許進入 Stage 2 (Translation)
  */
 export function shouldProceedToStage2({ wasStopped, isStopping, scriptLinesCount = 0 }) {
     if (wasStopped || isStopping) return false;

@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 
@@ -1848,6 +1848,18 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 scriptLines.push(`[P.${pageNum}]\n${text.trim()}`);
             }
         });
+    }
+
+    // ── 【第一道 STOP 守衛：Stage 1 OCR 結束 ➔ 進入 Stage 1.5 之前】 ──
+    const isStoppingAfterOcr = await state.get('isStopping');
+    if (!shouldProceedToStage15({ wasStopped: isStoppingAfterOcr, isStopping: isStoppingAfterOcr })) {
+        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 1.5 與階段 2');
+        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+        if (resultTabId) {
+            activeTranslationJobs.delete(resultTabId);
+            delete sessionStoryContext[resultTabId];
+        }
+        return;
     }
 
     const fullScriptText = scriptLines.join('\n\n');

@@ -10,6 +10,7 @@ import {
 } from '../src/background/hybrid-retry.js';
 import {
     executeFallbackImages,
+    shouldProceedToStage15,
     shouldProceedToStage2,
     shouldCompleteMangaTranslation
 } from '../src/background/manga-lifecycle.js';
@@ -76,7 +77,7 @@ describe('Translation Lifecycle Integration Tests', () => {
         });
     });
 
-    describe('情境 2: fallback 中途 STOP (最重要情境)', () => {
+    describe('情境 2: fallback 中途 STOP (核心防護)', () => {
         it('圖片 1 fallback 完成後使用者 STOP，圖片 2/3 嚴格不得發送任何 API 請求', async () => {
             const fallbackCalls = [];
             let isStopping = false;
@@ -122,24 +123,34 @@ describe('Translation Lifecycle Integration Tests', () => {
         });
     });
 
-    describe('情境 3: Two-step Stage 1 (OCR) 中途 STOP', () => {
-        it('Stage 1 OCR 過程中若被 STOP，嚴格禁止進入 Stage 2 (Translation) 請求', async () => {
+    describe('情境 3: Two-step Pipeline STOP 兩階段守衛', () => {
+        it('Stage 1 OCR 結束後若已 STOP，保證 Stage 1.5 (extractGlobalStoryAndGlossary) 與 Stage 2 請求數均為 0', async () => {
             let stage1Stopped = true;
+            let stage15RequestCount = 0;
             let stage2RequestCount = 0;
 
-            const canProceed = shouldProceedToStage2({
+            // 模擬 Stage 1 OCR 結束後進入 Stage 1.5 之前的守衛檢查
+            const canProceedToStage15 = shouldProceedToStage15({
                 wasStopped: stage1Stopped,
-                isStopping: true,
-                scriptLinesCount: 1
+                isStopping: true
             });
 
-            assert.equal(canProceed, false);
+            assert.equal(canProceedToStage15, false);
 
-            // 模擬若 canProceed 為 false，直接中斷不執行 Stage 2
-            if (canProceed) {
-                stage2RequestCount++;
+            // 當被守衛阻擋時，嚴格不得發起 Stage 1.5 (extractGlobalStoryAndGlossary) 與 Stage 2 請求
+            if (canProceedToStage15) {
+                stage15RequestCount++;
+                const canProceedToStage2 = shouldProceedToStage2({
+                    wasStopped: false,
+                    isStopping: false,
+                    scriptLinesCount: 5
+                });
+                if (canProceedToStage2) {
+                    stage2RequestCount++;
+                }
             }
 
+            assert.equal(stage15RequestCount, 0);
             assert.equal(stage2RequestCount, 0);
 
             // 驗證 lifecycle 決策：不得標記為 completed
@@ -151,19 +162,45 @@ describe('Translation Lifecycle Integration Tests', () => {
             assert.equal(canComplete, false);
         });
 
-        it('Stage 1 OCR 正常完成且未被停止時，順暢進入 Stage 2', () => {
-            const canProceed = shouldProceedToStage2({
-                wasStopped: false,
-                isStopping: false,
-                scriptLinesCount: 5
-            });
+        it('Stage 1 OCR 正常完成但 Stage 1.5 期間 STOP，保證 Stage 2 請求數為 0', async () => {
+            let stage15RequestCount = 0;
+            let stage2RequestCount = 0;
 
-            assert.equal(canProceed, true);
+            const canProceedToStage15 = shouldProceedToStage15({
+                wasStopped: false,
+                isStopping: false
+            });
+            assert.equal(canProceedToStage15, true);
+
+            if (canProceedToStage15) {
+                stage15RequestCount++;
+                // 模擬在 Stage 1.5 執行期間或結束時使用者按 STOP
+                const isStoppingAfterStage15 = true;
+                const canProceedToStage2 = shouldProceedToStage2({
+                    wasStopped: isStoppingAfterStage15,
+                    isStopping: isStoppingAfterStage15,
+                    scriptLinesCount: 5
+                });
+                if (canProceedToStage2) {
+                    stage2RequestCount++;
+                }
+            }
+
+            assert.equal(stage15RequestCount, 1);
+            assert.equal(stage2RequestCount, 0);
+        });
+
+        it('Stage 1 與 Stage 1.5 均正常完成且未被停止時，順暢進入 Stage 2', () => {
+            const canProceedToStage15 = shouldProceedToStage15({ wasStopped: false, isStopping: false });
+            const canProceedToStage2 = shouldProceedToStage2({ wasStopped: false, isStopping: false, scriptLinesCount: 5 });
+
+            assert.equal(canProceedToStage15, true);
+            assert.equal(canProceedToStage2, true);
         });
     });
 
-    describe('情境 4: 實際 usedModelName 一致性與 Failover 統計邊界', () => {
-        it('Model A 觸發 429 後切換至 Model B 成功，usedModelName 與 metadata 保持一致為 Model B', async () => {
+    describe('情境 4: 實際 usedModelName 一致性與 Failover 結果卡片邊界', () => {
+        it('Model A 觸發 429 後切換至 Model B 成功，usedModelName 與結果卡片 metadata 保持一致為 Model B', async () => {
             const execution = await executeHybridRequest({
                 candidateKeys: ['Key1'],
                 scheduledKey: 'Key1',
@@ -185,7 +222,7 @@ describe('Translation Lifecycle Integration Tests', () => {
             assert.equal(execution.usedModelName, 'gemini-3.5-flash-lite');
             assert.equal(execution.usedKey, 'Key1');
 
-            // 模擬封裝結果與 metadata
+            // 驗證封裝至結果卡片時的 metadata 一致性
             const finalCardResult = {
                 image: 'img1.jpg',
                 results: execution.results[0].results,
