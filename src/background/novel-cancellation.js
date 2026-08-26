@@ -1,19 +1,57 @@
 /**
  * novel-cancellation.js
  * 
- * 專門負責小說模式的分頁級中斷生命週期管理 (Per-Tab Novel Cancellation Registry)。
+ * 專門負責小說模式的分頁級 Session 與中斷生命週期管理 (Per-Tab Novel Session & Cancellation Registry)。
  * 核心原則：
- * 1. 每個分頁的小說翻譯 Session 擁有獨立的中斷狀態，分頁 A 中斷絕不影響分頁 B。
- * 2. 收到中斷請求時，精確修剪 novelQueue 中屬於該分頁的所有未執行任務。
- * 3. 只有全新的整篇翻譯 Session (batchIndex === 0 且非重試) 才能安全解除該分頁的中斷狀態。
- * 4. Stale batch 或重試 batch 絕不能解除中斷狀態。
- * 5. 小說模式完全獨立於漫畫模式的全域 isStopping 狀態，彼此互不干擾。
+ * 1. 每個分頁擁有獨立的 activeSessionId 與 cancelled 狀態，分頁 A 與 B 100% 隔離。
+ * 2. 只有顯式的 BEGIN_NOVEL_SESSION 訊息才能建立/切換活躍 Session (begin(tabId, sessionId))。
+ * 3. 任何普通批次訊息 (translateNovelParagraphs) 絕不可自行解除中斷或建立 Session。
+ * 4. 所有批次任務與注入皆需攜帶 sessionId，並通過 isCurrentSession(tabId, sessionId) 驗證。
+ * 5. Tab 關閉時執行 clear(tabId) 釋放記錄。
+ * 6. 小說模式完全獨立於漫畫模式的全域 isStopping 狀態，彼此互不干擾。
  */
 
-export function createNovelCancellationRegistry() {
-    const cancelledTabs = new Set();
+export function createNovelSessionRegistry() {
+    const activeSessions = new Map(); // tabId -> sessionId
+    const cancelledTabs = new Set();  // tabId
 
     return {
+        /**
+         * 明確開始新的小說翻譯 Session
+         * @param {number|string} tabId 
+         * @param {string} sessionId 
+         */
+        begin(tabId, sessionId) {
+            if (tabId === undefined || tabId === null || !sessionId) return;
+            const numericTabId = Number(tabId);
+            activeSessions.set(numericTabId, String(sessionId));
+            cancelledTabs.delete(numericTabId);
+        },
+
+        /**
+         * 取得特定分頁當前的 active sessionId
+         * @param {number|string} tabId 
+         * @returns {string|null}
+         */
+        getActiveSessionId(tabId) {
+            if (tabId === undefined || tabId === null) return null;
+            return activeSessions.get(Number(tabId)) || null;
+        },
+
+        /**
+         * 驗證 sessionId 是否為該分頁目前活躍且未被取消的合法 Session
+         * @param {number|string} tabId 
+         * @param {string} sessionId 
+         * @returns {boolean}
+         */
+        isCurrentSession(tabId, sessionId) {
+            if (tabId === undefined || tabId === null || !sessionId) return false;
+            const numericTabId = Number(tabId);
+            if (cancelledTabs.has(numericTabId)) return false;
+            const current = activeSessions.get(numericTabId);
+            return current === String(sessionId);
+        },
+
         /**
          * 標記特定分頁為中斷狀態
          * @param {number|string} tabId 
@@ -25,52 +63,64 @@ export function createNovelCancellationRegistry() {
         },
 
         /**
-         * 開始新的小說翻譯 Session，清除該分頁的中斷標記
+         * 檢查特定分頁或 Session 是否已被中斷
+         * @param {number|string} tabId 
+         * @param {string} [sessionId]
+         * @returns {boolean}
+         */
+        isCancelled(tabId, sessionId) {
+            if (tabId === undefined || tabId === null) return false;
+            const numericTabId = Number(tabId);
+            if (cancelledTabs.has(numericTabId)) return true;
+            if (sessionId) {
+                const current = activeSessions.get(numericTabId);
+                if (current !== String(sessionId)) return true;
+            }
+            return false;
+        },
+
+        /**
+         * 分頁關閉時清理該分頁的所有 Session 與中斷記錄
          * @param {number|string} tabId 
          */
-        begin(tabId) {
+        clear(tabId) {
             if (tabId !== undefined && tabId !== null) {
-                cancelledTabs.delete(Number(tabId));
+                const numericTabId = Number(tabId);
+                activeSessions.delete(numericTabId);
+                cancelledTabs.delete(numericTabId);
             }
         },
 
         /**
-         * 檢查特定分頁是否已被中斷
-         * @param {number|string} tabId 
-         * @returns {boolean}
-         */
-        isCancelled(tabId) {
-            if (tabId === undefined || tabId === null) return false;
-            return cancelledTabs.has(Number(tabId));
-        },
-
-        /**
-         * 清空所有分頁的中斷標記 (測試或重置用)
+         * 清空所有記錄 (測試用)
          */
         clearAll() {
+            activeSessions.clear();
             cancelledTabs.clear();
         },
 
         /**
-         * 取得當前被中斷的分頁數量
+         * 取得目前活躍 Session 數量
          */
         size() {
-            return cancelledTabs.size;
+            return activeSessions.size;
         }
     };
 }
 
 /**
- * 判斷傳入的小說批次訊息是否為全新的完整小說翻譯 Session
- * 只有新 session 的首批 (batchIndex === 0 且無 retryIndices) 才能解除中斷狀態
- * @param {object} message 
+ * 判定特定小說任務是否應當繼續執行
+ * 同時驗證 Tab 中斷狀態與 Session 一致性
+ * @param {object} task 
+ * @param {object} registry 
  * @returns {boolean}
  */
-export function isNewFullSession(message) {
-    if (!message || typeof message !== 'object') return false;
-    const isFirstBatch = message.batchIndex === 0;
-    const hasRetry = Array.isArray(message.retryIndices) && message.retryIndices.length > 0;
-    return isFirstBatch && !hasRetry;
+export function shouldProcessNovelTask(task, registry) {
+    if (!task || typeof task !== 'object') return false;
+    const { tabId, sessionId } = task;
+    if (tabId === undefined || tabId === null || !sessionId) return false;
+    if (!registry || typeof registry.isCurrentSession !== 'function') return true;
+    return registry.isCurrentSession(tabId, sessionId);
 }
 
 /**
@@ -88,21 +138,7 @@ export function pruneQueueForTab(queue, tabId) {
 }
 
 /**
- * 判定特定小說任務是否應當繼續執行
- * 完全僅依賴 registry 中的 per-tab 中斷狀態，絕不依賴全域 isStopping
- * @param {object} task 
- * @param {object} registry 
- * @returns {boolean}
+ * 保持向後相容別名與全域單例
  */
-export function shouldProcessNovelTask(task, registry) {
-    if (!task || typeof task !== 'object') return false;
-    const tabId = task.tabId;
-    if (tabId === undefined || tabId === null) return false;
-    if (!registry || typeof registry.isCancelled !== 'function') return true;
-    return !registry.isCancelled(tabId);
-}
-
-/**
- * 全域單例
- */
-export const novelCancellationRegistry = createNovelCancellationRegistry();
+export const createNovelCancellationRegistry = createNovelSessionRegistry;
+export const novelCancellationRegistry = createNovelSessionRegistry();

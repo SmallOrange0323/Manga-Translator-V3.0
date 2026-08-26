@@ -13,7 +13,8 @@ import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
 import { mapNovelTranslationResults } from './novel-result-mapping.js';
-import { novelCancellationRegistry, isNewFullSession, pruneQueueForTab } from './novel-cancellation.js';
+import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellation.js';
+import { saveNovelSessionState, getNovelSessionStates, removeNovelSessionState, restoreNovelSessionRegistry } from './novel-session-state.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -116,14 +117,32 @@ state.init().then(async () => {
     log.info('Background', `狀態載入完成 (無痕模式: ${isIncognitoProcess})，檢查待處理任務...`);
     await state.set('isStopping', false); // 重置停止狀態
 
-    // 檢查是否有遺留的小說翻譯任務
+    // 1. SW 重啟恢復：從 chrome.storage.session 恢復小說 Session Identity 註冊表並清理 Ghost Tabs
+    if (!isIncognitoProcess) {
+        try {
+            const storedSessionStates = await getNovelSessionStates();
+            let activeTabIdSet = null;
+            try {
+                const tabs = await chrome.tabs.query({});
+                activeTabIdSet = new Set(tabs.map(t => t.id));
+            } catch (tabErr) {}
+            const restoredCount = await restoreNovelSessionRegistry(novelCancellationRegistry, storedSessionStates, activeTabIdSet);
+            if (restoredCount > 0) {
+                log.info('Background', `[Novel Startup] 已從 storage.session 成功恢復 ${restoredCount} 個分頁的 Session Identity`);
+            }
+        } catch (sessErr) {
+            log.warn('Background', '[Novel Startup] 恢復 Session Identity 失敗:', sessErr);
+        }
+    }
+
+    // 2. 檢查是否有遺留的小說翻譯任務 (此時 registry 已完成 hydrate)
     const queue = await state.get('novelQueue', []);
     if (queue.length > 0 && !isIncognitoProcess) {
         log.warn('Background', `偵測到 ${queue.length} 個小說待處理任務，準備恢復...`);
         processNovelQueue().catch(err => log.error('Background', '恢復小說佇列失敗:', err));
     }
 
-    // 檢查是否有未完成的漫畫預翻 session checkpoint，安全恢復
+    // 3. 檢查是否有未完成的漫畫預翻 session checkpoint，安全恢復
     if (!isIncognitoProcess) {
         restorePretranslationCheckpoints().catch(err => log.warn('Background', `[跨話連續追漫] 恢復預翻 checkpoint 失敗: ${err.message}`));
     }
@@ -196,9 +215,9 @@ async function processNovelQueue() {
             const task = queue.shift();
             await state.set('novelQueue', queue);
 
-            // Per-Tab 中斷防禦 1：若該分頁任務已被中斷，直接跳過
-            if (novelCancellationRegistry.isCancelled(task.tabId)) {
-                log.info('Background', `[小說批次] 分頁 ${task.tabId} 已中止，跳過未執行任務 (Batch: ${task.batchIndex})`);
+            // Per-Tab Session 防禦 1：若該任務 Session 已過期或被中止，直接跳過
+            if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
+                log.info('Background', `[小說批次] 分頁 ${task.tabId} 任務 Session 已過期或中止 (Session: ${task.sessionId})，跳過未執行任務 (Batch: ${task.batchIndex})`);
                 continue;
             }
 
@@ -251,9 +270,9 @@ async function processNovelQueue() {
             const isRetry = Array.isArray(task.retryIndices) && task.retryIndices.length > 0;
 
             try {
-                // Per-Tab 中斷防禦 2：發送 API 前再次檢查
-                if (novelCancellationRegistry.isCancelled(task.tabId)) {
-                    log.info('Background', `[小說批次] 分頁 ${task.tabId} 已中止，停止發起 API 呼叫`);
+                // Per-Tab Session 防禦 2：發送 API 前再次檢查
+                if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
+                    log.info('Background', `[小說批次] 分頁 ${task.tabId} 任務 Session 已過期或中止，停止發起 API 呼叫`);
                     continue;
                 }
 
@@ -298,9 +317,9 @@ async function processNovelQueue() {
                     glossarySnippet
                 }); 
 
-                // Per-Tab 中斷防禦 3 (Post-request Guard)：API 返回後若使用者已中止，立即捨棄結果
-                if (novelCancellationRegistry.isCancelled(task.tabId)) {
-                    log.warn('Background', `[小說批次] 分頁 ${task.tabId} 在 API 呼叫期間已被中止，捨棄本次回傳結果`);
+                // Per-Tab Session 防禦 3 (Post-request Guard)：API 返回後若使用者已切換 Session 或中止，立即捨棄結果
+                if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
+                    log.warn('Background', `[小說批次] 分頁 ${task.tabId} 在 API 呼叫期間 Session 已變更或中止 (Session: ${task.sessionId})，捨棄本次回傳結果`);
                     continue;
                 }
 
@@ -312,17 +331,18 @@ async function processNovelQueue() {
                 // 補全配額更新，傳入 modelName 支援 Gemma 識別
                 await incrementDailyUsage(modelName);
 
-                // Per-Tab 中斷防禦 4：寫入前再次檢查
-                if (novelCancellationRegistry.isCancelled(task.tabId)) {
-                    log.warn('Background', `[小說批次] 分頁 ${task.tabId} 已中止，停止寫入 novelResults`);
+                // Per-Tab Session 防禦 4：寫入前再次檢查
+                if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
+                    log.warn('Background', `[小說批次] 分頁 ${task.tabId} 任務 Session 已過期或中止，停止寫入 novelResults`);
                     continue;
                 }
 
-                // 逐條寫入結果以更新 status / stats 累加
+                // 逐條寫入結果以更新 status / stats 累加 (附帶 sessionId 標識)
                 for (let k = 0; k < task.texts.length; k++) {
                     const translation = translations[k] || '（翻譯失敗）';
                     const globalIdx = isRetry ? task.retryIndices[k] : (task.startIdx + k);
                     const resultItem = {
+                        sessionId: task.sessionId,
                         tabId: task.tabId,
                         idx: globalIdx,
                         original: task.texts[k],
@@ -332,16 +352,17 @@ async function processNovelQueue() {
                     await state.update('novelResults', (current = []) => [...current, resultItem]);
                 }
 
-                // Per-Tab 中斷防禦 5：通知前台注入前檢查
-                if (novelCancellationRegistry.isCancelled(task.tabId)) {
-                    log.info('Background', `[小說批次] 分頁 ${task.tabId} 已中止，停止注入結果`);
+                // Per-Tab Session 防禦 5：通知前台注入前檢查
+                if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
+                    log.info('Background', `[小說批次] 分頁 ${task.tabId} 任務 Session 已過期或中止，停止注入結果`);
                     continue;
                 }
 
-                // 批次完成後通知前端注入
-                log.info('Background', `[小說批次] 完成翻譯，即將發送訊息給前台分頁: ${task.tabId}`);
+                // 批次完成後通知前端注入 (攜帶 sessionId 供前端比對)
+                log.info('Background', `[小說批次] 完成翻譯，即將發送訊息給前台分頁: ${task.tabId} (Session: ${task.sessionId})`);
                 await chrome.tabs.sendMessage(task.tabId, {
                     action: 'injectNovelBatchResult',
+                    sessionId: task.sessionId,
                     batchIndex: task.batchIndex,
                     translations: translations,
                     retryIndices: task.retryIndices,
@@ -349,16 +370,16 @@ async function processNovelQueue() {
                 });
 
                 // 更新進度 (僅在未中斷時)
-                if (!novelCancellationRegistry.isCancelled(task.tabId)) {
+                if (novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
                     await state.setThrottled('novelProgress', {
                         status: `已完成第 ${(task.batchIndex || 0) + 1} / ${task.totalBatches || 1} 批`
                     }, 0);
                 }
 
             } catch (batchErr) {
-                // Per-Tab 中斷防禦 6：若任務已中斷，絕不將中斷當成一般失敗發送失敗注入
-                if (novelCancellationRegistry.isCancelled(task.tabId)) {
-                    log.info('Background', `[小說批次] 分頁 ${task.tabId} 已中止，略過失敗訊息廣播`);
+                // Per-Tab Session 防禦 6：若任務已中斷或過期，絕不將中斷當成一般失敗發送失敗注入
+                if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
+                    log.info('Background', `[小說批次] 分頁 ${task.tabId} 任務 Session 已過期或中止，略過失敗訊息廣播`);
                     continue;
                 }
 
@@ -368,6 +389,7 @@ async function processNovelQueue() {
                 try {
                     await chrome.tabs.sendMessage(task.tabId, {
                         action: 'injectNovelBatchResult',
+                        sessionId: task.sessionId,
                         batchIndex: task.batchIndex,
                         translations: task.texts.map(() => '（翻譯失敗）'),
                         retryIndices: task.retryIndices,
@@ -381,16 +403,16 @@ async function processNovelQueue() {
             // ── 異步術語萃取 (與漫畫模式對齊) ──
             if (isIncognitoTask && incognitoPrivacy) {
                 log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗，已自動跳過小說術語萃取與詞庫儲存');
-            } else if (!novelCancellationRegistry.isCancelled(task.tabId) && mangaKey && allTranslatedResults.length > 0) {
+            } else if (novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId) && mangaKey && allTranslatedResults.length > 0) {
                 log.info('Background', `[小說萃取] 開始分析小說譯文，提取關鍵術語...`);
                 setTimeout(async () => {
-                    if (novelCancellationRegistry.isCancelled(task.tabId)) return;
+                    if (!novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) return;
                     try {
                         const newTerms = await extractTermsFromTranslation(allTranslatedResults, { model: modelName });
-                        if (newTerms && newTerms.length > 0 && !novelCancellationRegistry.isCancelled(task.tabId)) {
+                        if (newTerms && newTerms.length > 0 && novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
                             const currentEntry = await loadGlossary(mangaKey) || { terms: [] };
                             const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], newTerms);
-                            if (addedCount > 0 && !novelCancellationRegistry.isCancelled(task.tabId)) {
+                            if (addedCount > 0 && novelCancellationRegistry.isCurrentSession(task.tabId, task.sessionId)) {
                                 await saveGlossary(mangaKey, {
                                     displayName: currentDisplayName || mangaKey,
                                     terms: mergedTerms
@@ -447,27 +469,80 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'BEGIN_NOVEL_SESSION') {
+      const tabId = sender.tab ? sender.tab.id : message.tabId;
+      const { sessionId, pageUrl } = message;
+      if (!tabId || !sessionId) {
+          sendResponse({ ok: false, error: 'Missing tabId or sessionId' });
+          return false;
+      }
+
+      (async () => {
+          try {
+              log.info('Background', `[Novel Session] 分頁 ${tabId} 建立/切換新 Session: ${sessionId}`);
+              
+              // 1. 記憶體 Registry 更新
+              novelCancellationRegistry.begin(tabId, sessionId);
+              
+              // 2. storage.session 持久化 Session Identity
+              const persisted = await saveNovelSessionState({ 
+                  tabId, 
+                  sessionId, 
+                  pageUrl: pageUrl || '', 
+                  cancelled: false 
+              });
+
+              if (!persisted) {
+                  log.error('Background', `[Novel Session] 分頁 ${tabId} Session ${sessionId} 持久化失敗`);
+                  // Ownership-aware rollback: 只有當目前活躍 Session 仍為自己時才清除記憶體註冊
+                  if (novelCancellationRegistry.getActiveSessionId(tabId) === sessionId) {
+                      novelCancellationRegistry.clear(tabId);
+                  }
+                  sendResponse({ ok: false, error: 'Failed to persist novel session identity (storage.session unavailable or save failed)' });
+                  return;
+              }
+
+              // 3. 原子化修剪舊佇列任務 (防 lost update)
+              await state.update('novelQueue', (currentQueue = []) => {
+                  const safeQueue = Array.isArray(currentQueue) ? currentQueue : Object.values(currentQueue || {});
+                  return pruneQueueForTab(safeQueue, tabId);
+              });
+
+              // 4. Session Transition Guard：檢查在持久化與修剪期間，是否已被更新的 BEGIN 超越 (superseded)
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  log.warn('Background', `[Novel Session] 分頁 ${tabId} 的 Session ${sessionId} 已被更新的 Session 超越，拒絕發送成功 ACK`);
+                  sendResponse({ ok: false, status: 'superseded-session', error: 'Session was superseded' });
+                  return;
+              }
+
+              // 5. 全部持久化、修剪與 Session 驗證確認無誤後才發送 ACK
+              sendResponse({ ok: true, sessionId, tabId });
+          } catch (err) {
+              log.error('Background', 'BEGIN_NOVEL_SESSION 處理失敗:', err);
+              sendResponse({ ok: false, error: err.message });
+          }
+      })();
+
+      return true; // 保持非同步通道，等待全部完成後 ACK
+  }
+
   if (message.action === 'translateNovelParagraphs') {
-      const { batchIndex, totalBatches, startIdx, texts, retryIndices } = message;
+      const { sessionId, batchIndex, totalBatches, startIdx, texts, retryIndices } = message;
       const tabId = sender.tab?.id;
       if (!tabId) {
           sendResponse({ error: '找不到分頁 ID' });
           return false;
       }
 
-      // 若為全新的完整翻譯 Session (首批非重試)，清除該分頁的中斷狀態
-      if (isNewFullSession(message)) {
-          novelCancellationRegistry.begin(tabId);
-      }
-
-      // 防禦：若此分頁目前處於中斷狀態 (例如 stale batch)，直接拒絕入列
-      if (novelCancellationRegistry.isCancelled(tabId)) {
-          log.info('Background', `[Novel] 忽略已中止分頁 ${tabId} 的批次任務 (batchIndex: ${batchIndex})`);
-          sendResponse({ status: 'cancelled' });
+      // 嚴格驗證 Session 身份
+      if (!sessionId || !novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+          log.info('Background', `[Novel] 拒絕非當前 Session 或已中止分頁 ${tabId} 的批次任務 (Session: ${sessionId}, batchIndex: ${batchIndex})`);
+          sendResponse({ status: 'stale-session' });
           return false;
       }
 
       const task = {
+          sessionId,
           tabId,
           batchIndex,
           totalBatches,
@@ -583,13 +658,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
     }
     
-    // 若為新 Session 則清除中斷標記
-    if (payload.tabId && isNewFullSession(payload)) {
-        novelCancellationRegistry.begin(payload.tabId);
-    }
-
-    if (payload.tabId && novelCancellationRegistry.isCancelled(payload.tabId)) {
-        sendResponse({ status: 'cancelled' });
+    // 嚴格驗證 Session 身份 (防止 missing sessionId 繞過)
+    if (!payload.tabId || !payload.sessionId || !novelCancellationRegistry.isCurrentSession(payload.tabId, payload.sessionId)) {
+        log.info('Background', `[Novel] 拒絕無效或非當前 Session 的 ADD_TO_QUEUE 任務 (tabId: ${payload.tabId}, sessionId: ${payload.sessionId})`);
+        sendResponse({ status: 'stale-session' });
         return false;
     }
     
@@ -1073,7 +1145,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'retranslateNovelParagraph') {
-      const { text, mangaKey } = message;
+      const { sessionId, text, mangaKey } = message;
+      const tabId = sender.tab?.id || message.tabId;
+      if (!tabId || !sessionId || !novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+          log.info('Background', `[Novel] 拒絕非當前 Session 的單段重譯請求 (tabId: ${tabId}, sessionId: ${sessionId})`);
+          sendResponse({ success: false, status: 'stale-session', error: 'stale session' });
+          return false;
+      }
+
       (async () => {
           try {
               const model = await state.get('novelModelName', 'gemini-3.5-flash-lite');
@@ -1101,6 +1180,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   }
               });
               
+              // Post-request Guard: 若 API 返回期間 Session 已切換或中斷，立即捨棄
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  log.warn('Background', `[Novel] 單段重譯 API 期間 Session 已切換 (tabId: ${tabId}, sessionId: ${sessionId})，捨棄結果`);
+                  sendResponse({ success: false, status: 'stale-session', error: 'stale session' });
+                  return;
+              }
+
               if (result?.results && result.results[0]) {
                   await incrementDailyUsage(model);
                   sendResponse({ success: true, translation: result.results[0] });
@@ -1226,15 +1312,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'abortNovelTranslation') {
       const targetTabId = message.tabId || sender.tab?.id;
       if (targetTabId) {
-          log.info('Background', `[Novel] 中止分頁 ${targetTabId} 的小説翻譯任務`);
-          novelCancellationRegistry.cancel(targetTabId);
-          // 修剪持久化佇列，移除該分頁尚未執行的任務
-          state.update('novelQueue', (currentQueue = []) => {
-              const safeQueue = Array.isArray(currentQueue) ? currentQueue : Object.values(currentQueue || {});
-              return pruneQueueForTab(safeQueue, targetTabId);
-          }).catch(err => log.error('Background', '修剪小說佇列失敗:', err));
-          // 對此分頁的 content script 發送中止指令
-          chrome.tabs.sendMessage(targetTabId, { action: 'abortNovelTranslation' }).catch(() => {});
+          (async () => {
+              try {
+                  log.info('Background', `[Novel] 中止分頁 ${targetTabId} 的小説翻譯任務`);
+                  // 1. 記憶體 registry 優先 cancel (保證 STOP 立即生效)
+                  novelCancellationRegistry.cancel(targetTabId);
+                  
+                  // 2. 嘗試持久化 cancelled 狀態
+                  const activeSessionId = novelCancellationRegistry.getActiveSessionId(targetTabId);
+                  let persistenceWarning = false;
+                  if (activeSessionId) {
+                      const persisted = await saveNovelSessionState({ 
+                          tabId: targetTabId, 
+                          sessionId: activeSessionId, 
+                          cancelled: true 
+                      });
+                      if (!persisted) {
+                          persistenceWarning = true;
+                      }
+                  }
+
+                  // 3. 修剪持久化佇列，移除該分頁尚未執行的任務
+                  await state.update('novelQueue', (currentQueue = []) => {
+                      const safeQueue = Array.isArray(currentQueue) ? currentQueue : Object.values(currentQueue || {});
+                      return pruneQueueForTab(safeQueue, targetTabId);
+                  });
+
+                  // 4. 對此分頁的 content script 發送中止指令
+                  chrome.tabs.sendMessage(targetTabId, { action: 'abortNovelTranslation' }).catch(() => {});
+                  sendResponse({ ok: true, persistenceWarning });
+              } catch (err) {
+                  log.error('Background', 'abortNovelTranslation 處理失敗:', err);
+                  // 即使發生錯誤，STOP 記憶體中斷仍維持成立
+                  sendResponse({ ok: true, error: err.message });
+              }
+          })();
+          return true; // 保持非同步通道，等待持久化完成才 ACK
       }
       sendResponse({ ok: true });
       return false;
@@ -2646,6 +2759,8 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
   delete sessionStoryContext[tabId];
   delete lastNovelUrlByTab[tabId];
+  novelCancellationRegistry.clear(tabId);
+  removeNovelSessionState(tabId).catch(err => log.warn('Background', `清理分頁 ${tabId} session state 失敗:`, err));
 
   // 清理與該分頁關聯的跨話預翻快取 (記憶體 + Session Checkpoint)
   for (const [chUrl, data] of pretranslatedChaptersMap.entries()) {
