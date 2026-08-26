@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 
@@ -1812,6 +1812,9 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         // 1. 取得本批預先壓縮好的 Base64
         const base64List = await nextOcrBatchPromise;
 
+        // 預載結束後、發起任何 OCR API 之前，立即再次檢查 isStopping
+        if (await state.get('isStopping')) break;
+
         // 2. 雙緩衝管線：若有下一批，立即在發送 API 前啟動背景預載預壓
         const nextOcrStart = i + ocrBatchSize;
         if (nextOcrStart < images.length) {
@@ -1831,14 +1834,11 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 });
             } catch (batchOcrErr) {
                 log.warn('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 失敗，嘗試逐張重試: ${batchOcrErr.message}`);
-                batchScripts = await Promise.all(base64List.map(async (b64, idx) => {
-                    if (!b64) return '';
-                    try {
-                        return await extractTextFromImage(b64, { model: ocrModelName });
-                    } catch (err) {
-                        return '';
-                    }
-                }));
+                batchScripts = await executeOcrFallbackImages({
+                    base64List,
+                    extractSingle: (b64) => extractTextFromImage(b64, { model: ocrModelName }),
+                    shouldContinue: async () => !(await state.get('isStopping'))
+                });
             }
         }
 
@@ -1848,6 +1848,18 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 scriptLines.push(`[P.${pageNum}]\n${text.trim()}`);
             }
         });
+    }
+
+    // ── 【第一道 STOP 守衛：Stage 1 OCR 結束 ➔ 進入 Stage 1.5 之前】 ──
+    const isStoppingAfterOcr = await state.get('isStopping');
+    if (!shouldProceedToStage15({ wasStopped: isStoppingAfterOcr, isStopping: isStoppingAfterOcr })) {
+        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 1.5 與階段 2');
+        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+        if (resultTabId) {
+            activeTranslationJobs.delete(resultTabId);
+            delete sessionStoryContext[resultTabId];
+        }
+        return;
     }
 
     const fullScriptText = scriptLines.join('\n\n');
@@ -1920,6 +1932,17 @@ ${termsSnippet}
         throw err;
     } finally {
         swKeepAlive.stop();
+    }
+
+    const isStopping = await state.get('isStopping');
+    if (!shouldProceedToStage2({ wasStopped: isStopping, isStopping, scriptLinesCount: scriptLines.length })) {
+        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 2 翻譯');
+        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+        if (resultTabId) {
+            activeTranslationJobs.delete(resultTabId);
+            delete sessionStoryContext[resultTabId];
+        }
+        return;
     }
 
     return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet, customMangaKey);
@@ -2240,44 +2263,32 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     log.warn('Background', `[批次] 所有 API Key 批次翻譯均失敗，啟動備援逐張重試...`);
                     broadcastStatus(`⚠️ 所有 Key 批次失敗，正在啟動逐張重試...`, 'warn');
 
-                    const fallbackResults = Array(validItems.length).fill(null);
-                    await Promise.all(validItems.map(async (item, k) => {
-                        if (await state.get('isStopping')) {
-                            fallbackResults[k] = { error: '翻譯已停止' };
-                            return;
-                        }
-                        const apiKey = await state.getNextApiKey();
-                        if (await state.get('isStopping')) {
-                            fallbackResults[k] = { error: '翻譯已停止' };
-                            return;
-                        }
-                        try {
-                            const result = await translateTexts([], {
-                                model: fallbackModelName,
-                                apiKey: apiKey,
-                                prompt: finalPrompt,
-                                glossarySnippet,
-                                imageBase64: item.b64,
-                                schema: {
-                                    type: 'OBJECT',
-                                    properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
-                                    required: ['results']
-                                }
-                            });
-                            fallbackResults[k] = {
-                                ...result,
-                                usedModelName: result.usedModelName || fallbackModelName
-                            };
-                            broadcastStatus(`第 ${item.originalIdx + 1} 張備援翻譯成功`, 'ok');
-                        } catch (singleErr) {
-                            log.warn('Background', `[備援] 第 ${item.originalIdx + 1} 張翻譯失敗 (Key: ${state.getApiKeyAlias(apiKey)}): ${singleErr.message}`);
-                            broadcastStatus(`❌ 第 ${item.originalIdx + 1} 張備援失敗: ${singleErr.message.slice(0, 30)}`, 'err');
-                            fallbackResults[k] = { error: singleErr.message };
-                        }
-                    }));
+                    const fallbackResult = await executeFallbackImages({
+                        validItems,
+                        fallbackModelName,
+                        getNextApiKey: () => state.getNextApiKey(),
+                        translateSingle: ({ imageBase64, model, apiKey }) => translateTexts([], {
+                            model,
+                            apiKey,
+                            prompt: finalPrompt,
+                            glossarySnippet,
+                            imageBase64,
+                            schema: {
+                                type: 'OBJECT',
+                                properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
+                                required: ['results']
+                            }
+                        }),
+                        shouldContinue: async () => !(await state.get('isStopping')),
+                        broadcastStatus: (msg, type) => broadcastStatus(msg, type)
+                    });
+
+                    if (fallbackResult.wasStopped) {
+                        wasStopped = true;
+                    }
 
                     validItems.forEach((item, k) => {
-                        allPageResults[item.originalIdx] = fallbackResults[k] || { error: '備援翻譯結果缺失' };
+                        allPageResults[item.originalIdx] = fallbackResult.fallbackResults[k] || { error: '備援翻譯結果缺失' };
                     });
                 }
             }
