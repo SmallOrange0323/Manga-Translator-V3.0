@@ -30,6 +30,11 @@ export function buildNovelRehydrateSnapshot({ sessionState, job, novelResults = 
     const sessionId = sessionState.sessionId;
     const tabId = sessionState.tabId;
 
+    // 0. Job Identity 驗證 (必須屬於同一 tabId 與 sessionId)
+    if (job.sessionId !== sessionId || job.tabId !== tabId) {
+        return { ok: false, status: 'stale-session' };
+    }
+
     // 1. URL 驗證
     if (currentTabUrl && !isSameNovelPage(sessionState.pageUrl, currentTabUrl)) {
         return { ok: false, status: 'url-mismatch' };
@@ -97,10 +102,12 @@ export function buildNovelRehydrateSnapshot({ sessionState, job, novelResults = 
     }
 
     // 第一層：從 novelResults 讀取已完成的段落
+    // 注意：對處於當前 retryIdxSet 中的段落，舊的 failure 不得覆蓋 retrying 狀態
     const safeResults = Array.isArray(novelResults) ? novelResults : [];
     for (const item of safeResults) {
         if (!item || item.tabId !== tabId || item.sessionId !== sessionId) continue;
         if (!renderMap.has(item.idx)) continue;
+        if (retryIdxSet.has(item.idx)) continue; // 跳過重試中段落的舊結果
 
         if (item.translation === '（翻譯失敗）') {
             renderMap.set(item.idx, {

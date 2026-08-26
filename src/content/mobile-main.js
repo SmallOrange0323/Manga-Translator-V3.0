@@ -573,7 +573,7 @@ export function initMobileMode() {
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'translateNovelPage') {
         log.info('Content-Mobile', '收到手動 translateNovelPage 訊息，使 Rehydrate 失效並啟動新翻譯');
-        rehydrateController.supersede();
+        rehydrateController.onManualStart();
         try {
             startNovelTranslation();
             sendResponse({ started: true });
@@ -586,35 +586,36 @@ export function initMobileMode() {
 
     if (request.action === 'AUTO_TRANSLATE_PAGE') {
         log.info('Content-Mobile', '收到 AUTO_TRANSLATE_PAGE 自動翻譯訊息');
-        const phase = rehydrateController.getPhase();
-        if (phase === 'checking') {
-            log.info('Content-Mobile', '當前正在執行 Page Rehydrate，延遲 AUTO_TRANSLATE_PAGE 處理');
-            rehydrateController.setPendingAuto(true);
-            sendResponse({ started: false, deferred: true });
-            return false;
-        }
-        if (phase === 'rehydrated') {
-            log.info('Content-Mobile', '小說頁面已成功 Rehydrate，消耗並忽略延遲 AUTO_TRANSLATE_PAGE，不建立新 Session');
-            sendResponse({ started: false, rehydrated: true });
-            return false;
-        }
-        try {
+        const autoRes = rehydrateController.handleAutoSignal(() => {
             startNovelTranslation();
-            sendResponse({ started: true });
-        } catch (e) {
-            log.error('Content-Mobile', 'startNovelTranslation 發生錯誤:', e);
-            sendResponse({ started: false, error: e.message });
-        }
+        });
+        sendResponse(autoRes);
         return false;
     }
 
     if (request.action === 'abortNovelTranslation') {
-        log.info('Content-Mobile', '收到 abortNovelTranslation 訊息，終止本地翻譯狀態');
-        rehydrateController.supersede();
+        log.info('Content-Mobile', '收到 abortNovelTranslation 訊息:', request);
+        if (request.reason === 'navigation' && request.sessionId) {
+            // 導航專用 targeted abort：只有目標 sessionId 相符才清理
+            const handled = rehydrateController.onTargetedNavigationAbort(
+                request.sessionId,
+                currentNovelSessionId,
+                () => {
+                    isNovelTranslationAborted = true;
+                    currentNovelSessionId = null;
+                    window.mt_currentNovelSessionId = null;
+                }
+            );
+            sendResponse({ ok: true, targeted: true, handled });
+            return false;
+        }
+
+        // Generic STOP / mode disable: 無條件終止並鎖定 AUTO
+        rehydrateController.onGenericStop();
         isNovelTranslationAborted = true;
         currentNovelSessionId = null;
         window.mt_currentNovelSessionId = null;
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, generic: true });
         return false;
     }
 

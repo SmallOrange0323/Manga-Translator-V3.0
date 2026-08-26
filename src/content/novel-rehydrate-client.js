@@ -68,6 +68,7 @@ export function applyNovelRehydrateSnapshot(renderItems, { injectBatchResultFn }
 export function createNovelRehydrateController() {
     let generation = 0;
     let phase = 'checking'; // 'checking' | 'rehydrated' | 'none' | 'mismatch' | 'superseded'
+    let autoDisposition = 'defer'; // 'defer' | 'allow' | 'consume'
     let pendingAutoTranslate = false;
 
     return {
@@ -75,13 +76,83 @@ export function createNovelRehydrateController() {
         isChecking: () => phase === 'checking',
         hasPendingAuto: () => pendingAutoTranslate,
         setPendingAuto: (val) => { pendingAutoTranslate = Boolean(val); },
-        
+        getAutoDisposition: () => autoDisposition,
+        setAutoDisposition: (val) => { autoDisposition = val; },
+
+        /**
+         * 統一的 AUTO_TRANSLATE_PAGE 處理政策 (供 Desktop 與 Mobile 完全共用)
+         * @param {Function} startTranslationFn
+         * @returns {{started: boolean, deferred?: boolean, rehydrated?: boolean, consumed?: boolean, error?: string}}
+         */
+        handleAutoSignal: (startTranslationFn) => {
+            if (autoDisposition === 'defer' || phase === 'checking') {
+                pendingAutoTranslate = true;
+                return { started: false, deferred: true };
+            }
+            if (autoDisposition === 'consume' || phase === 'rehydrated') {
+                return { started: false, rehydrated: phase === 'rehydrated', consumed: true };
+            }
+            if (autoDisposition === 'allow') {
+                // AUTO 決定啟動新翻譯，立即將 disposition 切換為 consume 防止重複觸發
+                autoDisposition = 'consume';
+                phase = 'superseded';
+                try {
+                    if (typeof startTranslationFn === 'function') startTranslationFn();
+                    return { started: true };
+                } catch (e) {
+                    return { started: false, error: e.message };
+                }
+            }
+            return { started: false, consumed: true };
+        },
+
+        /**
+         * 手動發起翻譯時，立即使 Rehydrate 失效並鎖定後續 AUTO (避免 delayed AUTO 開第二 Session)
+         */
+        onManualStart: () => {
+            generation++;
+            phase = 'superseded';
+            autoDisposition = 'consume';
+            pendingAutoTranslate = false;
+        },
+
+        /**
+         * 收到 Generic STOP 或模式停用時，終止並鎖定 AUTO
+         */
+        onGenericStop: () => {
+            generation++;
+            phase = 'superseded';
+            autoDisposition = 'consume';
+            pendingAutoTranslate = false;
+        },
+
+        /**
+         * 收到針對特定舊 Session 的導航終止通知時，若當前 Session 相符則清除並重新允許 AUTO
+         * @param {string} targetSessionId
+         * @param {string|null} currentSessionId
+         * @param {Function} detachFn
+         * @returns {boolean} 是否成功處理
+         */
+        onTargetedNavigationAbort: (targetSessionId, currentSessionId, detachFn) => {
+            if (targetSessionId && currentSessionId === targetSessionId) {
+                generation++;
+                phase = 'none';
+                autoDisposition = 'allow'; // 允許後續新章節的 AUTO
+                pendingAutoTranslate = false;
+                if (typeof detachFn === 'function') detachFn();
+                return true;
+            }
+            // 若當前 session 已非 targetSessionId (例如已成立 BBB 或 checking)，忽略不干擾
+            return false;
+        },
+
         /**
          * 使用者發起手動翻譯時，立即使 Rehydrate 失效
          */
         supersede: () => {
             generation++;
             phase = 'superseded';
+            autoDisposition = 'consume';
             pendingAutoTranslate = false;
         },
 
@@ -102,6 +173,7 @@ export function createNovelRehydrateController() {
 
             const currentGen = ++generation;
             phase = 'checking';
+            autoDisposition = 'defer';
 
             // 1. 等待 DOM Ready
             if (document.readyState === 'loading') {
@@ -125,13 +197,16 @@ export function createNovelRehydrateController() {
 
             if (!firstSnapshot || !firstSnapshot.ok || firstSnapshot.status !== 'rehydratable') {
                 if (firstSnapshot?.status === 'error') {
-                    // 若為伺服器/通訊異常，不 definitive 判定為無 session，保持 phase = 'none' 但不自動開新翻譯破壞 durable state
+                    // 若為伺服器/通訊異常，保持 phase = 'none' 且 autoDisposition = 'consume' (Fail Closed)
                     phase = 'none';
+                    autoDisposition = 'consume';
                     return;
                 }
                 phase = 'none';
+                autoDisposition = 'allow';
                 if (pendingAutoTranslate) {
                     pendingAutoTranslate = false;
+                    autoDisposition = 'consume';
                     if (typeof startNewTranslationFn === 'function') startNewTranslationFn();
                 }
                 return;
@@ -173,14 +248,20 @@ export function createNovelRehydrateController() {
                     });
                 } catch (_) {}
 
-                // 只有在 ABANDON 確認成功清理時，才允許 pending AUTO 開啟新 Session
-                // 若回傳 stale-session 表示背景已切換至其他 Session (例如 BBB)，絕不在此建立 CCC
+                // ABANDON await 期間可能已被使用者手動觸發 supersede，嚴格檢查 generation guard
+                if (currentGen !== generation || phase === 'superseded') return;
+
+                // 只有在 ABANDON 確認成功清理 (ok: true) 時，才允許 pending AUTO 開啟新 Session
                 if (abandonRes && abandonRes.ok) {
+                    autoDisposition = 'allow';
                     if (pendingAutoTranslate) {
                         pendingAutoTranslate = false;
+                        autoDisposition = 'consume';
                         if (typeof startNewTranslationFn === 'function') startNewTranslationFn();
                     }
                 } else {
+                    // 若回傳 stale-session 或 superseded-session，表示背景已有更新 Session，鎖定 AUTO 且不開 CCC
+                    autoDisposition = 'consume';
                     if (typeof onSessionDetachedFn === 'function') {
                         onSessionDetachedFn();
                     }
@@ -216,19 +297,22 @@ export function createNovelRehydrateController() {
 
             if (currentGen !== generation || phase === 'superseded') return;
 
+            // 嚴格驗證第二份快照：只有 ok: true 且 sessionId 完全相符才視為成功 Catch-up
             if (secondSnapshot && secondSnapshot.ok && secondSnapshot.sessionId === firstSnapshot.sessionId) {
                 applyNovelRehydrateSnapshot(secondSnapshot.renderItems, { injectBatchResultFn });
-            } else if (secondSnapshot && secondSnapshot.status === 'stale-session') {
-                // Background Session 在此期間已切換或過期
+            } else {
+                // 第二份快照失敗 (stale-session, error, url-mismatch, no-session 等) ➔ 絕不宣告成功 rehydrated
                 if (typeof onSessionDetachedFn === 'function') {
                     onSessionDetachedFn();
                 }
                 phase = 'none';
+                autoDisposition = 'consume';
                 return;
             }
 
-            // 6. 標記 Rehydrate 完成並翻譯 UI 元素
+            // 6. 標記 Rehydrate 順利完成並翻譯 UI 元素
             phase = 'rehydrated';
+            autoDisposition = 'consume';
             pendingAutoTranslate = false; // consume pending auto translate (不開新 Session)
 
             if (typeof translateUIElementsFn === 'function') {

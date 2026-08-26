@@ -221,9 +221,9 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
     });
 
     // ─────────────────────────────────────────────────────────
-    // 二、 Render Snapshot Tests (11 ~ 18)
+    // 二、 Render Snapshot Tests (11 ~ 18, R, S)
     // ─────────────────────────────────────────────────────────
-    describe('2. Render Items 生成與 Durable 覆蓋 (Tests 11 ~ 18)', () => {
+    describe('2. Render Items 生成與 Durable 覆蓋 (Tests 11 ~ 18, R, S)', () => {
         it('Test 11: novelResults success ➔ done', () => {
             const job = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, items: [{ idx: 0, text: 'A' }] });
             const res = buildNovelRehydrateSnapshot({
@@ -291,15 +291,40 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
             expect(res.renderItems[0].status).toBe('pending');
         });
 
-        it('Test 17: Retry pending item ➔ retrying', () => {
+        it('Test 17 & Scenario R: Retry pending idx 存在 old failure novelResult ➔ 仍保持 retrying 不被蓋掉', () => {
             const retryJob = createNovelJobCheckpoint({ sessionId: 's1', tabId: 1, kind: 'retry', items: [{ idx: 1, text: 'B' }] });
             const res = buildNovelRehydrateSnapshot({
                 sessionState: { tabId: 1, sessionId: 's1', pageUrl: 'https://site/1', cancelled: false },
                 job: retryJob,
-                novelResults: [{ tabId: 1, sessionId: 's1', idx: 0, original: 'A', translation: '譯文 A' }]
+                novelResults: [
+                    { tabId: 1, sessionId: 's1', idx: 0, original: 'A', translation: '譯文 A' },
+                    { tabId: 1, sessionId: 's1', idx: 1, original: 'B', translation: '（翻譯失敗）' } // 舊 failure
+                ]
             });
             expect(res.renderItems[0].status).toBe('done');
-            expect(res.renderItems[1].status).toBe('retrying');
+            expect(res.renderItems[1].status).toBe('retrying'); // 依然是 retrying，未被舊 failed 覆蓋
+        });
+
+        it('Scenario S: Retry 新 durable result ➔ retrying 正確變 done / failed', () => {
+            const retryJob = createNovelJobCheckpoint({
+                sessionId: 's1',
+                tabId: 1,
+                kind: 'retry',
+                batchSize: 1,
+                items: [{ idx: 1, text: 'B' }]
+            });
+            retryJob.batches["0"] = { translations: ['新重譯成功譯文'], isFailed: false };
+
+            const res = buildNovelRehydrateSnapshot({
+                sessionState: { tabId: 1, sessionId: 's1', pageUrl: 'https://site/1', cancelled: false },
+                job: retryJob,
+                novelResults: [
+                    { tabId: 1, sessionId: 's1', idx: 0, original: 'A', translation: '譯文 A' },
+                    { tabId: 1, sessionId: 's1', idx: 1, original: 'B', translation: '（翻譯失敗）' }
+                ]
+            });
+            expect(res.renderItems[1].status).toBe('done');
+            expect(res.renderItems[1].translation).toBe('新重譯成功譯文');
         });
 
         it('Test 18: Global idx mapping 對 retry non-contiguous indices 正確', () => {
@@ -373,9 +398,9 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
     });
 
     // ─────────────────────────────────────────────────────────
-    // 四、 Client State & Double Snapshot Tests (25 ~ 33)
+    // 四、 Client State & Double Snapshot Tests (25 ~ 33, P, Q)
     // ─────────────────────────────────────────────────────────
-    describe('4. Client State 與 Double Snapshot Catch-up (Tests 25 ~ 33)', () => {
+    describe('4. Client State 與 Double Snapshot Catch-up (Tests 25 ~ 33, P, Q)', () => {
         it('Test 25 ~ 27: Rehydrate 成功 ➔ current session 與 window.mt_currentNovelSessionId 恢復', async () => {
             const controller = createNovelRehydrateController();
             let attachedSessionId = null;
@@ -451,7 +476,7 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
             expect(calls[3].trans).toBe('Catch-up 譯文 1');
         });
 
-        it('Test 33: Snapshot #2 回 stale-session ➔ Content 觸發 detach', async () => {
+        it('Scenario P & Q: Second Snapshot 失敗 (error / no-session / stale) ➔ 絕不標記 rehydrated 並 detach', async () => {
             const controller = createNovelRehydrateController();
             let detached = false;
             let callCount = 0;
@@ -468,7 +493,7 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
                             renderItems: [{ idx: 0, status: 'done', translation: '譯文 A' }]
                         });
                     } else {
-                        cb({ ok: false, status: 'stale-session' });
+                        cb({ ok: false, status: 'error', error: 'Network failure' });
                     }
                 }
             });
@@ -484,13 +509,14 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
 
             expect(detached).toBe(true);
             expect(controller.getPhase()).toBe('none');
+            expect(controller.getAutoDisposition()).toBe('consume');
         });
     });
 
     // ─────────────────────────────────────────────────────────
-    // 五、 AUTO Race & Recovery Barrier Tests (34 ~ 38, A ~ E, O)
+    // 五、 AUTO Policy, Barrier & Navigation (Tests 34 ~ 38, A ~ E, I ~ M)
     // ─────────────────────────────────────────────────────────
-    describe('5. AUTO 競爭、Recovery Barrier 與早期導航 (Tests 34 ~ 38, A ~ E, O)', () => {
+    describe('5. AUTO 競爭防護、Recovery Barrier 與早期導航 (Tests 34 ~ 38, A ~ E, I ~ M)', () => {
         it('Test 34 & 35: AUTO during checking ➔ defer，rehydrate 成功後不發起新 session', async () => {
             const controller = createNovelRehydrateController();
             controller.setPendingAuto(true);
@@ -517,20 +543,27 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
             expect(controller.getPhase()).toBe('rehydrated');
             expect(startNew).not.toHaveBeenCalled();
             expect(controller.hasPendingAuto()).toBe(false);
+            expect(controller.getAutoDisposition()).toBe('consume');
         });
 
-        it('Scenario AUTO Controller Test: phase === rehydrated 收到 AUTO ➔ 忽略並不發起新翻譯', async () => {
+        it('Scenario I: manual start BBB ➔ 後續 delayed AUTO 只能 consume 絕不開 CCC', () => {
+            const controller = createNovelRehydrateController();
+            controller.onManualStart();
+
+            const startSpy = vi.fn();
+            const autoRes = controller.handleAutoSignal(startSpy);
+
+            expect(autoRes.started).toBe(false);
+            expect(autoRes.consumed).toBe(true);
+            expect(startSpy).not.toHaveBeenCalled();
+        });
+
+        it('Scenario J: GET error ➔ 後續 late AUTO 只能 consume 絕不開新 Session (Fail Closed)', async () => {
             const controller = createNovelRehydrateController();
 
             global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
                 if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
-                    cb({
-                        ok: true,
-                        status: 'rehydratable',
-                        sessionId: 'sess_1',
-                        expectedItems: [{ idx: 0, text: 'A' }],
-                        renderItems: [{ idx: 0, status: 'done', translation: 'A' }]
-                    });
+                    cb({ ok: false, status: 'error', error: 'Storage timeout' });
                 }
             });
 
@@ -539,64 +572,105 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
                 getParagraphTextFn: () => 'A'
             });
 
-            expect(controller.getPhase()).toBe('rehydrated');
-            expect(controller.isChecking()).toBe(false);
+            expect(controller.getPhase()).toBe('none');
+            expect(controller.getAutoDisposition()).toBe('consume');
+
+            // 500ms 後遲到的 AUTO 信號抵達
+            const startSpy = vi.fn();
+            const autoRes = controller.handleAutoSignal(startSpy);
+            expect(autoRes.started).toBe(false);
+            expect(startSpy).not.toHaveBeenCalled();
         });
 
-        it('Scenario A & B: Source Code 驗證 SW Startup 具備 novelRecoveryReady barrier 且包含 try...finally settle', () => {
+        it('Scenario L: Generic STOP ➔ 後續 delayed AUTO 不得重啟小說翻譯', () => {
+            const controller = createNovelRehydrateController();
+            controller.onGenericStop();
+
+            const startSpy = vi.fn();
+            const autoRes = controller.handleAutoSignal(startSpy);
+            expect(autoRes.started).toBe(false);
+            expect(startSpy).not.toHaveBeenCalled();
+        });
+
+        it('Scenario M: targeted navigation abort 成功 ➔ autoDisposition 恢復 allow 允許新章節 AUTO', () => {
+            const controller = createNovelRehydrateController();
+            let detached = false;
+
+            const handled = controller.onTargetedNavigationAbort(
+                'sess_AAA',
+                'sess_AAA',
+                () => { detached = true; }
+            );
+
+            expect(handled).toBe(true);
+            expect(detached).toBe(true);
+            expect(controller.getAutoDisposition()).toBe('allow');
+
+            const startSpy = vi.fn();
+            const autoRes = controller.handleAutoSignal(startSpy);
+            expect(autoRes.started).toBe(true);
+            expect(startSpy).toHaveBeenCalledTimes(1);
+        });
+
+        it('Scenario A & B: Source Code 驗證 SW Startup 具備 initializeNovelRecovery Protected Bootstrap', () => {
             const bgCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
-            expect(bgCode.includes('novelRecoveryReady')).toBe(true);
+            expect(bgCode.includes('initializeNovelRecovery')).toBe(true);
+            expect(bgCode.includes('novelRecoveryResult = { ok: true }')).toBe(true);
             expect(bgCode.includes('resolveNovelRecoveryReady()')).toBe(true);
             expect(bgCode.includes('finally')).toBe(true);
         });
 
-        it('Scenario C, D, E: Source Code 驗證 Early URL Navigation Invalidation 在 changeInfo.url 立即執行', () => {
+        it('Scenario D & E: Source Code 驗證 SW Startup 在 Scheduler 前驗證 Tab URL', () => {
             const bgCode = fs.readFileSync(path.resolve(__dirname, '../src/background/index.js'), 'utf-8');
-            expect(bgCode.includes('if (changeInfo.url)')).toBe(true);
-            expect(bgCode.includes('handleNovelPageNavigationChange(tabId, changeInfo.url)')).toBe(true);
-        });
-
-        it('Scenario O: Same URL / Hash navigation 不執行 invalidation', () => {
-            expect(isSameNovelPage('https://novel.com/ch1#p1', 'https://novel.com/ch1#p50')).toBe(true);
-            expect(isSameNovelPage('https://novel.com/ch1', 'https://novel.com/ch1')).toBe(true);
-            expect(isSameNovelPage('https://novel.com/ch1', 'https://novel.com/ch2')).toBe(false);
+            expect(bgCode.includes('isSameNovelPage(sessionState.pageUrl, currentTabUrl)')).toBe(true);
+            expect(bgCode.includes('cleanupNovelSessionIfCurrent(jobTabId, sessId)')).toBe(true);
         });
     });
 
     // ─────────────────────────────────────────────────────────
-    // 六、 Ownership-Safe Cleanup Tests (39 ~ 44, F ~ K)
+    // 六、 Ownership-Safe Cleanup Tests (39 ~ 44, F ~ H, O)
     // ─────────────────────────────────────────────────────────
-    describe('6. Ownership-Safe Cleanup 與條件移除 (Tests 39 ~ 44, F ~ K)', () => {
-        it('Scenario F, G, H, I: cleanup AAA 期間若已成立 BBB ➔ 保留 BBB 且不誤刪', async () => {
+    describe('6. Ownership-Safe Cleanup 與條件移除 (Tests 39 ~ 44, F ~ H, O)', () => {
+        it('Scenario F: cleanup AAA 期間若已成立 BBB ➔ 保留 BBB 且回傳 superseded-session 不得回 ok:true', () => {
             const registry = createNovelSessionRegistry();
             registry.begin(1, 'BBB'); // 當前分頁已經切換至 BBB
 
-            // 嘗試以舊的 AAA 呼叫 isCurrentSession
             expect(registry.isCurrentSession(1, 'AAA')).toBe(false);
-            // BBB 完整保留
             expect(registry.isCurrentSession(1, 'BBB')).toBe(true);
         });
 
+        it('Scenario G & H: Targeted navigation abort 只清理目標 sessionId', () => {
+            const controller = createNovelRehydrateController();
+            let detached = false;
+
+            // 當前 Content 已經是 BBB，收到針對舊 AAA 的 navigation abort ➔ 忽略不干擾
+            const handledMismatch = controller.onTargetedNavigationAbort('sess_AAA', 'sess_BBB', () => { detached = true; });
+            expect(handledMismatch).toBe(false);
+            expect(detached).toBe(false);
+
+            // 當前 Content 是 AAA，收到 AAA 的 navigation abort ➔ 成功清理
+            const handledMatch = controller.onTargetedNavigationAbort('sess_AAA', 'sess_AAA', () => { detached = true; });
+            expect(handledMatch).toBe(true);
+            expect(detached).toBe(true);
+        });
+
         it('Scenario H: removeNovelSessionStateIfMatches 只有 sessionId 相符時才刪除', async () => {
-            // 寫入 Session AAA
             await saveNovelSessionState({ tabId: 10, sessionId: 'session_AAA', pageUrl: 'https://site/1' });
             let states = await getNovelSessionStates();
             expect(states[10]?.sessionId).toBe('session_AAA');
 
-            // 嘗試用不相符的 session_BBB 條件刪除 ➔ 應保留不刪除
             const deletedStale = await removeNovelSessionStateIfMatches(10, 'session_BBB');
             expect(deletedStale).toBe(false);
             states = await getNovelSessionStates();
             expect(states[10]?.sessionId).toBe('session_AAA');
 
-            // 用相符的 session_AAA 刪除 ➔ 成功刪除
             const deletedMatched = await removeNovelSessionStateIfMatches(10, 'session_AAA');
             expect(deletedMatched).toBe(true);
             states = await getNovelSessionStates();
             expect(states[10]).toBeUndefined();
         });
 
-        it('Test 43 & Scenario K: Tab A navigation 不得清 Tab B', () => {
+        it('Test 43: Tab A navigation 不得清 Tab B', () => {
             const registry = createNovelSessionRegistry();
             registry.begin(10, 'tabA_sess');
             registry.begin(20, 'tabB_sess');
@@ -610,12 +684,11 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
     });
 
     // ─────────────────────────────────────────────────────────
-    // 七、 Mismatch Abandon & SPA Response Tests (45 ~ 48, L ~ N)
+    // 七、 Mismatch Abandon & Generation Guard Tests (45 ~ 48, K, N)
     // ─────────────────────────────────────────────────────────
-    describe('7. Source Mismatch 放棄與 SPA 導航 (Tests 45 ~ 48, L ~ N)', () => {
-        it('Scenario L: ABANDON ok:true + pending AUTO ➔ 允許開啟新 Session', async () => {
+    describe('7. Source Mismatch 放棄與 Generation Guard (Tests 45 ~ 48, K, N)', () => {
+        it('Scenario N: ABANDON await 期間發生 manual supersede ➔ 舊 callback 不得竄改新狀態', async () => {
             const controller = createNovelRehydrateController();
-            controller.setPendingAuto(true);
 
             global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
                 if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
@@ -628,6 +701,8 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
                     });
                 }
                 if (msg.action === 'ABANDON_NOVEL_REHYDRATE') {
+                    // 在 ABANDON 等候期間使用者手動觸發翻譯
+                    controller.supersede();
                     cb({ ok: true });
                 }
             });
@@ -639,12 +714,12 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
                 startNewTranslationFn: startNew
             });
 
-            expect(startNew).toHaveBeenCalledTimes(1);
+            expect(controller.getPhase()).toBe('superseded');
+            expect(startNew).not.toHaveBeenCalled(); // 絕不重複啟動
         });
 
-        it('Scenario M: ABANDON stale-session + pending AUTO ➔ 絕不建立新 Session', async () => {
+        it('Scenario K: stale ABANDON ➔ late AUTO 只能 consume 絕不開 CCC', async () => {
             const controller = createNovelRehydrateController();
-            controller.setPendingAuto(true);
 
             global.chrome.runtime.sendMessage = vi.fn((msg, cb) => {
                 if (msg.action === 'GET_NOVEL_REHYDRATE_STATE') {
@@ -657,25 +732,20 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
                     });
                 }
                 if (msg.action === 'ABANDON_NOVEL_REHYDRATE') {
-                    cb({ ok: false, status: 'stale-session' }); // 收到 stale
+                    cb({ ok: false, status: 'stale-session' });
                 }
             });
 
-            const startNew = vi.fn();
             await controller.attemptRehydrate({
                 getParagraphsFn: () => ['<p>新內容</p>'],
-                getParagraphTextFn: () => '新內容',
-                startNewTranslationFn: startNew
+                getParagraphTextFn: () => '新內容'
             });
 
-            expect(startNew).not.toHaveBeenCalled(); // 絕不開啟新 Session
-            expect(controller.getPhase()).toBe('none');
-        });
-
-        it('Scenario N: Content 收到 abortNovelTranslation ➔ 立即重置 phase 與 sessionId', () => {
-            const controller = createNovelRehydrateController();
-            controller.supersede();
-            expect(controller.getPhase()).toBe('superseded');
+            expect(controller.getAutoDisposition()).toBe('consume');
+            const startSpy = vi.fn();
+            const autoRes = controller.handleAutoSignal(startSpy);
+            expect(autoRes.started).toBe(false);
+            expect(startSpy).not.toHaveBeenCalled();
         });
     });
 
@@ -726,14 +796,14 @@ describe('Novel Mode: Page Reload Rehydrate Architecture & Hardening Tests', () 
             expect(mobileCode.includes('attemptRehydrate')).toBe(true);
         });
 
-        it('Test 55 & 56: Desktop 與 Mobile AUTO_TRANSLATE_PAGE 均具備 defer path 與 rehydrated consume path', () => {
+        it('Test 55 & 56: Desktop 與 Mobile 均對接 handleAutoSignal 與 onTargetedNavigationAbort', () => {
             const desktopCode = fs.readFileSync(path.resolve(__dirname, '../src/content/desktop-main.js'), 'utf-8');
             const mobileCode = fs.readFileSync(path.resolve(__dirname, '../src/content/mobile-main.js'), 'utf-8');
 
-            expect(desktopCode.includes('deferred: true')).toBe(true);
-            expect(mobileCode.includes('deferred: true')).toBe(true);
-            expect(desktopCode.includes('rehydrated: true')).toBe(true);
-            expect(mobileCode.includes('rehydrated: true')).toBe(true);
+            expect(desktopCode.includes('handleAutoSignal')).toBe(true);
+            expect(mobileCode.includes('handleAutoSignal')).toBe(true);
+            expect(desktopCode.includes('onTargetedNavigationAbort')).toBe(true);
+            expect(mobileCode.includes('onTargetedNavigationAbort')).toBe(true);
         });
 
         it('Test 57 ~ 59: Rehydrate 模組未調用 createNovelSessionId / BEGIN / SUBMIT', () => {

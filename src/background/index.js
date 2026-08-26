@@ -123,6 +123,9 @@ export const novelRecoveryReady = new Promise((resolve) => {
     resolveNovelRecoveryReady = resolve;
 });
 
+// 保存 SW 啟動恢復的整體結果狀態 ({ ok: boolean, error?: string })
+export let novelRecoveryResult = { ok: false, error: 'uninitialized' };
+
 /**
  * Session-Scoped Ownership-Safe 小說清理輔助函式
  * 確保只清理目標 sessionId 的資源，絕不誤清已成立的新 Session (例如並發成立的 BBB)
@@ -150,29 +153,47 @@ export async function cleanupNovelSessionIfCurrent(tabId, sessionId) {
         return safe.filter(item => !(item && item.tabId === tabId && item.sessionId === sessionId));
     }).catch(() => {});
 
-    // 5. 只有當前 registry 中的活躍 session 仍為該 sessionId 時才 clear
+    // 5. Final Ownership Check：只有當前 registry 中的活躍 session 仍為該 sessionId 時才 clear
     if (novelCancellationRegistry.getActiveSessionId(tabId) === sessionId) {
         novelCancellationRegistry.clear(tabId);
+        return { ok: true };
+    } else {
+        // 清理執行期間已成立更新的 Session (例如 BBB)，回傳 superseded-session
+        return { ok: false, status: 'superseded-session' };
     }
-
-    return { ok: true };
 }
 
-// 當 Service Worker 啟動或重啟時，初次化狀態
-state.init().then(async () => {
-    log.info('Background', `狀態載入完成 (無痕模式: ${isIncognitoProcess})，檢查待處理任務...`);
-    await state.set('isStopping', false); // 重置停止狀態
-
+/**
+ * 完整受保護的小說 Service Worker 啟動恢復 Bootstrap
+ * 保證無論 state.init, isStopping, Session restore 或 Job restore 成功與否，Barrier 必定 settle
+ */
+async function initializeNovelRecovery() {
     try {
-        // 1. SW 重啟恢復：從 chrome.storage.session 恢復小說 Session Identity 註冊表並清理 Ghost Tabs
+        await state.init();
+
+        try {
+            await state.set('isStopping', false); // 重置停止狀態
+        } catch (stopErr) {
+            log.warn('Background', '重置 isStopping 狀態失敗:', stopErr);
+        }
+
         if (!isIncognitoProcess) {
+            // 取得當前真實活躍分頁資訊 (Tab ID 與 URL)
+            let activeTabIdSet = null;
+            let activeTabUrlMap = new Map();
+            try {
+                const tabs = await chrome.tabs.query({});
+                activeTabIdSet = new Set(tabs.map(t => t.id));
+                for (const t of tabs) {
+                    if (t && t.id && t.url) {
+                        activeTabUrlMap.set(t.id, t.url);
+                    }
+                }
+            } catch (tabErr) {}
+
+            // 1. SW 重啟恢復：從 chrome.storage.session 恢復小說 Session Identity 註冊表並清理 Ghost Tabs
             try {
                 const storedSessionStates = await getNovelSessionStates();
-                let activeTabIdSet = null;
-                try {
-                    const tabs = await chrome.tabs.query({});
-                    activeTabIdSet = new Set(tabs.map(t => t.id));
-                } catch (tabErr) {}
                 const restoredCount = await restoreNovelSessionRegistry(novelCancellationRegistry, storedSessionStates, activeTabIdSet);
                 if (restoredCount > 0) {
                     log.info('Background', `[Novel Startup] 已從 storage.session 成功恢復 ${restoredCount} 個分頁的 Session Identity`);
@@ -181,27 +202,36 @@ state.init().then(async () => {
                 log.warn('Background', '[Novel Startup] 恢復 Session Identity 失敗:', sessErr);
             }
 
-            // 2. SW 重啟恢復：從 chrome.storage.session 恢復並正規化 Durable Novel Jobs
+            // 2. SW 重啟恢復：在啟動 Scheduler 前，嚴格驗證 Session 網址與當前 Tab URL
             try {
                 const rawJobs = await getNovelJobCheckpoints();
-                let activeTabIdSet = null;
-                try {
-                    const tabs = await chrome.tabs.query({});
-                    activeTabIdSet = new Set(tabs.map(t => t.id));
-                } catch (tabErr) {}
+                const storedSessionStates = await getNovelSessionStates();
 
                 let runnableCount = 0;
                 for (const [sessId, rawJob] of Object.entries(rawJobs)) {
                     if (!rawJob || typeof rawJob !== 'object') continue;
 
+                    const jobTabId = rawJob.tabId;
+
                     // 剔除 Ghost Tab 或 Stale Session 的 Job
-                    if (activeTabIdSet && !activeTabIdSet.has(rawJob.tabId)) {
+                    if (activeTabIdSet && !activeTabIdSet.has(jobTabId)) {
                         await removeNovelJobCheckpoint(sessId);
                         continue;
                     }
-                    if (!novelCancellationRegistry.isCurrentSession(rawJob.tabId, rawJob.sessionId)) {
+                    if (!novelCancellationRegistry.isCurrentSession(jobTabId, rawJob.sessionId)) {
                         await removeNovelJobCheckpoint(sessId);
                         continue;
+                    }
+
+                    // 驗證 restored Session 網址與當前 Tab URL 是否相符 (不同章節則在調度前立即失效)
+                    const sessionState = storedSessionStates[jobTabId];
+                    const currentTabUrl = activeTabUrlMap.get(jobTabId);
+                    if (sessionState && sessionState.pageUrl && currentTabUrl) {
+                        if (!isSameNovelPage(sessionState.pageUrl, currentTabUrl)) {
+                            log.info('Background', `[Novel Startup] 偵測到分頁 ${jobTabId} URL 已變更 (${sessionState.pageUrl} ➔ ${currentTabUrl})，在啟動 Scheduler 前失效舊 Session ${sessId}`);
+                            await cleanupNovelSessionIfCurrent(jobTabId, sessId);
+                            continue;
+                        }
                     }
 
                     // 正規化與狀態修復 (inFlight 歸零，重算 nextBatchIndex)
@@ -229,13 +259,22 @@ state.init().then(async () => {
             // 清空 legacy novelQueue (避免舊佇列干擾)
             state.set('novelQueue', []).catch(() => {});
         }
+
+        novelRecoveryResult = { ok: true };
+        return novelRecoveryResult;
+    } catch (err) {
+        log.error('Background', '[Novel Startup] SW 啟動恢復 Bootstrap 異常:', err);
+        novelRecoveryResult = { ok: false, error: err.message };
+        return novelRecoveryResult;
     } finally {
-        // 無論成功與否，必須保證 Barrier 順利 settle，絕不 hang
         if (typeof resolveNovelRecoveryReady === 'function') {
             resolveNovelRecoveryReady();
         }
     }
+}
 
+// 執行 Service Worker 啟動恢復
+initializeNovelRecovery().then(() => {
     // 3. 檢查是否有未完成的漫畫預翻 session checkpoint，安全恢復 (獨立於小說屏障之外)
     if (!isIncognitoProcess) {
         restorePretranslationCheckpoints().catch(err => log.warn('Background', `[跨話連續追漫] 恢復預翻 checkpoint 失敗: ${err.message}`));
@@ -943,6 +982,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // 1. 等待 SW 啟動恢復屏障 settle，防止 registry/jobs 尚未 hydrate 被誤判為空
               await novelRecoveryReady;
 
+              // 若 SW Startup 本身明確失敗，回傳 error 狀態 (絕不誤判為 definitive no-session)
+              if (novelRecoveryResult && !novelRecoveryResult.ok) {
+                  sendResponse({ ok: false, status: 'error', error: novelRecoveryResult.error || 'Startup recovery failed' });
+                  return;
+              }
+
               const sessionStates = await getNovelSessionStates();
               const sessionState = sessionStates[tabId];
 
@@ -968,13 +1013,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
               const novelResults = await state.get('novelResults', []);
 
-              // 2. Final ownership re-check：在送出 snapshot 前再次驗證 ownership 未在非同步等候期間被覆蓋
-              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionState.sessionId)) {
+              // 2. Final ownership re-check：在 storage 讀取後再次驗證 ownership 與 storage 一致性
+              const currentStates = await getNovelSessionStates();
+              if (!currentStates[tabId] || currentStates[tabId].sessionId !== sessionState.sessionId || currentStates[tabId].cancelled) {
                   sendResponse({ ok: false, status: 'stale-session' });
                   return;
               }
-              const currentStates = await getNovelSessionStates();
-              if (!currentStates[tabId] || currentStates[tabId].sessionId !== sessionState.sessionId || currentStates[tabId].cancelled) {
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionState.sessionId)) {
                   sendResponse({ ok: false, status: 'stale-session' });
                   return;
               }
@@ -3123,11 +3168,18 @@ export async function handleNovelPageNavigationChange(tabId, newUrl) {
         const activeState = activeStates[tabId];
         if (activeState && !activeState.cancelled && activeState.pageUrl) {
             if (!isSameNovelPage(activeState.pageUrl, newUrl)) {
-                log.info('Background', `[Novel Navigation Early] 分頁 ${tabId} 導航至不同小說章節 (${activeState.pageUrl} ➔ ${newUrl})，立即失效舊 Session ${activeState.sessionId}`);
+                const targetSessionId = activeState.sessionId;
+                log.info('Background', `[Novel Navigation Early] 分頁 ${tabId} 導航至不同小說章節 (${activeState.pageUrl} ➔ ${newUrl})，立即失效舊 Session ${targetSessionId}`);
                 // 1. Session-scoped ownership-safe 清理
-                await cleanupNovelSessionIfCurrent(tabId, activeState.sessionId);
-                // 2. Best-effort 通知前台 Content 終止並重置 phase (支援 SPA 導航)
-                chrome.tabs.sendMessage(tabId, { action: 'abortNovelTranslation' }).catch(() => {});
+                const cleanupRes = await cleanupNovelSessionIfCurrent(tabId, targetSessionId);
+                // 2. 只有 cleanup 確認目標 AAA 已成功 invalidated，才發送帶有 targetSessionId 的 navigation abort (防止誤殺 BBB)
+                if (cleanupRes && cleanupRes.ok) {
+                    chrome.tabs.sendMessage(tabId, {
+                        action: 'abortNovelTranslation',
+                        reason: 'navigation',
+                        sessionId: targetSessionId
+                    }).catch(() => {});
+                }
             }
         }
     } catch (navErr) {
