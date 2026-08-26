@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 
@@ -1922,6 +1922,17 @@ ${termsSnippet}
         swKeepAlive.stop();
     }
 
+    const isStopping = await state.get('isStopping');
+    if (!shouldProceedToStage2({ wasStopped: isStopping, isStopping, scriptLinesCount: scriptLines.length })) {
+        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 2 翻譯');
+        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+        if (resultTabId) {
+            activeTranslationJobs.delete(resultTabId);
+            delete sessionStoryContext[resultTabId];
+        }
+        return;
+    }
+
     return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet, customMangaKey);
 }
 
@@ -2240,44 +2251,32 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                     log.warn('Background', `[批次] 所有 API Key 批次翻譯均失敗，啟動備援逐張重試...`);
                     broadcastStatus(`⚠️ 所有 Key 批次失敗，正在啟動逐張重試...`, 'warn');
 
-                    const fallbackResults = Array(validItems.length).fill(null);
-                    await Promise.all(validItems.map(async (item, k) => {
-                        if (await state.get('isStopping')) {
-                            fallbackResults[k] = { error: '翻譯已停止' };
-                            return;
-                        }
-                        const apiKey = await state.getNextApiKey();
-                        if (await state.get('isStopping')) {
-                            fallbackResults[k] = { error: '翻譯已停止' };
-                            return;
-                        }
-                        try {
-                            const result = await translateTexts([], {
-                                model: fallbackModelName,
-                                apiKey: apiKey,
-                                prompt: finalPrompt,
-                                glossarySnippet,
-                                imageBase64: item.b64,
-                                schema: {
-                                    type: 'OBJECT',
-                                    properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
-                                    required: ['results']
-                                }
-                            });
-                            fallbackResults[k] = {
-                                ...result,
-                                usedModelName: result.usedModelName || fallbackModelName
-                            };
-                            broadcastStatus(`第 ${item.originalIdx + 1} 張備援翻譯成功`, 'ok');
-                        } catch (singleErr) {
-                            log.warn('Background', `[備援] 第 ${item.originalIdx + 1} 張翻譯失敗 (Key: ${state.getApiKeyAlias(apiKey)}): ${singleErr.message}`);
-                            broadcastStatus(`❌ 第 ${item.originalIdx + 1} 張備援失敗: ${singleErr.message.slice(0, 30)}`, 'err');
-                            fallbackResults[k] = { error: singleErr.message };
-                        }
-                    }));
+                    const fallbackResult = await executeFallbackImages({
+                        validItems,
+                        fallbackModelName,
+                        getNextApiKey: () => state.getNextApiKey(),
+                        translateSingle: ({ imageBase64, model, apiKey }) => translateTexts([], {
+                            model,
+                            apiKey,
+                            prompt: finalPrompt,
+                            glossarySnippet,
+                            imageBase64,
+                            schema: {
+                                type: 'OBJECT',
+                                properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
+                                required: ['results']
+                            }
+                        }),
+                        shouldContinue: async () => !(await state.get('isStopping')),
+                        broadcastStatus: (msg, type) => broadcastStatus(msg, type)
+                    });
+
+                    if (fallbackResult.wasStopped) {
+                        wasStopped = true;
+                    }
 
                     validItems.forEach((item, k) => {
-                        allPageResults[item.originalIdx] = fallbackResults[k] || { error: '備援翻譯結果缺失' };
+                        allPageResults[item.originalIdx] = fallbackResult.fallbackResults[k] || { error: '備援翻譯結果缺失' };
                     });
                 }
             }
