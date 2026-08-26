@@ -316,11 +316,19 @@ export async function retrySingleNovelParagraph(idx, originalText, container) {
         }
     }
 
+    const capturedSessionId = window.mt_currentNovelSessionId;
+
     chrome.runtime.sendMessage({
         action: 'retranslateNovelParagraph',
+        sessionId: capturedSessionId,
         text: originalText,
         mangaKey: currentMangaKey
     }, (response) => {
+        // 若 Session 已切換，捨棄結果不覆蓋新 DOM
+        if (capturedSessionId && window.mt_currentNovelSessionId && capturedSessionId !== window.mt_currentNovelSessionId) {
+            return;
+        }
+
         if (actions) actions.style.display = 'inline-flex';
         
         if (response?.translation) {
