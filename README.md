@@ -1,11 +1,11 @@
-# 漫譯 V3.1.8 (Manga Translator V3.1.8) 🎌
+# 漫譯 V3.1.9 (Manga Translator V3.1.9) 🎌
 
-![Version](https://img.shields.io/badge/version-3.1.8-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.1.9-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.1.8** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
+**漫譯 V3.1.9** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
 支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**2D 二維交錯輪替調度（Key × Model 負載分配）、核心狀態隊列鎖防護、跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
 
 ---

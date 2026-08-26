@@ -1,7 +1,7 @@
 {
   "name": "manga-translator-v3",
-  "version": "3.1.8",
-  "description": "Manga Translator V3.1.8 - 2D Alternating Round-Robin Hybrid Pipeline (Key x Model)",
+  "version": "3.1.9",
+  "description": "Manga Translator V3.1.9 - 2D Alternating Round-Robin Hybrid Pipeline (Key x Model)",
   "type": "module",
   "scripts": {
     "dev": "vite",
