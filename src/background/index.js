@@ -11,7 +11,7 @@ import { createMangaStartLock } from './manga-start-lock.js';
 import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
-import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex } from './pretranslation-checkpoint.js';
+import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -129,43 +129,19 @@ state.init().then(async () => {
 
 /**
  * Service Worker 啟動時從 chrome.storage.session 恢復中斷的預翻任務
+ * 嚴格單話保證：只恢復 updatedAt 最新的一筆，過期或無效的 checkpoint 立即清理且絕不寫入 Map
  */
 async function restorePretranslationCheckpoints() {
     try {
         const checkpoints = await getPretranslationCheckpoints();
-        const entries = Object.values(checkpoints || {});
-        if (entries.length === 0) return;
+        const { latestInterrupted, staleUrls } = selectLatestInterruptedCheckpoint(checkpoints);
 
-        log.info('Background', `[跨話連續追漫] 正在檢查 ${entries.length} 筆 session 預翻 checkpoint...`);
-
-        let latestInterrupted = null;
-
-        for (const rawSnapshot of entries) {
-            const normalized = normalizeRestoredPretranslation(rawSnapshot);
-            if (!normalized) {
-                if (rawSnapshot?.url) await removePretranslationCheckpoint(rawSnapshot.url);
-                continue;
-            }
-
-            if (normalized.isCancelled || normalized.isDone) {
-                await removePretranslationCheckpoint(normalized.url);
-                continue;
-            }
-
-            pretranslatedChaptersMap.set(normalized.url, normalized);
-
-            if (normalized.status === 'interrupted') {
-                if (!latestInterrupted || normalized.updatedAt > latestInterrupted.updatedAt) {
-                    if (latestInterrupted) {
-                        await removePretranslationCheckpoint(latestInterrupted.url);
-                    }
-                    latestInterrupted = normalized;
-                } else {
-                    await removePretranslationCheckpoint(normalized.url);
-                }
-            }
+        // 1. 清理所有無效或過期的 stale checkpoints
+        for (const staleUrl of staleUrls) {
+            await removePretranslationCheckpoint(staleUrl);
         }
 
+        // 2. 處理最新一筆中斷的預翻
         if (latestInterrupted) {
             let isValidTab = false;
             if (latestInterrupted.sourceTabId && typeof latestInterrupted.sourceTabId === 'number') {
@@ -178,12 +154,13 @@ async function restorePretranslationCheckpoints() {
             }
 
             if (isValidTab) {
+                // 來源分頁驗證成功後，才寫入記憶體 Map 並安全恢復
+                pretranslatedChaptersMap.set(latestInterrupted.url, latestInterrupted);
                 log.info('Background', `[跨話連續追漫] 正在從 Service Worker 重啟中恢復預翻: ${latestInterrupted.url} (已完成 ${latestInterrupted.processedCount}/${latestInterrupted.images.length} 頁)`);
                 startPretranslateNextChapter(latestInterrupted.url, latestInterrupted.sourceTabId, latestInterrupted.associatedResultTabId)
                     .catch(err => log.warn('Background', `恢復預翻失敗: ${err.message}`));
             } else {
                 log.info('Background', `[跨話連續追漫] 來源分頁 ${latestInterrupted.sourceTabId} 已不存在，清理 checkpoint: ${latestInterrupted.url}`);
-                pretranslatedChaptersMap.delete(latestInterrupted.url);
                 await removePretranslationCheckpoint(latestInterrupted.url);
             }
         }
@@ -1571,6 +1548,9 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         // 確保 results 只包含 resumeIndex 之前的已完成項目，防止重複
         jobData.results = initialResults.slice(0, resumeIndex);
         jobData.processedCount = jobData.results.length;
+
+        // 初始或恢復前的即時 Checkpoint (確保即使第一批中途被 SW 回收也能保存 images/navLinks/起始進度)
+        await savePretranslationCheckpoint(jobData);
 
         const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
         const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);

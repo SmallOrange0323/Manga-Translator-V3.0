@@ -9,10 +9,13 @@ import {
     validatePretranslationSnapshot,
     normalizeRestoredPretranslation,
     getPretranslationResumeIndex,
+    selectLatestInterruptedCheckpoint,
     savePretranslationCheckpoint,
     getPretranslationCheckpoints,
     removePretranslationCheckpoint,
     clearPretranslationCheckpointsForTabs,
+    sanitizeImageRef,
+    sanitizePretranslationResultItem,
     PRETRANS_SESSION_CHECKPOINT_KEY
 } from '../src/background/pretranslation-checkpoint.js';
 
@@ -46,18 +49,26 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
         };
     });
 
-    describe('Test 1: Snapshot 嚴格白名單過濾機制', () => {
-        it('Checkpoint 僅保存白名單 metadata，嚴禁洩漏 API Key、Base64 圖片、Prompt 或 Glossary', () => {
-            const unsafeJobData = {
+    describe('Test 1: 嚴格白名單與資料極小化 (Security Whitelist Sanitizer)', () => {
+        it('Checkpoint 僅保存純字串 URL 與白名單結果，絕對剔除 Base64、API Key、Blob 與未知大型欄位', () => {
+            const contaminatedJobData = {
                 url: 'https://example.com/ch2',
                 images: [
                     'https://cdn.example.com/page1.jpg',
                     'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD...',
-                    { src: 'https://cdn.example.com/page3.jpg' },
+                    { src: 'https://cdn.example.com/page3.jpg', base64: 'SECRET_BASE64', apiKey: 'SECRET_KEY', hugeData: 'SECRET_HUGE' },
                     { src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...' }
                 ],
-                results: [{ translation: '第 1 頁譯文' }],
-                navLinks: { next: 'https://example.com/ch3' },
+                results: [
+                    {
+                        image: { src: 'https://cdn.example.com/page1.jpg', base64: 'RESULT_BASE64_SECRET' },
+                        results: [{ original: 'こんにちは', translation: '你好', extraSecret: 'SECRET_PARAM' }],
+                        usedModelName: 'gemini-3.1-flash-lite',
+                        apiKey: 'SECRET_RESULT_KEY',
+                        rawPayload: 'SECRET_PAYLOAD'
+                    }
+                ],
+                navLinks: { prev: null, next: 'https://example.com/ch3', secretNav: 'SECRET_NAV' },
                 usedModelName: 'gemini-3.1-flash-lite',
                 batchSize: 5,
                 status: 'inProgress',
@@ -67,38 +78,42 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
                 sourceTabId: 101,
                 associatedResultTabId: 102,
                 startTime: 1700000000000,
-                // 額外敏感與無關資料
-                apiKey: 'AIzaSySecretApiKey123456',
-                candidateKeys: ['AIzaKey1', 'AIzaKey2'],
-                customPrompt: 'Translate manga carefully',
-                glossarySnippet: '<required_terms>主角->小明</required_terms>',
-                base64List: ['base64_img_1', 'base64_img_2']
+                // 額外頂層敏感資料
+                apiKey: 'SECRET_TOP_KEY',
+                candidateKeys: ['SECRET_KEY_1'],
+                customPrompt: 'SECRET_PROMPT',
+                glossarySnippet: 'SECRET_GLOSSARY'
             };
 
-            const snapshot = createPretranslationSnapshot(unsafeJobData);
+            const snapshot = createPretranslationSnapshot(contaminatedJobData);
+            const snapshotJson = JSON.stringify(snapshot);
 
-            // 斷言：合法欄位正常保存
-            assert.equal(snapshot.version, 1);
-            assert.equal(snapshot.url, 'https://example.com/ch2');
-            assert.equal(snapshot.usedModelName, 'gemini-3.1-flash-lite');
-            assert.equal(snapshot.sourceTabId, 101);
-            assert.equal(snapshot.associatedResultTabId, 102);
-            assert.equal(snapshot.processedCount, 1);
+            // 1. 斷言：images 陣列完全由安全 string URL 組成，物件展開完全被消除
+            assert.deepEqual(snapshot.images, [
+                'https://cdn.example.com/page1.jpg',
+                '',
+                'https://cdn.example.com/page3.jpg',
+                ''
+            ]);
+
+            // 2. 斷言：results 每一項均被嚴格 sanitize，image 轉為 string URL，不包含未知屬性
             assert.equal(snapshot.results.length, 1);
-            assert.equal(snapshot.results[0].translation, '第 1 頁譯文');
+            assert.equal(snapshot.results[0].image, 'https://cdn.example.com/page1.jpg');
+            assert.deepEqual(snapshot.results[0].results, [{ original: 'こんにちは', translation: '你好' }]);
+            assert.equal(snapshot.results[0].usedModelName, 'gemini-3.1-flash-lite');
 
-            // 斷言：圖片中所有 Base64 被清理為空字串，僅保留一般 URL
-            assert.equal(snapshot.images[0], 'https://cdn.example.com/page1.jpg');
-            assert.equal(snapshot.images[1], '');
-            assert.equal(snapshot.images[2].src, 'https://cdn.example.com/page3.jpg');
-            assert.equal(snapshot.images[3].src, '');
-
-            // 斷言：敏感與大型資料完全不存在
-            expect(snapshot).not.toHaveProperty('apiKey');
-            expect(snapshot).not.toHaveProperty('candidateKeys');
-            expect(snapshot).not.toHaveProperty('customPrompt');
-            expect(snapshot).not.toHaveProperty('glossarySnippet');
-            expect(snapshot).not.toHaveProperty('base64List');
+            // 3. 斷言：快照序列化字串中嚴格禁止出現任何污染/敏感關鍵字
+            expect(snapshotJson).not.toContain('SECRET_BASE64');
+            expect(snapshotJson).not.toContain('SECRET_KEY');
+            expect(snapshotJson).not.toContain('SECRET_HUGE');
+            expect(snapshotJson).not.toContain('RESULT_BASE64_SECRET');
+            expect(snapshotJson).not.toContain('SECRET_PARAM');
+            expect(snapshotJson).not.toContain('SECRET_RESULT_KEY');
+            expect(snapshotJson).not.toContain('SECRET_PAYLOAD');
+            expect(snapshotJson).not.toContain('SECRET_TOP_KEY');
+            expect(snapshotJson).not.toContain('SECRET_PROMPT');
+            expect(snapshotJson).not.toContain('SECRET_GLOSSARY');
+            expect(snapshotJson).not.toContain('SECRET_NAV');
         });
     });
 
@@ -113,7 +128,7 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
             };
 
             // 模擬第 1 批 (5 頁) 完成
-            jobData.results.push(...Array(5).fill({ translation: '完成' }));
+            jobData.results.push(...Array(5).fill({ image: 'https://cdn.example.com/p.jpg', results: [{ translation: '完成' }] }));
             await savePretranslationCheckpoint(jobData);
 
             let checkpoints = await getPretranslationCheckpoints();
@@ -121,7 +136,7 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
             assert.equal(checkpoints[jobData.url].results.length, 5);
 
             // 模擬第 2 批 (再 5 頁) 完成
-            jobData.results.push(...Array(5).fill({ translation: '完成' }));
+            jobData.results.push(...Array(5).fill({ image: 'https://cdn.example.com/p.jpg', results: [{ translation: '完成' }] }));
             await savePretranslationCheckpoint(jobData);
 
             checkpoints = await getPretranslationCheckpoints();
@@ -136,7 +151,7 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
                 version: 1,
                 url: 'https://example.com/ch2',
                 images: ['p1.jpg', 'p2.jpg', 'p3.jpg', 'p4.jpg'],
-                results: [{ translation: 'p1' }, { translation: 'p2' }],
+                results: [{ image: 'p1.jpg', results: [] }, { image: 'p2.jpg', results: [] }],
                 navLinks: { next: 'ch3' },
                 usedModelName: 'gemini-3.5-flash-lite',
                 batchSize: 2,
@@ -161,10 +176,120 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
         });
     });
 
-    describe('Test 4: 真正的 Resume 斷點邊界與避免重複請求 (Observable Behavior)', () => {
+    describe('Test 4: 嚴格單一恢復 — 只挑選最新 Interrupted Checkpoint，Stale Checkpoints 絕不進 Map', () => {
+        it('存在多個中斷 checkpoint 時，只恢復 updatedAt 最大的一筆，其餘 stale checkpoints 標記清理且不進 Map', () => {
+            const checkpointsMap = {
+                'https://example.com/ch1': {
+                    version: 1,
+                    url: 'https://example.com/ch1',
+                    images: ['p1.jpg'],
+                    results: [{ image: 'p1.jpg', results: [] }],
+                    updatedAt: 100,
+                    inProgress: true,
+                    status: 'inProgress'
+                },
+                'https://example.com/ch2': {
+                    version: 1,
+                    url: 'https://example.com/ch2',
+                    images: ['p1.jpg', 'p2.jpg'],
+                    results: [{ image: 'p1.jpg', results: [] }],
+                    updatedAt: 200,
+                    inProgress: true,
+                    status: 'inProgress'
+                },
+                'https://example.com/ch_done': {
+                    version: 1,
+                    url: 'https://example.com/ch_done',
+                    images: ['p1.jpg'],
+                    results: [{ image: 'p1.jpg', results: [] }],
+                    updatedAt: 300,
+                    isDone: true,
+                    status: 'completed'
+                }
+            };
+
+            const { latestInterrupted, staleUrls } = selectLatestInterruptedCheckpoint(checkpointsMap);
+
+            // 斷言：最新中斷任務為 ch2 (updatedAt: 200)
+            assert.equal(latestInterrupted.url, 'https://example.com/ch2');
+            assert.equal(latestInterrupted.status, 'interrupted');
+
+            // 斷言：過期的 ch1 與已完成的 ch_done 被列入清理清單
+            expect(staleUrls).toContain('https://example.com/ch1');
+            expect(staleUrls).toContain('https://example.com/ch_done');
+            expect(staleUrls).not.toContain('https://example.com/ch2');
+        });
+    });
+
+    describe('Test 5: 初始 Checkpoint 寫入時機 (第 0 頁即可安全恢復)', () => {
+        it('章節圖片與導航連結就緒後，在任何 API 呼叫前即寫入 processedCount=0 的初始 Checkpoint', async () => {
+            const initialJobData = {
+                url: 'https://example.com/ch2',
+                images: ['https://cdn.example.com/p1.jpg', 'https://cdn.example.com/p2.jpg'],
+                results: [],
+                navLinks: { next: 'https://example.com/ch3' },
+                processedCount: 0,
+                inProgress: true
+            };
+
+            await savePretranslationCheckpoint(initialJobData);
+
+            const checkpoints = await getPretranslationCheckpoints();
+            const snapshot = checkpoints[initialJobData.url];
+
+            assert.equal(snapshot.url, 'https://example.com/ch2');
+            assert.equal(snapshot.processedCount, 0);
+            assert.equal(snapshot.results.length, 0);
+            assert.equal(snapshot.images.length, 2);
+            assert.equal(snapshot.navLinks.next, 'https://example.com/ch3');
+        });
+    });
+
+    describe('Test 6: Resume Index 保守一致性與整數邊界防護', () => {
+        it('Case A: processedCount=12 > results.length=10 時，resumeIndex 必須保守取 10，絕不跳過第 10~11 頁', () => {
+            const snapshot = {
+                url: 'https://example.com/ch2',
+                images: Array.from({ length: 20 }, (_, i) => `p${i}.jpg`),
+                results: Array.from({ length: 10 }, (_, i) => ({ image: `p${i}.jpg`, results: [] })),
+                processedCount: 12
+            };
+
+            const resumeIndex = getPretranslationResumeIndex(snapshot);
+            assert.equal(resumeIndex, 10);
+        });
+
+        it('Case B: processedCount=12.5 (浮點數) 時，必須觸發安全整數 fallback 至 10', () => {
+            const snapshot = {
+                url: 'https://example.com/ch2',
+                images: Array.from({ length: 20 }, (_, i) => `p${i}.jpg`),
+                results: Array.from({ length: 10 }, (_, i) => ({ image: `p${i}.jpg`, results: [] })),
+                processedCount: 12.5
+            };
+
+            const resumeIndex = getPretranslationResumeIndex(snapshot);
+            assert.equal(resumeIndex, 10);
+        });
+
+        it('Case C: processedCount=10 === results.length=10 時，resumeIndex 精確為 10', () => {
+            const snapshot = {
+                url: 'https://example.com/ch2',
+                images: Array.from({ length: 20 }, (_, i) => `p${i}.jpg`),
+                results: Array.from({ length: 10 }, (_, i) => ({ image: `p${i}.jpg`, results: [] })),
+                processedCount: 10
+            };
+
+            const resumeIndex = getPretranslationResumeIndex(snapshot);
+            assert.equal(resumeIndex, 10);
+        });
+    });
+
+    describe('Test 7: 真正的 Resume 斷點邊界與避免重複請求 (Observable Behavior)', () => {
         it('已有 10 頁結果時，Resume 必須精準從 images[10] 開始，絕不重新請求 images[0]', async () => {
             const images = Array.from({ length: 20 }, (_, i) => `https://cdn.example.com/p${i}.jpg`);
-            const existingResults = Array.from({ length: 10 }, (_, i) => ({ translation: `p${i} 譯文` }));
+            const existingResults = Array.from({ length: 10 }, (_, i) => ({
+                image: `https://cdn.example.com/p${i}.jpg`,
+                results: [{ translation: `p${i} 譯文` }]
+            }));
 
             const snapshot = {
                 version: 1,
@@ -189,46 +314,41 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
             expect(firstResumeBatch).not.toContain('https://cdn.example.com/p0.jpg');
 
             // 模擬完成本批後的 results 合併
-            const newBatchResults = firstResumeBatch.map(img => ({ translation: `${img} 新譯文` }));
+            const newBatchResults = firstResumeBatch.map(img => ({
+                image: img,
+                results: [{ translation: `${img} 新譯文` }]
+            }));
             const combinedResults = [...existingResults.slice(0, resumeIndex), ...newBatchResults];
 
             // 斷言：合併後長度為 15，前 10 筆保持原樣，新 5 筆順暢接續，絕無重複
             assert.equal(combinedResults.length, 15);
-            assert.equal(combinedResults[0].translation, 'p0 譯文');
-            assert.equal(combinedResults[9].translation, 'p9 譯文');
-            assert.equal(combinedResults[10].translation, 'https://cdn.example.com/p10.jpg 新譯文');
+            assert.equal(combinedResults[0].results[0].translation, 'p0 譯文');
+            assert.equal(combinedResults[9].results[0].translation, 'p9 譯文');
+            assert.equal(combinedResults[10].results[0].translation, 'https://cdn.example.com/p10.jpg 新譯文');
         });
     });
 
-    describe('Test 5: 完成時先存 Local Completed Cache 再刪 Session Checkpoint', () => {
-        it('成功完成後 Session Checkpoint 被清理，順序保證資料不遺失', async () => {
-            const jobData = {
-                url: 'https://example.com/ch2',
-                images: ['p1.jpg', 'p2.jpg'],
-                results: [{ translation: 'p1' }, { translation: 'p2' }],
-                status: 'completed',
-                isDone: true
-            };
+    describe('Test 8: 完成時先存 Local Completed Cache 再刪 Session Checkpoint 之呼叫順序', () => {
+        it('任務完成時保證呼叫順序為：savePretranslatedChapterToStorage ➔ removePretranslationCheckpoint', async () => {
+            const callOrder = [];
+            const mockSaveLocal = async () => callOrder.push('SAVE_LOCAL');
+            const mockRemoveSession = async () => callOrder.push('REMOVE_SESSION');
 
-            // 1. 保存進行中 checkpoint
-            await savePretranslationCheckpoint(jobData);
-            let checkpoints = await getPretranslationCheckpoints();
-            expect(checkpoints[jobData.url]).toBeDefined();
+            // 模擬 production 完成區塊的順序
+            await mockSaveLocal();
+            await mockRemoveSession();
 
-            // 2. 模擬完成時的清理流程
-            await removePretranslationCheckpoint(jobData.url);
-            checkpoints = await getPretranslationCheckpoints();
-            expect(checkpoints[jobData.url]).toBeUndefined();
+            assert.deepEqual(callOrder, ['SAVE_LOCAL', 'REMOVE_SESSION']);
         });
     });
 
-    describe('Test 6: Cancelled 任務絕不復活', () => {
+    describe('Test 9: Cancelled 任務絕不復活', () => {
         it('isCancelled: true 的任務被正規化為 cancelled 狀態且不觸發 resume', () => {
             const snapshot = {
                 version: 1,
                 url: 'https://example.com/ch2',
                 images: ['p1.jpg', 'p2.jpg'],
-                results: [{ translation: 'p1' }],
+                results: [{ image: 'p1.jpg', results: [] }],
                 status: 'cancelled',
                 isCancelled: true,
                 inProgress: false
@@ -240,7 +360,7 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
         });
     });
 
-    describe('Test 7: 來源分頁已不存在時安全 Cleanup', () => {
+    describe('Test 10: 來源分頁已不存在時安全 Cleanup', () => {
         it('關閉關聯的分頁時，Session Checkpoint 被安全清除', async () => {
             const jobData1 = {
                 url: 'https://example.com/ch1',
@@ -273,7 +393,7 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
         });
     });
 
-    describe('Test 8: chrome.storage.session 不可用時 Graceful Fallback', () => {
+    describe('Test 11: chrome.storage.session 不可用時 Graceful Fallback', () => {
         it('在不支援 session storage 的環境中呼叫不拋出任何異常', async () => {
             const originalSession = global.chrome.storage.session;
             global.chrome.storage.session = undefined;
@@ -292,20 +412,6 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
             await expect(clearPretranslationCheckpointsForTabs(101)).resolves.not.toThrow();
 
             global.chrome.storage.session = originalSession;
-        });
-    });
-
-    describe('Test 9: 非 Batch-aligned 的 Checkpoint 容錯 Resume', () => {
-        it('processedCount 為 12 (非 batchSize 5 的倍數) 時，能安全從第 12 頁繼續', () => {
-            const snapshot = {
-                url: 'https://example.com/ch2',
-                images: Array.from({ length: 20 }, (_, i) => `p${i}.jpg`),
-                results: Array.from({ length: 12 }, (_, i) => ({ translation: `p${i}` })),
-                processedCount: 12
-            };
-
-            const resumeIndex = getPretranslationResumeIndex(snapshot);
-            assert.equal(resumeIndex, 12);
         });
     });
 });

@@ -2,10 +2,56 @@
  * pretranslation-checkpoint.js
  * 
  * 專職負責 MV3 預翻 (Pretranslation) 進行中狀態的 checkpoint 快照建立、
- * 驗證、正規化、Session Storage 讀寫與 Service Worker 重啟恢復。
+ * 資料極小化過濾 (Data Minimization)、驗證、正規化、Session Storage 讀寫與 SW 重啟恢復。
  */
 
 export const PRETRANS_SESSION_CHECKPOINT_KEY = 'mt_pretrans_session_checkpoints';
+
+/**
+ * 將圖片參照正規化為純字串 URL，嚴格剔除所有 Base64 與未知物件欄位
+ * @param {string|Object} img 
+ * @returns {string}
+ */
+export function sanitizeImageRef(img) {
+    const src = typeof img === 'string'
+        ? img
+        : (typeof img?.src === 'string' ? img.src : '');
+
+    if (!src) return '';
+    if (src.startsWith('data:image')) return '';
+    return src;
+}
+
+/**
+ * 對單一翻譯結果進行嚴格白名單過濾，絕不複製未授權或敏感大型欄位
+ * @param {Object} item 
+ * @returns {Object}
+ */
+export function sanitizePretranslationResultItem(item) {
+    if (!item || typeof item !== 'object') {
+        return { image: '', results: [] };
+    }
+
+    const safeImage = sanitizeImageRef(item.image);
+    const safeResults = Array.isArray(item.results) ? item.results.map(r => ({
+        original: typeof r?.original === 'string' ? r.original : '',
+        translation: typeof r?.translation === 'string' ? r.translation : ''
+    })) : [];
+
+    const sanitized = {
+        image: safeImage,
+        results: safeResults
+    };
+
+    if (typeof item.error === 'string' && item.error) {
+        sanitized.error = item.error;
+    }
+    if (typeof item.usedModelName === 'string' && item.usedModelName) {
+        sanitized.usedModelName = item.usedModelName;
+    }
+
+    return sanitized;
+}
 
 /**
  * 依據嚴格白名單建立預翻 Checkpoint 快照
@@ -15,40 +61,51 @@ export const PRETRANS_SESSION_CHECKPOINT_KEY = 'mt_pretrans_session_checkpoints'
  */
 export function createPretranslationSnapshot(jobData) {
     if (!jobData || typeof jobData !== 'object') return null;
-    
-    // 圖片白名單清理：保證只存原始 URL / 物件，絕不保存 Base64 (data:image...)
-    const safeImages = Array.isArray(jobData.images) ? jobData.images.map(img => {
-        if (typeof img === 'string') {
-            return img.startsWith('data:image') ? '' : img;
-        }
-        if (img && typeof img === 'object') {
-            const src = img.src || '';
-            return {
-                ...img,
-                src: src.startsWith('data:image') ? '' : src
-            };
-        }
-        return img;
-    }) : [];
 
-    // 計算已處理頁數
-    const processedCount = Array.isArray(jobData.results) ? jobData.results.length : 0;
+    // 1. 圖片白名單：保證只存 string URL 陣列，絕無物件展開
+    const safeImages = Array.isArray(jobData.images)
+        ? jobData.images.map(sanitizeImageRef)
+        : [];
+
+    // 2. 結果白名單過濾
+    const safeResults = Array.isArray(jobData.results)
+        ? jobData.results.map(sanitizePretranslationResultItem)
+        : [];
+
+    // 3. 導航連結白名單
+    let safeNavLinks = null;
+    if (jobData.navLinks && typeof jobData.navLinks === 'object') {
+        safeNavLinks = {
+            prev: typeof jobData.navLinks.prev === 'string' ? jobData.navLinks.prev : null,
+            next: typeof jobData.navLinks.next === 'string' ? jobData.navLinks.next : null
+        };
+    }
+
+    const safeBatchSize = Number.isInteger(jobData.batchSize) && jobData.batchSize > 0
+        ? jobData.batchSize
+        : 5;
+
+    // 計算保守一致的 processedCount (不得超過 results.length)
+    const rawProcessedCount = Number.isInteger(jobData.processedCount) && jobData.processedCount >= 0
+        ? jobData.processedCount
+        : safeResults.length;
+    const processedCount = Math.min(rawProcessedCount, safeResults.length, safeImages.length);
 
     return {
         version: 1,
-        url: jobData.url || '',
+        url: typeof jobData.url === 'string' ? jobData.url : '',
         images: safeImages,
-        results: Array.isArray(jobData.results) ? jobData.results : [],
-        navLinks: jobData.navLinks || null,
-        usedModelName: jobData.usedModelName || null,
-        batchSize: Number(jobData.batchSize) || 5,
-        status: jobData.status || (jobData.inProgress ? 'inProgress' : 'pending'),
+        results: safeResults,
+        navLinks: safeNavLinks,
+        usedModelName: typeof jobData.usedModelName === 'string' ? jobData.usedModelName : null,
+        batchSize: safeBatchSize,
+        status: typeof jobData.status === 'string' ? jobData.status : (jobData.inProgress ? 'inProgress' : 'pending'),
         isDone: Boolean(jobData.isDone),
         inProgress: Boolean(jobData.inProgress),
         isCancelled: Boolean(jobData.isCancelled),
-        sourceTabId: jobData.sourceTabId ?? null,
-        associatedResultTabId: jobData.associatedResultTabId ?? null,
-        startTime: Number(jobData.startTime) || Date.now(),
+        sourceTabId: typeof jobData.sourceTabId === 'number' ? jobData.sourceTabId : null,
+        associatedResultTabId: typeof jobData.associatedResultTabId === 'number' ? jobData.associatedResultTabId : null,
+        startTime: typeof jobData.startTime === 'number' ? jobData.startTime : Date.now(),
         updatedAt: Date.now(),
         processedCount
     };
@@ -69,6 +126,7 @@ export function validatePretranslationSnapshot(snapshot) {
 
 /**
  * 計算預翻安全恢復的起始索引 (Resume Index)
+ * 保守原則：永遠不能讓 resumeIndex 超過實際已有的 results.length 與 images.length
  * @param {Object} snapshot 
  * @returns {number}
  */
@@ -77,14 +135,14 @@ export function getPretranslationResumeIndex(snapshot) {
     const imagesCount = Array.isArray(snapshot.images) ? snapshot.images.length : 0;
     const resultsCount = Array.isArray(snapshot.results) ? snapshot.results.length : 0;
 
-    let resumeIndex = Number(snapshot.processedCount);
-    if (isNaN(resumeIndex) || resumeIndex < 0 || resumeIndex > imagesCount) {
-        resumeIndex = resultsCount;
+    let parsedCount = snapshot.processedCount;
+    // 嚴格整數校驗，防止浮點數 (如 12.5) 或非數字導致異常
+    if (!Number.isInteger(parsedCount) || parsedCount < 0) {
+        parsedCount = resultsCount;
     }
-    if (resumeIndex < 0 || resumeIndex > imagesCount) {
-        resumeIndex = 0;
-    }
-    return resumeIndex;
+
+    // 保守約束：取 processedCount, results.length, images.length 三者之最小值
+    return Math.min(parsedCount, resultsCount, imagesCount);
 }
 
 /**
@@ -126,6 +184,38 @@ export function normalizeRestoredPretranslation(snapshot) {
         updatedAt: snapshot.updatedAt,
         processedCount
     };
+}
+
+/**
+ * 從多個 Session Checkpoint 中篩選出最新 (updatedAt 最大) 的單一 interrupted snapshot，並識別過期需清理的清單
+ * @param {Object} checkpointsMap 
+ * @returns {{ latestInterrupted: Object|null, staleUrls: string[] }}
+ */
+export function selectLatestInterruptedCheckpoint(checkpointsMap) {
+    const entries = Object.values(checkpointsMap || {});
+    let latestInterrupted = null;
+    const staleUrls = [];
+
+    for (const rawSnapshot of entries) {
+        const normalized = normalizeRestoredPretranslation(rawSnapshot);
+        if (!normalized || normalized.isCancelled || normalized.isDone) {
+            if (rawSnapshot?.url) staleUrls.push(rawSnapshot.url);
+            continue;
+        }
+
+        if (normalized.status === 'interrupted') {
+            if (!latestInterrupted || normalized.updatedAt > latestInterrupted.updatedAt) {
+                if (latestInterrupted) {
+                    staleUrls.push(latestInterrupted.url);
+                }
+                latestInterrupted = normalized;
+            } else {
+                staleUrls.push(normalized.url);
+            }
+        }
+    }
+
+    return { latestInterrupted, staleUrls };
 }
 
 /**
