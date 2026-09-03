@@ -14,17 +14,36 @@
 export function createNovelSessionRegistry() {
     const activeSessions = new Map(); // tabId -> sessionId
     const cancelledTabs = new Set();  // tabId
+    const abortControllers = new Map(); // tabId -> { sessionId: string, controller: AbortController }
 
     return {
         /**
          * 明確開始新的小說翻譯 Session
+         * 若該 tab 存在舊 Session 的 controller 則予以 abort
          * @param {number|string} tabId 
          * @param {string} sessionId 
          */
         begin(tabId, sessionId) {
             if (tabId === undefined || tabId === null || !sessionId) return;
             const numericTabId = Number(tabId);
-            activeSessions.set(numericTabId, String(sessionId));
+            const strSessionId = String(sessionId);
+
+            // 1. 如果該 tab 舊 Session 仍有 controller -> abort 舊 controller
+            const existing = abortControllers.get(numericTabId);
+            if (existing) {
+                try {
+                    existing.controller.abort();
+                } catch (_) {}
+            }
+
+            // 2. 建立新的 AbortController 並與新 sessionId 綁定
+            const controller = new AbortController();
+            abortControllers.set(numericTabId, {
+                sessionId: strSessionId,
+                controller
+            });
+
+            activeSessions.set(numericTabId, strSessionId);
             cancelledTabs.delete(numericTabId);
         },
 
@@ -36,6 +55,27 @@ export function createNovelSessionRegistry() {
         getActiveSessionId(tabId) {
             if (tabId === undefined || tabId === null) return null;
             return activeSessions.get(Number(tabId)) || null;
+        },
+
+        /**
+         * 取得特定 Session 的 AbortSignal
+         * 若為合法的活躍 Session，返回其對應的 signal；
+         * 若該 Session 已被取消、遭新 Session 取代或已失活，安全返回已中斷 (aborted: true) 的 signal，徹底防止 race condition 下發送未受控的請求
+         * @param {number|string} tabId 
+         * @param {string} sessionId 
+         * @returns {AbortSignal}
+         */
+        getAbortSignal(tabId, sessionId) {
+            if (tabId === undefined || tabId === null || !sessionId) {
+                return AbortSignal.abort();
+            }
+            const numericTabId = Number(tabId);
+            const entry = abortControllers.get(numericTabId);
+            if (entry && entry.sessionId === String(sessionId)) {
+                return entry.controller.signal;
+            }
+            // 若為過期 Session 或查無控制器，一律返回已中斷的 signal，確保 fail-closed
+            return AbortSignal.abort();
         },
 
         /**
@@ -53,12 +93,20 @@ export function createNovelSessionRegistry() {
         },
 
         /**
-         * 標記特定分頁為中斷狀態
+         * 標記特定分頁為中斷狀態，並中斷該分頁當前活躍的網路連線
          * @param {number|string} tabId 
          */
         cancel(tabId) {
             if (tabId !== undefined && tabId !== null) {
-                cancelledTabs.add(Number(tabId));
+                const numericTabId = Number(tabId);
+                cancelledTabs.add(numericTabId);
+
+                const entry = abortControllers.get(numericTabId);
+                if (entry) {
+                    try {
+                        entry.controller.abort();
+                    } catch (_) {}
+                }
             }
         },
 
@@ -80,21 +128,34 @@ export function createNovelSessionRegistry() {
         },
 
         /**
-         * 分頁關閉時清理該分頁的所有 Session 與中斷記錄
+         * 分頁關閉時清理該分頁的所有 Session 與中斷記錄，並中斷進行中的請求
          * @param {number|string} tabId 
          */
         clear(tabId) {
             if (tabId !== undefined && tabId !== null) {
                 const numericTabId = Number(tabId);
+                const entry = abortControllers.get(numericTabId);
+                if (entry) {
+                    try {
+                        entry.controller.abort();
+                    } catch (_) {}
+                    abortControllers.delete(numericTabId);
+                }
                 activeSessions.delete(numericTabId);
                 cancelledTabs.delete(numericTabId);
             }
         },
 
         /**
-         * 清空所有記錄 (測試用)
+         * 清空所有記錄並中斷所有連線 (測試用)
          */
         clearAll() {
+            for (const entry of abortControllers.values()) {
+                try {
+                    entry.controller.abort();
+                } catch (_) {}
+            }
+            abortControllers.clear();
             activeSessions.clear();
             cancelledTabs.clear();
         },
