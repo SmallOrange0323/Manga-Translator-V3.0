@@ -19,6 +19,7 @@ import { createNovelJobCheckpoint, getNovelJobCheckpoints, readNovelJobCheckpoin
 import { upsertNovelResultItems, applyNovelResultUpsertIfCurrent } from './novel-result-store.js';
 import { isSameNovelPage, normalizeNovelPageUrl } from '../utils/novel-page-identity.js';
 import { buildNovelRehydrateSnapshot } from './novel-rehydrate.js';
+import { translateNovelBatchWithRefusalIsolation } from './novel-refusal.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -610,25 +611,44 @@ async function processDurableNovelJobs() {
             let mappedResult = null;
 
             try {
-                const apiResult = await translateTexts(indexedTexts, {
-                    model: modelName,
-                    fallbackModel: fallbackModelName,
-                    prompt: finalPrompt,
-                    schema: schema,
-                    glossarySnippet
-                });
+                const isolationResults = await translateNovelBatchWithRefusalIsolation(
+                    batchItems,
+                    async (subItems) => {
+                        const subIndexedTexts = subItems.map((item, localIdx) => `[${localIdx}] ${item.text}`);
+                        const apiResult = await translateTexts(subIndexedTexts, {
+                            model: modelName,
+                            fallbackModel: fallbackModelName,
+                            prompt: finalPrompt,
+                            schema: schema,
+                            glossarySnippet
+                        });
 
-                // Post-request Session Guard
+                        // Post-request Session Guard
+                        if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                            const abortErr = new Error('Session aborted');
+                            abortErr.isAborted = true;
+                            throw abortErr;
+                        }
+
+                        const { translations, validCount } = mapNovelTranslationResults(apiResult, subItems.length);
+                        if (validCount === 0) throw new Error('翻譯結果為空或格式錯誤');
+
+                        await incrementDailyUsage(modelName);
+                        return translations;
+                    },
+                    {
+                        shouldContinue: () => novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)
+                    }
+                );
+
+                // Post-isolation Session Guard
                 if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
                     log.warn('Background', `[Durable Job] Session ${job.sessionId} 在 API 期間已中止或變更，捨棄本次回傳結果`);
                     await removeNovelJobCheckpoint(job.sessionId);
                     continue;
                 }
 
-                const { translations, validCount } = mapNovelTranslationResults(apiResult, rawTexts.length);
-                if (validCount === 0) throw new Error('翻譯結果為空或格式錯誤');
-
-                await incrementDailyUsage(modelName);
+                const translations = isolationResults.map(r => r.translation || '（翻譯失敗）');
 
                 mappedResult = {
                     translations,
@@ -764,8 +784,10 @@ async function processDurableNovelJobs() {
                 const translatedPairs = batchItems.map((it, offset) => ({
                     original: it.text,
                     translation: mappedResult.translations[offset]
-                }));
-                setTimeout(async () => {
+                })).filter(p => p.translation && p.translation !== '（翻譯失敗）');
+
+                if (translatedPairs.length > 0) {
+                    setTimeout(async () => {
                     if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) return;
                     try {
                         const newTerms = await extractTermsFromTranslation(translatedPairs, { model: modelName });
@@ -782,6 +804,7 @@ async function processDurableNovelJobs() {
                         }
                     } catch (_) {}
                 }, 1000);
+                }
             }
 
             if (requestDelay > 0) {
@@ -1664,6 +1687,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
           try {
               const model = await state.get('novelModelName', 'gemini-3.5-flash-lite');
+              const fallbackModel = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
               const prompt = await state.get('novelPrompt', Constants.DEFAULT_PROMPT_NOVEL);
               
               let glossarySnippet = '';
@@ -1674,6 +1698,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               
               const result = await translateTexts([text], {
                   model: model,
+                  fallbackModel: fallbackModel,
                   prompt: prompt,
                   glossarySnippet: glossarySnippet,
                   schema: {
