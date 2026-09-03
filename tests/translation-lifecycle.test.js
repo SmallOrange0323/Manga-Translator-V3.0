@@ -109,10 +109,10 @@ describe('Translation Lifecycle Integration Tests', () => {
             assert.equal(fallbackCalls[0].imageBase64, 'img1_base64');
             assert.equal(fallbackResult.wasStopped, true);
 
-            // 未執行的圖片被標記為 '翻譯已停止'，絕不產生假成功結果
+            // 圖片 1 完成，未執行的圖片 2 和 3 保持 null，不產生假錯誤物件或假成功結果
             assert.equal(fallbackResult.fallbackResults[0].results[0].translation, '你好');
-            assert.equal(fallbackResult.fallbackResults[1].error, '翻譯已停止');
-            assert.equal(fallbackResult.fallbackResults[2].error, '翻譯已停止');
+            assert.equal(fallbackResult.fallbackResults[1], null);
+            assert.equal(fallbackResult.fallbackResults[2], null);
 
             // 驗證 lifecycle 決策：不得標記為正常 completed
             const canComplete = shouldCompleteMangaTranslation({

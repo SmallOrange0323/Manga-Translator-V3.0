@@ -36,6 +36,18 @@ export function shouldCompleteMangaTranslation({ wasStopped, wasAborted, isStopp
 }
 
 /**
+ * 判斷當前批次是否應將翻譯結果發布/提交至 UI
+ * 若在批次處理或備援降級期間已被使用者 STOP 中止，必須立即放棄發布，防止渲染錯誤卡片
+ * @param {Object} params
+ * @param {boolean} params.wasStopped - 是否已被 STOP 中止
+ * @param {boolean} [params.wasAborted] - 是否已被整體中斷
+ * @returns {boolean}
+ */
+export function shouldPublishMangaBatchResults({ wasStopped, wasAborted = false } = {}) {
+    return !wasStopped && !wasAborted;
+}
+
+/**
  * 執行批次失敗後的逐張 fallback 備援翻譯，保證在 STOP 觸發時立即中斷，不再發送後續 API 請求
  */
 export async function executeFallbackImages({
@@ -54,9 +66,6 @@ export async function executeFallbackImages({
 
         if (!await shouldContinue()) {
             wasStopped = true;
-            for (let rest = k; rest < validItems.length; rest++) {
-                fallbackResults[rest] = { error: '翻譯已停止' };
-            }
             break;
         }
 
@@ -64,9 +73,6 @@ export async function executeFallbackImages({
 
         if (!await shouldContinue()) {
             wasStopped = true;
-            for (let rest = k; rest < validItems.length; rest++) {
-                fallbackResults[rest] = { error: '翻譯已停止' };
-            }
             break;
         }
 
@@ -83,15 +89,16 @@ export async function executeFallbackImages({
             };
             broadcastStatus(`第 ${item.originalIdx + 1} 張備援翻譯成功`, 'ok');
         } catch (singleErr) {
+            if (singleErr?.isCancelled || singleErr?.isExternalAbort) {
+                wasStopped = true;
+                break;
+            }
             fallbackResults[k] = { error: singleErr.message || String(singleErr) };
             broadcastStatus(`❌ 第 ${item.originalIdx + 1} 張備援失敗: ${(singleErr.message || '').slice(0, 30)}`, 'err');
         }
 
         if (!await shouldContinue()) {
             wasStopped = true;
-            for (let rest = k + 1; rest < validItems.length; rest++) {
-                fallbackResults[rest] = { error: '翻譯已停止' };
-            }
             break;
         }
     }

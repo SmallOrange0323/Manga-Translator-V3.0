@@ -8,9 +8,10 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
+import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from './manga-cancellation.js';
 import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
 import { mapNovelTranslationResults } from './novel-result-mapping.js';
 import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellation.js';
@@ -1348,6 +1349,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // 側邊欄或前台主動停止漫畫翻譯任務
   if (message.action === 'STOP_TRANSLATION') {
       const tabId = message.payload?.tabId || sender.tab?.id;
+      cancelMangaRun();
       state.set('isStopping', true);
       log.warn('Background', '收到停止指令，正在中斷相關翻譯任務...');
       if (tabId) {
@@ -1942,6 +1944,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return false;
       }
 
+      cancelMangaRun();
       state.set('isStopping', true);
 
       setTimeout(async () => {
@@ -2526,8 +2529,9 @@ function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKe
 async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
     let createdRun;
     await withMangaStartLock(async () => {
-        // STOP 後等待所有舊任務離開其 finally，才可清除全域停止/暫停旗標。
+        // STOP 後等待所有舊任務離開其 finite/finally，才可清除全域停止/暫停旗標。
         await Promise.allSettled([...activeMangaTranslationRuns]);
+        beginMangaRun();
         await state.set('isStopping', false);
         await state.set('isBatchPaused', false);
 
@@ -2752,6 +2756,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
     if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
     if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
     const cleanupTranslationJob = () => {
+        clearMangaRun();
         if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
         if (resultTabId) {
             activeTranslationJobs.delete(resultTabId);
@@ -2985,6 +2990,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
                 let batchSuccess = false;
                 let batchWasStopped = false;
+                const mangaSignal = getMangaAbortSignal();
 
                 if (batchSize > 1) {
                     if (i > 0 && effectiveDelay > 0) {
@@ -2999,14 +3005,14 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         const execution = await executeHybridRequest({
                             candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
                             secondaryModel: secondaryModelName, isHybrid,
-                            shouldContinue: async () => !(await state.get('isStopping')),
+                            shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted,
                             request: async ({ apiKey, modelName: requestModel, shouldContinue: shouldContinueRequest }) => {
-                                const checkContinue = shouldContinueRequest || (async () => !(await state.get('isStopping')));
+                                const checkContinue = shouldContinueRequest || (async () => !(await state.get('isStopping')) && !mangaSignal.aborted);
                                 for (const subBatch of subBatches) {
                                     if (!await checkContinue()) {
                                         throw new HybridRequestAbortedError();
                                     }
-                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel);
+                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal);
                                     if (!await checkContinue()) {
                                         throw new HybridRequestAbortedError();
                                     }
@@ -3018,7 +3024,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                         batchModel = execution.usedModelName;
                         batchSuccess = true;
                     } catch (batchKeyErr) {
-                        batchWasStopped = batchKeyErr.code === 'TRANSLATION_STOPPED';
+                        batchWasStopped = batchKeyErr.code === 'TRANSLATION_STOPPED' || batchKeyErr.isCancelled || batchKeyErr.isExternalAbort;
                         log.warn('Background', `[批次] 所有 Key/模型批次嘗試失敗: ${batchKeyErr.message}`);
                     }
                 } else {
@@ -3029,24 +3035,26 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                             const execution = await executeHybridRequest({
                                 candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
                                 secondaryModel: secondaryModelName, isHybrid,
-                                shouldContinue: async () => !(await state.get('isStopping')),
+                                shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted,
                                 request: ({ apiKey, modelName: requestModel }) => translateTexts([], {
-                                model: requestModel,
-                                apiKey,
-                                prompt: finalPrompt,
-                                glossarySnippet,
-                                imageBase64: item.b64,
-                                schema: {
-                                    type: 'OBJECT',
-                                    properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
-                                    required: ['results']
-                                }
-                            }) });
+                                    model: requestModel,
+                                    apiKey,
+                                    prompt: finalPrompt,
+                                    glossarySnippet,
+                                    imageBase64: item.b64,
+                                    signal: mangaSignal,
+                                    schema: {
+                                        type: 'OBJECT',
+                                        properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
+                                        required: ['results']
+                                    }
+                                })
+                            });
                             allPageResults[item.originalIdx] = execution.results;
                             batchModel = execution.usedModelName;
                             batchSuccess = true;
                         } catch (singleErr) {
-                            batchWasStopped = singleErr.code === 'TRANSLATION_STOPPED';
+                            batchWasStopped = singleErr.code === 'TRANSLATION_STOPPED' || singleErr.isCancelled || singleErr.isExternalAbort;
                             log.warn('Background', `[逐張] 翻譯失敗: ${singleErr.message}`);
                         }
                     }
@@ -3072,24 +3080,31 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                             prompt: finalPrompt,
                             glossarySnippet,
                             imageBase64,
+                            signal: mangaSignal,
                             schema: {
                                 type: 'OBJECT',
                                 properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
                                 required: ['results']
                             }
                         }),
-                        shouldContinue: async () => !(await state.get('isStopping')),
+                        shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted,
                         broadcastStatus: (msg, type) => broadcastStatus(msg, type)
                     });
 
                     if (fallbackResult.wasStopped) {
                         wasStopped = true;
+                        break;
                     }
 
                     validItems.forEach((item, k) => {
                         allPageResults[item.originalIdx] = fallbackResult.fallbackResults[k] || { error: '備援翻譯結果缺失' };
                     });
                 }
+            }
+
+            // 若在批次處理或備援降級期間已被 STOP 中止，放棄提交 UI，防止渲染錯誤卡片
+            if (!shouldPublishMangaBatchResults({ wasStopped })) {
+                break;
             }
 
             // 回傳本批結果給 UI
