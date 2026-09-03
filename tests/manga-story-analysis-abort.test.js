@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal } from '../src/background/manga-cancellation.js';
 import { extractGlobalStoryAndGlossary } from '../src/background/translate-api.js';
-import { isMangaCancellation, shouldProceedToStage2 } from '../src/background/manga-lifecycle.js';
+import { isMangaCancellation, shouldContinueMangaStoryAnalysis, shouldProceedToStage2 } from '../src/background/manga-lifecycle.js';
 import { state } from '../src/utils/state.js';
 
 describe('Manga Two-Step Phase 1.5: extractGlobalStoryAndGlossary Active Request Abort on STOP', () => {
@@ -201,7 +201,7 @@ describe('Manga Two-Step Phase 1.5: extractGlobalStoryAndGlossary Active Request
     });
 
     // H. STOP after API success before sessionStoryContext write -> 不寫 sessionStoryContext
-    it('H: post-request guard blocks sessionStoryContext write if aborted right after API returns', () => {
+    it('H: post-request guard 1 blocks sessionStoryContext write if aborted right after API returns', () => {
         const controller = new AbortController();
         controller.abort(); // 模擬 API 回傳後、寫入前按 STOP
 
@@ -209,9 +209,9 @@ describe('Manga Two-Step Phase 1.5: extractGlobalStoryAndGlossary Active Request
         const resultTabId = 123;
         const sessionAnalysis = { storySummary: '大綱', characterRelationships: [] };
 
-        // 依據 index.js 的 post-request guard 1
+        // 依據 index.js 的 post-request guard 1 決策
         let written = false;
-        if (!controller.signal.aborted) {
+        if (shouldContinueMangaStoryAnalysis({ signal: controller.signal, isStopping: false })) {
             sessionStoryContext[resultTabId] = sessionAnalysis;
             written = true;
         }
@@ -227,28 +227,44 @@ describe('Manga Two-Step Phase 1.5: extractGlobalStoryAndGlossary Active Request
 
         const mergeGlossarySpy = vi.fn();
 
-        // 依據 index.js 的 post-request guard
-        if (!controller.signal.aborted) {
+        // 依據 index.js 的 post-request guard 決策
+        if (shouldContinueMangaStoryAnalysis({ signal: controller.signal, isStopping: false })) {
             mergeGlossarySpy('manga-key', [{ original: 'A', translation: 'B' }]);
         }
 
         expect(mergeGlossarySpy).toHaveBeenCalledTimes(0);
     });
 
-    // J. STOP after glossary merge await before success broadcast -> 不 broadcast success -> 不進 Stage 2
-    it('J: post-request guard 2 blocks success broadcast and halts pipeline if aborted after glossary merge', () => {
+    // J. STOP during loadGlossary await -> 不 broadcast success -> 不進 Stage 2 (Async Gap Regression)
+    it('J: STOP triggered while loadGlossary is pending halts pipeline, prevents success broadcast and blocks Stage 2', async () => {
         const controller = new AbortController();
-        controller.abort(); // 模擬在 merge 完成後觸發 STOP
-
         const broadcastStatusSpy = vi.fn();
         let enteredStage2 = false;
 
-        // 依據 index.js 的 post-request guard 2
-        if (!controller.signal.aborted) {
+        // 1. 模擬前置步驟均成功
+        expect(shouldContinueMangaStoryAnalysis({ signal: controller.signal, isStopping: false })).toBe(true);
+
+        // 2. 模擬 loadGlossary 正在等待非同步 storage 讀取
+        let resolveLoadGlossary;
+        const loadGlossaryPromise = new Promise((resolve) => {
+            resolveLoadGlossary = resolve;
+        });
+
+        // 3. 在 loadGlossary 正在等待期間，使用者按下 STOP
+        controller.abort();
+
+        // 4. loadGlossary 讀取完成返回
+        resolveLoadGlossary({ terms: [{ original: '日文', translation: '中文' }] });
+        const allTerms = await loadGlossaryPromise;
+        expect(allTerms.terms).toHaveLength(1);
+
+        // 5. 依據 index.js 的 post-request guard 3 執行檢查
+        if (shouldContinueMangaStoryAnalysis({ signal: controller.signal, isStopping: false })) {
             broadcastStatusSpy('🎯 已掌握全局設定', 'ok');
             enteredStage2 = true;
         }
 
+        // 斷言：成功廣播被徹底阻止，且絕不進入 Stage 2！
         expect(broadcastStatusSpy).toHaveBeenCalledTimes(0);
         expect(enteredStage2).toBe(false);
     });
@@ -282,5 +298,22 @@ describe('Manga Two-Step Phase 1.5: extractGlobalStoryAndGlossary Active Request
         });
 
         expect(result.storySummary).toBe('正常劇情');
+    });
+
+    // L. normal loadGlossary -> success broadcast and Stage 2 allowed
+    it('L: normal execution without abort allows success broadcast and entry into Stage 2', async () => {
+        const controller = new AbortController(); // 未 abort
+        const broadcastStatusSpy = vi.fn();
+        let enteredStage2 = false;
+
+        const allTerms = await Promise.resolve({ terms: [] });
+
+        if (shouldContinueMangaStoryAnalysis({ signal: controller.signal, isStopping: false })) {
+            broadcastStatusSpy('🎯 已掌握全局設定', 'ok');
+            enteredStage2 = shouldProceedToStage2({ wasStopped: false, isStopping: false, scriptLinesCount: 5 });
+        }
+
+        expect(broadcastStatusSpy).toHaveBeenCalledTimes(1);
+        expect(enteredStage2).toBe(true);
     });
 });

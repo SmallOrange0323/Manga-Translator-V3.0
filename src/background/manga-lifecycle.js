@@ -133,6 +133,18 @@ export function shouldFallbackAfterOcrError(error, signal) {
 }
 
 /**
+ * 判斷全域劇本分析過程中或非同步間隙中是否應繼續推進流程
+ * 若已被 STOP 中止（signal.aborted 或 isStopping），必須立即停止後續副作用
+ * @param {Object} params
+ * @param {AbortSignal} [params.signal]
+ * @param {boolean} [params.isStopping]
+ * @returns {boolean}
+ */
+export function shouldContinueMangaStoryAnalysis({ signal, isStopping = false } = {}) {
+    return !signal?.aborted && !isStopping;
+}
+
+/**
  * 執行批次 OCR 失敗後的逐張 fallback 重試，保證在 STOP 觸發時立即中斷，不再發送後續 API 請求
  */
 export async function executeOcrFallbackImages({

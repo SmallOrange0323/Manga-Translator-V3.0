@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldFallbackAfterOcrError, isMangaCancellation, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldFallbackAfterOcrError, isMangaCancellation, shouldContinueMangaStoryAnalysis, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from './manga-cancellation.js';
@@ -2665,14 +2665,18 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
     }
 
     // ── 【第一道 STOP 守衛：Stage 1 OCR 結束 ➔ 進入 Stage 1.5 之前】 ──
-    const isStoppingAfterOcr = await state.get('isStopping');
-    if (!shouldProceedToStage15({ wasStopped: isStoppingAfterOcr, isStopping: isStoppingAfterOcr })) {
-        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 1.5 與階段 2');
+    const cleanupStoppedTwoStepRun = () => {
         if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
         if (resultTabId) {
             activeTranslationJobs.delete(resultTabId);
             delete sessionStoryContext[resultTabId];
         }
+    };
+
+    const isStoppingAfterOcr = await state.get('isStopping');
+    if (!shouldProceedToStage15({ wasStopped: isStoppingAfterOcr, isStopping: isStoppingAfterOcr })) {
+        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 1.5 與階段 2');
+        cleanupStoppedTwoStepRun();
         return;
     }
 
@@ -2687,13 +2691,9 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
 
     if (fullScriptText.trim().length > 20) {
         const mangaSignal = getMangaAbortSignal();
-        if (mangaSignal.aborted || (await state.get('isStopping'))) {
+        if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
             log.info('TwoStepPipeline', '進入階段 1.5 前偵測到中止訊號，終止流程');
-            if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-            if (resultTabId) {
-                activeTranslationJobs.delete(resultTabId);
-                delete sessionStoryContext[resultTabId];
-            }
+            cleanupStoppedTwoStepRun();
             return;
         }
 
@@ -2712,13 +2712,9 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
             });
 
             // Post-request guard 1：API 返回後若已被中止，立即終止流程且不寫入任何 context/glossary
-            if (mangaSignal.aborted || (await state.get('isStopping'))) {
+            if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
                 log.info('TwoStepPipeline', '全域劇本分析完成後偵測到中止訊號，終止流程');
-                if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-                if (resultTabId) {
-                    activeTranslationJobs.delete(resultTabId);
-                    delete sessionStoryContext[resultTabId];
-                }
+                cleanupStoppedTwoStepRun();
                 return;
             }
 
@@ -2734,14 +2730,10 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 log.info('TwoStepPipeline', `已將 ${sessionAnalysis.glossaryTerms.length} 筆全書專有名詞存入長期詞庫 (${currentMangaKey})`);
             }
 
-            // Post-request guard 2：詞庫寫入後再次檢查中止訊號，阻止後續廣播與進入 Stage 2
-            if (mangaSignal.aborted || (await state.get('isStopping'))) {
+            // Post-request guard 2：詞庫寫入後再次檢查中止訊號，阻止後續讀取、廣播與進入 Stage 2
+            if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
                 log.info('TwoStepPipeline', '詞庫合併後偵測到中止訊號，終止流程');
-                if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-                if (resultTabId) {
-                    activeTranslationJobs.delete(resultTabId);
-                    delete sessionStoryContext[resultTabId];
-                }
+                cleanupStoppedTwoStepRun();
                 return;
             }
 
@@ -2751,6 +2743,14 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
                 .join('\n');
 
             const allTerms = await loadGlossary(currentMangaKey);
+
+            // Post-request guard 3：詞庫讀取後再次檢查中止訊號，阻止後續 prompt snippet 建構、成功廣播與進入 Stage 2
+            if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
+                log.info('TwoStepPipeline', '詞庫讀取後偵測到中止訊號，終止流程');
+                cleanupStoppedTwoStepRun();
+                return;
+            }
+
             const termsSnippet = buildGlossaryPromptSnippet(allTerms?.terms || []);
 
             sessionContextSnippet = `
@@ -2770,11 +2770,7 @@ ${termsSnippet}
         } catch (storyErr) {
             if (isMangaCancellation(storyErr, mangaSignal) || (await state.get('isStopping'))) {
                 log.info('TwoStepPipeline', '全域劇本分析過程中偵測到中止訊號，終止流程');
-                if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-                if (resultTabId) {
-                    activeTranslationJobs.delete(resultTabId);
-                    delete sessionStoryContext[resultTabId];
-                }
+                cleanupStoppedTwoStepRun();
                 return;
             }
             log.warn('TwoStepPipeline', `全域劇本分析失敗，退回無劇情背景精翻: ${storyErr.message}`);
