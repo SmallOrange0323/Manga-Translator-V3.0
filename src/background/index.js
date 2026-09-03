@@ -19,7 +19,12 @@ import { createNovelJobCheckpoint, getNovelJobCheckpoints, readNovelJobCheckpoin
 import { upsertNovelResultItems, applyNovelResultUpsertIfCurrent } from './novel-result-store.js';
 import { isSameNovelPage, normalizeNovelPageUrl } from '../utils/novel-page-identity.js';
 import { buildNovelRehydrateSnapshot } from './novel-rehydrate.js';
-import { translateNovelBatchWithRefusalIsolation } from './novel-refusal.js';
+import {
+    translateNovelBatchWithRefusalIsolation,
+    buildNovelSingleRetryOptions,
+    buildSuccessfulNovelTranslationPairs,
+    buildNovelIsolationMappedResult
+} from './novel-refusal.js';
 
 let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
@@ -648,12 +653,7 @@ async function processDurableNovelJobs() {
                     continue;
                 }
 
-                const translations = isolationResults.map(r => r.translation || '（翻譯失敗）');
-
-                mappedResult = {
-                    translations,
-                    isFailed: false
-                };
+                mappedResult = buildNovelIsolationMappedResult(isolationResults);
             } catch (apiErr) {
                 // 若為中止或 Session 變更，不建立失敗批次
                 if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
@@ -781,10 +781,7 @@ async function processDurableNovelJobs() {
 
             // 異步術語萃取 (非阻塞)
             if (!mappedResult.isFailed && !isIncognitoTask && mangaKey && novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
-                const translatedPairs = batchItems.map((it, offset) => ({
-                    original: it.text,
-                    translation: mappedResult.translations[offset]
-                })).filter(p => p.translation && p.translation !== '（翻譯失敗）');
+                const translatedPairs = buildSuccessfulNovelTranslationPairs(batchItems, mappedResult.translations);
 
                 if (translatedPairs.length > 0) {
                     setTimeout(async () => {
@@ -1696,22 +1693,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   if (gl?.terms) glossarySnippet = buildGlossaryPromptSnippet(gl.terms);
               }
               
-              const result = await translateTexts([text], {
-                  model: model,
-                  fallbackModel: fallbackModel,
-                  prompt: prompt,
-                  glossarySnippet: glossarySnippet,
-                  schema: {
-                      type: 'OBJECT',
-                      properties: {
-                          results: {
-                              type: 'ARRAY',
-                              items: { type: 'STRING' }
-                          }
-                      },
-                      required: ['results']
-                  }
+              const retryOptions = buildNovelSingleRetryOptions({
+                  model,
+                  fallbackModel,
+                  prompt,
+                  glossarySnippet
               });
+              const result = await translateTexts([text], retryOptions);
               
               // Post-request Guard: 若 API 返回期間 Session 已切換或中斷，立即捨棄
               if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {

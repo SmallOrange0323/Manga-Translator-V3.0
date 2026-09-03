@@ -123,3 +123,61 @@ export async function translateNovelBatchWithRefusalIsolation(items, translateFn
         return [...leftResults, ...rightResults];
     }
 }
+
+/**
+ * 組裝小說單段重譯 (Single Paragraph Retry) 所需的 translateTexts options
+ * @param {Object} params
+ * @param {string} params.model
+ * @param {string} [params.fallbackModel]
+ * @param {string} [params.prompt]
+ * @param {string} [params.glossarySnippet]
+ * @param {Object} [params.schema]
+ * @returns {Object}
+ */
+export function buildNovelSingleRetryOptions({ model, fallbackModel, prompt, glossarySnippet, schema } = {}) {
+    return {
+        model,
+        fallbackModel,
+        prompt,
+        glossarySnippet: glossarySnippet || '',
+        schema: schema || {
+            type: 'OBJECT',
+            properties: {
+                results: {
+                    type: 'ARRAY',
+                    items: { type: 'STRING' }
+                }
+            },
+            required: ['results']
+        }
+    };
+}
+
+/**
+ * 從小說批次原始項目與翻譯結果中萃取成功的對話配對 (過濾失敗標記)
+ * @param {Array<{text: string}>} batchItems 
+ * @param {Array<string>} translations 
+ * @returns {Array<{original: string, translation: string}>}
+ */
+export function buildSuccessfulNovelTranslationPairs(batchItems = [], translations = []) {
+    if (!batchItems || !translations) return [];
+    return batchItems.map((it, offset) => ({
+        original: it.text,
+        translation: translations[offset]
+    })).filter(p => p.translation && p.translation !== '（翻譯失敗）');
+}
+
+/**
+ * 將 Refusal Isolation 的結果物件陣列整合成 Durable Job 所需的 mappedResult
+ * 保持 isFailed: false (避免 Mixed Batch 造成整批全部失敗)
+ * @param {Array<{translation?: string, failed?: boolean}>} isolationResults 
+ * @returns {{translations: Array<string>, isFailed: boolean}}
+ */
+export function buildNovelIsolationMappedResult(isolationResults = []) {
+    const translations = (isolationResults || []).map(r => r.translation || '（翻譯失敗）');
+    return {
+        translations,
+        isFailed: false
+    };
+}
+

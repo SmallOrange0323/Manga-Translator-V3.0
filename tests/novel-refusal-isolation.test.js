@@ -1,5 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
-import { isModelRefusalError, translateNovelBatchWithRefusalIsolation } from '../src/background/novel-refusal.js';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import {
+    isModelRefusalError,
+    translateNovelBatchWithRefusalIsolation,
+    buildNovelSingleRetryOptions,
+    buildSuccessfulNovelTranslationPairs,
+    buildNovelIsolationMappedResult
+} from '../src/background/novel-refusal.js';
+import { translateTexts } from '../src/background/translate-api.js';
+import { state } from '../src/utils/state.js';
 
 describe('Novel Refusal & Batch Isolation Tests', () => {
 
@@ -104,7 +112,6 @@ describe('Novel Refusal & Batch Isolation Tests', () => {
 
             const translateFn = vi.fn().mockImplementation(async (sub) => {
                 if (sub.length === 4) throw refusalErr;
-                // sub.length === 2 (兩半都成功)
                 return sub.map(s => `Trans_${s.text}`);
             });
 
@@ -272,7 +279,6 @@ describe('Novel Refusal & Batch Isolation Tests', () => {
 
             const translateFn = vi.fn().mockImplementation(async (sub) => {
                 if (sub.length === 4) throw refusalErr;
-                // child sub-batch 遭遇 429
                 throw err429;
             });
 
@@ -293,7 +299,6 @@ describe('Novel Refusal & Batch Isolation Tests', () => {
             let isRunning = true;
             const translateFn = vi.fn().mockImplementation(async (sub) => {
                 if (sub.length === 2) throw refusalErr;
-                // 完成左邊後，外部觸發 STOP
                 isRunning = false;
                 return ['Trans_A'];
             });
@@ -302,183 +307,227 @@ describe('Novel Refusal & Batch Isolation Tests', () => {
                 shouldContinue: () => isRunning
             })).rejects.toThrow('Session aborted');
 
-            // 右半部不可再呼叫 translateFn
             expect(translateFn).toHaveBeenCalledTimes(2); // 1 full + 1 left only
         });
     });
 
-    describe('3. Refusal Retry Policy in translateTexts (Sections 6 & 23)', () => {
-        // L. fallback primary refusal -> immediate fallback
-        it('L: primary refusal immediately switches to fallback without delay', async () => {
-            const mockFetch = vi.fn();
-            // Primary model 'model-A' returns SAFETY refusal
-            mockFetch.mockResolvedValueOnce({
-                ok: true,
-                json: async () => ({
-                    candidates: [{ finishReason: 'SAFETY', content: { parts: [{ text: '' }] } }]
-                })
-            });
-            // Fallback model 'model-B' succeeds
-            mockFetch.mockResolvedValueOnce({
-                ok: true,
-                json: async () => ({
-                    candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"results":["已成功翻譯"]}' }] } }]
-                })
-            });
-
-            // 動態測試 translateTexts 的 fallback 切換行為
-            const calls = [];
-            const primaryModel = 'gemini-model-a';
-            const fallbackModel = 'gemini-model-b';
-
-            let currentModel = primaryModel;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                calls.push(currentModel);
-                const res = await mockFetch();
-                const json = await res.json();
-                const cand = json.candidates[0];
-                if (!cand.content.parts[0].text) {
-                    const err = new Error('Refused');
-                    err.isProhibited = true;
-                    err.finishReason = cand.finishReason;
-
-                    if (isModelRefusalError(err)) {
-                        if (currentModel === primaryModel && fallbackModel && fallbackModel !== currentModel) {
-                            currentModel = fallbackModel;
-                            continue; // 零延遲立即重試
-                        }
-                        throw err;
+    describe('3. Production translateTexts Refusal Retry Policy (Sections 6 & 23)', () => {
+        beforeEach(() => {
+            vi.restoreAllMocks();
+            globalThis.chrome = {
+                storage: {
+                    local: {
+                        get: vi.fn().mockResolvedValue({}),
+                        set: vi.fn().mockResolvedValue({})
+                    },
+                    onChanged: {
+                        addListener: vi.fn(),
+                        removeListener: vi.fn()
                     }
                 }
-                break;
-            }
-
-            expect(calls).toEqual(['gemini-model-a', 'gemini-model-b']);
-        });
-
-        // M. fallback also refusal -> 不做第三次相同 fallback request
-        it('M: fallback also refusal throws immediately without duplicate retry', async () => {
-            const calls = [];
-            const primaryModel = 'model-a';
-            const fallbackModel = 'model-b';
-
-            let currentModel = primaryModel;
-            let thrownError = null;
-
-            try {
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                    calls.push(currentModel);
-                    // 兩次都回傳 refusal
-                    const err = new Error('SAFETY');
-                    err.isProhibited = true;
-
-                    if (isModelRefusalError(err)) {
-                        if (currentModel === primaryModel && fallbackModel && fallbackModel !== currentModel) {
-                            currentModel = fallbackModel;
-                            continue;
-                        }
-                        throw err;
-                    }
-                }
-            } catch (e) {
-                thrownError = e;
-            }
-
-            expect(thrownError).not.toBeNull();
-            expect(thrownError.isProhibited).toBe(true);
-            // 只有 primary 1 次 + fallback 1 次，絕無第 3 次相同 fallback
-            expect(calls).toEqual(['model-a', 'model-b']);
-        });
-
-        // N. no distinct fallback + refusal -> 不重試同模型 3 次
-        it('N: no distinct fallback throws immediately on refusal without 3 retries', async () => {
-            const calls = [];
-            const primaryModel = 'model-a';
-            const fallbackModel = 'model-a'; // 相同 fallback 或無 fallback
-
-            let currentModel = primaryModel;
-            let thrownError = null;
-
-            try {
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                    calls.push(currentModel);
-                    const err = new Error('BLOCKLIST');
-                    err.isProhibited = true;
-
-                    if (isModelRefusalError(err)) {
-                        if (currentModel === primaryModel && fallbackModel && fallbackModel !== currentModel) {
-                            currentModel = fallbackModel;
-                            continue;
-                        }
-                        throw err;
-                    }
-                }
-            } catch (e) {
-                thrownError = e;
-            }
-
-            expect(thrownError).not.toBeNull();
-            expect(calls).toEqual(['model-a']); // 僅呼叫 1 次即拋出
-        });
-
-        // O. normal network failure -> 既有 retry behavior 保留
-        it('O: normal network failure retains standard retry sequence', async () => {
-            const calls = [];
-            const primaryModel = 'model-a';
-            const fallbackModel = 'model-b';
-
-            let currentModel = primaryModel;
-            let finalAttemptCount = 0;
-
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                finalAttemptCount = attempt;
-                calls.push(currentModel);
-                const err = new Error('Network reset');
-
-                if (isModelRefusalError(err)) {
-                    throw err;
-                }
-
-                if (attempt === 1 && fallbackModel && fallbackModel !== currentModel) {
-                    currentModel = fallbackModel;
-                }
-            }
-
-            expect(finalAttemptCount).toBe(3);
-            expect(calls).toEqual(['model-a', 'model-b', 'model-b']);
-        });
-
-        // P. single paragraph retry 有傳 fallbackModel
-        it('P: retranslateNovelParagraph logic passes fallbackModel to translateTexts', () => {
-            const options = {
-                model: 'gemini-3.5-flash-lite',
-                fallbackModel: 'gemini-2.5-flash',
-                prompt: 'Translate'
             };
+            state.cache = { apiKey: 'test-api-key' };
+            state.isInitialized = true;
+        });
 
-            expect(options.fallbackModel).toBe('gemini-2.5-flash');
-            expect(options.model).toBe('gemini-3.5-flash-lite');
+        afterEach(() => {
+            vi.useRealTimers();
+            vi.restoreAllMocks();
+        });
+
+        // L. fallback primary refusal -> immediate fallback (呼叫 production translateTexts)
+        it('L: primary refusal immediately calls fallback model without exponential delay', async () => {
+            const fetchSpy = vi.spyOn(globalThis, 'fetch')
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'SAFETY',
+                            content: { parts: [{ text: '' }] }
+                        }]
+                    })
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'STOP',
+                            content: { parts: [{ text: '{"results":["備援模型翻譯成功"]}' }] }
+                        }]
+                    })
+                });
+
+            const res = await translateTexts(['日文文字'], {
+                apiKey: 'test-key',
+                model: 'primary-model-a',
+                fallbackModel: 'fallback-model-b'
+            });
+
+            expect(fetchSpy).toHaveBeenCalledTimes(2);
+            expect(fetchSpy.mock.calls[0][0]).toContain('models/primary-model-a:generateContent');
+            expect(fetchSpy.mock.calls[1][0]).toContain('models/fallback-model-b:generateContent');
+            expect(res.usedModelName).toBe('fallback-model-b');
+            expect(res.results[0]).toBe('備援模型翻譯成功');
+        });
+
+        // M. fallback also refusal -> 不做第三次相同 fallback request (呼叫 production translateTexts)
+        it('M: fallback also refusal throws immediately without duplicate retry', async () => {
+            const fetchSpy = vi.spyOn(globalThis, 'fetch')
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'SAFETY',
+                            content: { parts: [{ text: '' }] }
+                        }]
+                    })
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'BLOCKLIST',
+                            content: { parts: [{ text: '' }] }
+                        }]
+                    })
+                });
+
+            await expect(translateTexts(['日文文字'], {
+                apiKey: 'test-key',
+                model: 'primary-model-a',
+                fallbackModel: 'fallback-model-b'
+            })).rejects.toMatchObject({
+                isProhibited: true,
+                finishReason: 'BLOCKLIST'
+            });
+
+            expect(fetchSpy).toHaveBeenCalledTimes(2);
+            expect(fetchSpy.mock.calls[0][0]).toContain('models/primary-model-a:generateContent');
+            expect(fetchSpy.mock.calls[1][0]).toContain('models/fallback-model-b:generateContent');
+        });
+
+        // N. no distinct fallback + refusal -> 不重試同模型 3 次 (呼叫 production translateTexts)
+        it('N: no distinct fallback throws immediately on refusal without 3 retries', async () => {
+            const fetchSpy = vi.spyOn(globalThis, 'fetch')
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'PROHIBITED_CONTENT',
+                            content: { parts: [{ text: '' }] }
+                        }]
+                    })
+                });
+
+            await expect(translateTexts(['日文文字'], {
+                apiKey: 'test-key',
+                model: 'primary-model-a',
+                fallbackModel: 'primary-model-a'
+            })).rejects.toMatchObject({
+                isProhibited: true,
+                finishReason: 'PROHIBITED_CONTENT'
+            });
+
+            expect(fetchSpy).toHaveBeenCalledTimes(1);
+            expect(fetchSpy.mock.calls[0][0]).toContain('models/primary-model-a:generateContent');
+        });
+
+        // O. normal network failure -> 既有 retry behavior 保留 (3 calls, fake timers, 呼叫 production translateTexts)
+        it('O: normal network failure retains standard retry sequence and fallback transition', async () => {
+            vi.useFakeTimers();
+
+            const fetchSpy = vi.spyOn(globalThis, 'fetch')
+                .mockResolvedValueOnce({
+                    ok: false,
+                    status: 500,
+                    json: async () => ({ error: { message: 'Internal Server Error 1' } })
+                })
+                .mockResolvedValueOnce({
+                    ok: false,
+                    status: 500,
+                    json: async () => ({ error: { message: 'Internal Server Error 2' } })
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'STOP',
+                            content: { parts: [{ text: '{"results":["第三次嘗試成功"]}' }] }
+                        }]
+                    })
+                });
+
+            const translatePromise = translateTexts(['日文文字'], {
+                apiKey: 'test-key',
+                model: 'primary-model-a',
+                fallbackModel: 'fallback-model-b'
+            });
+
+            // attempt 1 delay: 2000ms, attempt 2 delay: 4000ms
+            await vi.advanceTimersByTimeAsync(15000);
+            const res = await translatePromise;
+
+            expect(fetchSpy).toHaveBeenCalledTimes(3);
+            expect(fetchSpy.mock.calls[0][0]).toContain('models/primary-model-a:generateContent');
+            expect(fetchSpy.mock.calls[1][0]).toContain('models/fallback-model-b:generateContent');
+            expect(fetchSpy.mock.calls[2][0]).toContain('models/fallback-model-b:generateContent');
+            expect(res.results[0]).toBe('第三次嘗試成功');
+        });
+
+        // P. single paragraph retry pure helper
+        it('P: buildNovelSingleRetryOptions correctly structures single retry options for production', () => {
+            const options = buildNovelSingleRetryOptions({
+                model: 'novel-model-3.5',
+                fallbackModel: 'fallback-model-2.5',
+                prompt: 'Custom golden prompt',
+                glossarySnippet: 'Term1 -> 譯詞1'
+            });
+
+            expect(options.model).toBe('novel-model-3.5');
+            expect(options.fallbackModel).toBe('fallback-model-2.5');
+            expect(options.prompt).toBe('Custom golden prompt');
+            expect(options.glossarySnippet).toBe('Term1 -> 譯詞1');
+            expect(options.schema).toBeDefined();
+            expect(options.schema.properties.results.type).toBe('ARRAY');
         });
 
         // Q. mixed results glossary extraction 排除 failure marker
-        it('Q: glossary extraction filters out failure markers from mixed results', () => {
+        it('Q: buildSuccessfulNovelTranslationPairs excludes failure markers and returns empty array on all failures', () => {
             const batchItems = [
                 { idx: 0, text: '勇者' },
                 { idx: 1, text: '禁語' },
                 { idx: 2, text: '魔王' }
             ];
-            const mappedTranslations = ['Hero', '（翻譯失敗）', 'Demon King'];
+            const translations = ['Hero', '（翻譯失敗）', 'Demon King'];
 
-            const translatedPairs = batchItems.map((it, offset) => ({
-                original: it.text,
-                translation: mappedTranslations[offset]
-            })).filter(p => p.translation && p.translation !== '（翻譯失敗）');
-
-            expect(translatedPairs).toEqual([
+            const pairs = buildSuccessfulNovelTranslationPairs(batchItems, translations);
+            expect(pairs).toEqual([
                 { original: '勇者', translation: 'Hero' },
                 { original: '魔王', translation: 'Demon King' }
             ]);
-            expect(translatedPairs.some(p => p.translation === '（翻譯失敗）')).toBe(false);
+
+            // 全部失敗場景
+            const allFailedPairs = buildSuccessfulNovelTranslationPairs(batchItems, ['（翻譯失敗）', '（翻譯失敗）', '（翻譯失敗）']);
+            expect(allFailedPairs).toEqual([]);
+        });
+
+        // R (Optional): Durable Wiring MappedResult Helper
+        it('R: buildNovelIsolationMappedResult sets isFailed: false and preserves all translations for Mixed Batch', () => {
+            const isolationResults = [
+                { idx: 0, text: 'Safe 1', translation: '譯文1' },
+                { idx: 1, text: 'Toxic', translation: '（翻譯失敗）', failed: true, failureReason: 'model-refusal' },
+                { idx: 2, text: 'Safe 2', translation: '譯文2' }
+            ];
+
+            const mapped = buildNovelIsolationMappedResult(isolationResults);
+            expect(mapped.isFailed).toBe(false);
+            expect(mapped.translations).toEqual(['譯文1', '（翻譯失敗）', '譯文2']);
         });
     });
 });
