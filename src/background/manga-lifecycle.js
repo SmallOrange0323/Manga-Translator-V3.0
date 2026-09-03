@@ -107,6 +107,21 @@ export async function executeFallbackImages({
 }
 
 /**
+ * 判斷是否為使用者主動 STOP 觸發的漫畫中斷（非普通 API 錯誤）
+ * @param {Error} [error]
+ * @param {AbortSignal} [signal]
+ * @returns {boolean}
+ */
+export function isMangaCancellation(error, signal) {
+    return !!(
+        signal?.aborted ||
+        error?.isCancelled ||
+        error?.isExternalAbort ||
+        error?.code === 'TRANSLATION_STOPPED'
+    );
+}
+
+/**
  * 判斷批次 OCR 發生錯誤時是否允許執行逐張 OCR fallback 重試
  * 若收到外部 STOP 中斷訊號或任務已被取消，必須立即拒絕 fallback，防止發送無效請求
  * @param {Error} error 
@@ -114,12 +129,19 @@ export async function executeFallbackImages({
  * @returns {boolean}
  */
 export function shouldFallbackAfterOcrError(error, signal) {
-    return !(
-        signal?.aborted ||
-        error?.isCancelled ||
-        error?.isExternalAbort ||
-        error?.code === 'TRANSLATION_STOPPED'
-    );
+    return !isMangaCancellation(error, signal);
+}
+
+/**
+ * 判斷全域劇本分析過程中或非同步間隙中是否應繼續推進流程
+ * 若已被 STOP 中止（signal.aborted 或 isStopping），必須立即停止後續副作用
+ * @param {Object} params
+ * @param {AbortSignal} [params.signal]
+ * @param {boolean} [params.isStopping]
+ * @returns {boolean}
+ */
+export function shouldContinueMangaStoryAnalysis({ signal, isStopping = false } = {}) {
+    return !signal?.aborted && !isStopping;
 }
 
 /**

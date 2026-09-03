@@ -986,10 +986,28 @@ export async function extractTextFromImage(imageBase64, options = {}) {
  * 【雙階段模式 - 階段 1.5】全域劇本通讀：分析全本漫畫台詞草稿，掌握當話劇情大綱、角色互動與專屬術語
  */
 export async function extractGlobalStoryAndGlossary(rawScriptText, options = {}) {
+    const signal = options.signal || null;
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
+
     if (!state.isInitialized) await state.init();
     const model = options.model || (await state.get('modelName', 'gemini-3.1-flash-lite'));
     const apiKey = options.apiKey || state.apiKeys[0];
     if (!apiKey) throw new Error('未設定 API Key');
+
+    // 防範在 async setup 期間發生 STOP
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
 
     const systemPrompt = `你是一位專業漫畫翻譯總監。以下是一部完整漫畫中所有頁面的日文對白與台詞草稿（包含 [P.1]、[P.2] 等頁碼標註）。
 請通讀全篇台詞，深度分析並輸出 JSON 格式的全局設定：
@@ -1040,28 +1058,56 @@ export async function extractGlobalStoryAndGlossary(rawScriptText, options = {})
     };
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`劇本全局分析 API 錯誤 (${response.status}): ${errorText}`);
-    }
-
-    const json = await response.json();
-    const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-    const cleanStr = sanitizeJsonForParsing(rawText);
     try {
-        const parsed = JSON.parse(cleanStr);
-        if (await state.get('enableTaiwanLocalization', true)) {
-            localizeObjectStrings(parsed);
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: signal || undefined
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`劇本全局分析 API 錯誤 (${response.status}): ${errorText}`);
         }
-        return parsed;
+
+        const json = await response.json();
+        const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        const cleanStr = sanitizeJsonForParsing(rawText);
+        try {
+            const parsed = JSON.parse(cleanStr);
+            if (signal?.aborted) {
+                const cancelErr = new Error('Request aborted by user STOP');
+                cancelErr.name = 'AbortError';
+                cancelErr.isCancelled = true;
+                cancelErr.isExternalAbort = true;
+                throw cancelErr;
+            }
+            if (await state.get('enableTaiwanLocalization', true)) {
+                localizeObjectStrings(parsed);
+            }
+            if (signal?.aborted) {
+                const cancelErr = new Error('Request aborted by user STOP');
+                cancelErr.name = 'AbortError';
+                cancelErr.isCancelled = true;
+                cancelErr.isExternalAbort = true;
+                throw cancelErr;
+            }
+            return parsed;
+        } catch (e) {
+            if (signal?.aborted || e?.isCancelled || e?.isExternalAbort) throw e;
+            log.warn('TranslateAPI', `[劇本解析失敗] 原始文字: ${cleanStr}`);
+            return { storySummary: '', characterRelationships: '', terms: [] };
+        }
     } catch (e) {
-        log.warn('TranslateAPI', `[劇本解析失敗] 原始文字: ${cleanStr}`);
-        return { storySummary: '', characterRelationships: '', terms: [] };
+        if (signal?.aborted || e?.isCancelled || e?.isExternalAbort || (e?.name === 'AbortError' && signal?.aborted)) {
+            const cancelErr = new Error('Request aborted by user STOP');
+            cancelErr.name = 'AbortError';
+            cancelErr.isCancelled = true;
+            cancelErr.isExternalAbort = true;
+            log.info('TranslateAPI', '[劇本全局分析] 偵測到外部 STOP 中斷訊號，立即終止請求');
+            throw cancelErr;
+        }
+        throw e;
     }
 }
