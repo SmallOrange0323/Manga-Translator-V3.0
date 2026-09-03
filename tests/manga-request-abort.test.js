@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from '../src/background/manga-cancellation.js';
 import { callGeminiAPIBatch } from '../src/background/translate-api.js';
 import { executeHybridRequest, HybridRequestAbortedError } from '../src/background/hybrid-retry.js';
-import { executeFallbackImages } from '../src/background/manga-lifecycle.js';
+import { executeFallbackImages, shouldPublishMangaBatchResults } from '../src/background/manga-lifecycle.js';
 import { state } from '../src/utils/state.js';
 
 describe('Manga Mode: Active Gemini Request Abort on STOP', () => {
@@ -205,7 +205,7 @@ describe('Manga Mode: Active Gemini Request Abort on STOP', () => {
     });
 
     describe('4. Fallback Single-Image & Sub-Batches Cancellation', () => {
-        it('I: executeFallbackImages stops immediately when translateSingle throws cancellation error', async () => {
+        it('I: executeFallbackImages stops immediately upon cancellation without synthesizing "翻譯已停止" error objects', async () => {
             let processedImages = 0;
             const mockTranslateSingle = vi.fn().mockImplementation(async () => {
                 processedImages++;
@@ -233,11 +233,62 @@ describe('Manga Mode: Active Gemini Request Abort on STOP', () => {
                 broadcastStatus: () => {}
             });
 
+            // 1. 成功設定 wasStopped
             expect(result.wasStopped).toBe(true);
-            expect(mockTranslateSingle).toHaveBeenCalledTimes(1); // 第 2、3 張完全不處理
-            expect(result.fallbackResults[0].error).toBe('翻譯已停止');
-            expect(result.fallbackResults[1].error).toBe('翻譯已停止');
-            expect(result.fallbackResults[2].error).toBe('翻譯已停止');
+            // 2. 立即中斷，只嘗試了第 1 次，第 2、3 張完全不處理
+            expect(mockTranslateSingle).toHaveBeenCalledTimes(1);
+            // 3. 核心語意驗證：未處理或取消項目保持 null，絕不製造 { error: '翻譯已停止' } 偽裝成普通錯誤
+            expect(result.fallbackResults[0]).toBeNull();
+            expect(result.fallbackResults[1]).toBeNull();
+            expect(result.fallbackResults[2]).toBeNull();
+        });
+
+        it('J: caller receiving fallback wasStopped aborts UI commit and does not call appendResult', () => {
+            expect(shouldPublishMangaBatchResults({ wasStopped: true })).toBe(false);
+            expect(shouldPublishMangaBatchResults({ wasStopped: false })).toBe(true);
+            expect(shouldPublishMangaBatchResults({ wasStopped: true, wasAborted: false })).toBe(false);
+            expect(shouldPublishMangaBatchResults({ wasStopped: false, wasAborted: true })).toBe(false);
+
+            // 模擬 Caller 決策邏輯
+            const wasStopped = true;
+            const appendResultSpy = vi.fn();
+
+            if (shouldPublishMangaBatchResults({ wasStopped })) {
+                appendResultSpy({ error: 'Should not publish' });
+            }
+
+            expect(appendResultSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it('K: ordinary fallback failure continues iteration and records real error message', async () => {
+            let processedImages = 0;
+            const mockTranslateSingle = vi.fn().mockImplementation(async () => {
+                processedImages++;
+                if (processedImages === 1) {
+                    throw new Error('HTTP 500: Server Error');
+                }
+                return { results: [{ original: '日文2', translation: '中文2' }] };
+            });
+
+            const validItems = [
+                { originalIdx: 0, b64: 'img0' },
+                { originalIdx: 1, b64: 'img1' }
+            ];
+
+            const result = await executeFallbackImages({
+                validItems,
+                fallbackModelName: 'fallback-model',
+                getNextApiKey: () => 'test-key',
+                translateSingle: mockTranslateSingle,
+                shouldContinue: async () => true,
+                broadcastStatus: () => {}
+            });
+
+            // 普通錯誤不中斷流程
+            expect(result.wasStopped).toBe(false);
+            expect(mockTranslateSingle).toHaveBeenCalledTimes(2);
+            expect(result.fallbackResults[0].error).toBe('HTTP 500: Server Error');
+            expect(result.fallbackResults[1].results[0].translation).toBe('中文2');
         });
     });
 });

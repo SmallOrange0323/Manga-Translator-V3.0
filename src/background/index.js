@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from './manga-cancellation.js';
@@ -3093,12 +3093,18 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
                     if (fallbackResult.wasStopped) {
                         wasStopped = true;
+                        break;
                     }
 
                     validItems.forEach((item, k) => {
                         allPageResults[item.originalIdx] = fallbackResult.fallbackResults[k] || { error: '備援翻譯結果缺失' };
                     });
                 }
+            }
+
+            // 若在批次處理或備援降級期間已被 STOP 中止，放棄提交 UI，防止渲染錯誤卡片
+            if (!shouldPublishMangaBatchResults({ wasStopped })) {
+                break;
             }
 
             // 回傳本批結果給 UI
