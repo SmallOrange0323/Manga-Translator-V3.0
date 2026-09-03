@@ -2,6 +2,7 @@ import { state } from '../utils/state.js';
 import { log } from '../utils/logger.js';
 import { SYSTEM_BATCH_RULES } from '../utils/constants.js';
 import { sanitizeJsonForParsing } from '../utils/json-utils.js';
+import { isModelRefusalError } from './novel-refusal.js';
 
 /**
  * 將簡體字與大陸常用詞彙轉換為台灣繁體慣用詞彙
@@ -259,7 +260,22 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
             
             lastError = err;
             
-            // 統一在此處（catch 區塊）檢查是否需要切換至備援模型（不論是 API 錯誤還是連線錯誤）
+            // Model Refusal 專屬重試策略 (Section 6)
+            if (isModelRefusalError(err)) {
+                // 6A. Primary 明確拒絕：若有不同 fallbackModel，立即切換 fallback，不等待 exponential backoff
+                if (currentModel === model && fallbackModel && fallbackModel !== currentModel) {
+                    log.info('TranslateAPI', `[Refusal Policy] 主要模型明確拒絕，立即切換至備援模型 ${fallbackModel}，零延遲重試`);
+                    currentModel = fallbackModel;
+                    continue;
+                }
+                
+                // 6B. Fallback 也明確拒絕 (目前已是 fallbackModel)：立即 throw，不重複重試相同 fallback
+                // 6C. 沒有不同 fallback (fallback 不存在或與 primary 相同)：主模型拒絕時立即 throw，不重複重試
+                log.warn('TranslateAPI', `[Refusal Policy] 模型明確拒絕且無其他備援模型可切換，終止重試並拋出 Refusal 錯誤`);
+                throw err;
+            }
+
+            // 普通錯誤 (429, 5xx, network, timeout, parse) 維持既有重試與備援行為 (Section 7)
             if (attempt === 1 && fallbackModel && fallbackModel !== currentModel) {
                 log.info('TranslateAPI', `偵測到主要模型發生異常 (${err.message})，立即切換至使用者設定的備援模型: ${fallbackModel}`);
                 currentModel = fallbackModel;
