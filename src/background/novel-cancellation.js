@@ -59,19 +59,23 @@ export function createNovelSessionRegistry() {
 
         /**
          * 取得特定 Session 的 AbortSignal
-         * 只有在 isCurrentSession(tabId, sessionId) === true 時才返回，否則返回 null
+         * 若為合法的活躍 Session，返回其對應的 signal；
+         * 若該 Session 已被取消、遭新 Session 取代或已失活，安全返回已中斷 (aborted: true) 的 signal，徹底防止 race condition 下發送未受控的請求
          * @param {number|string} tabId 
          * @param {string} sessionId 
-         * @returns {AbortSignal|null}
+         * @returns {AbortSignal}
          */
         getAbortSignal(tabId, sessionId) {
-            if (!this.isCurrentSession(tabId, sessionId)) return null;
+            if (tabId === undefined || tabId === null || !sessionId) {
+                return AbortSignal.abort();
+            }
             const numericTabId = Number(tabId);
             const entry = abortControllers.get(numericTabId);
             if (entry && entry.sessionId === String(sessionId)) {
                 return entry.controller.signal;
             }
-            return null;
+            // 若為過期 Session 或查無控制器，一律返回已中斷的 signal，確保 fail-closed
+            return AbortSignal.abort();
         },
 
         /**

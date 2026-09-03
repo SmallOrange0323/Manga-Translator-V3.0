@@ -616,6 +616,13 @@ async function processDurableNovelJobs() {
             let mappedResult = null;
             const signal = novelCancellationRegistry.getAbortSignal(job.tabId, job.sessionId);
 
+            // Pre-request Session Guard: 避免在批次準備期間被 STOP 卻仍調用隔離請求
+            if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId) || signal?.aborted) {
+                log.info('Background', `[Durable Job] Session ${job.sessionId} 在準備請求前已中止，略過批次翻譯`);
+                await removeNovelJobCheckpoint(job.sessionId);
+                continue;
+            }
+
             try {
                 const isolationResults = await translateNovelBatchWithRefusalIsolation(
                     batchItems,
@@ -1697,6 +1704,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
               
               const signal = novelCancellationRegistry.getAbortSignal(tabId, sessionId);
+              
+              // Pre-request Guard: 避免在非同步等待設定與詞庫期間被 STOP 卻仍送出請求
+              if (!novelCancellationRegistry.isCurrentSession(tabId, sessionId) || signal?.aborted) {
+                  log.info('Background', `[Novel] 單段重譯在送出請求前偵測到 Session 已中止或失效 (tabId: ${tabId}, sessionId: ${sessionId})`);
+                  sendResponse({ success: false, status: 'cancelled', error: 'cancelled' });
+                  return;
+              }
+
               const retryOptions = buildNovelSingleRetryOptions({
                   model,
                   fallbackModel,

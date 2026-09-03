@@ -63,18 +63,21 @@ describe('Novel Mode: Active Gemini Request Abort on STOP', () => {
 
             registry.clear(1);
             expect(signal.aborted).toBe(true);
-            expect(registry.getAbortSignal(1, 'session-1')).toBeNull();
+            expect(registry.getAbortSignal(1, 'session-1').aborted).toBe(true);
             expect(registry.getActiveSessionId(1)).toBeNull();
         });
 
-        // E. old session 不能取得 new session signal
-        it('E: stale session ID cannot access signal of newer session', () => {
+        // E. old session 不能取得 new session signal，且取得的 signal 必為 aborted
+        it('E: stale session ID cannot access signal of newer session and receives aborted signal', () => {
             registry.begin(1, 'session-old');
+            const oldSignal = registry.getAbortSignal(1, 'session-old');
             registry.begin(1, 'session-new');
 
-            expect(registry.getAbortSignal(1, 'session-old')).toBeNull();
+            const queriedOldSignal = registry.getAbortSignal(1, 'session-old');
             const newSignal = registry.getAbortSignal(1, 'session-new');
-            expect(newSignal).not.toBeNull();
+
+            expect(queriedOldSignal.aborted).toBe(true);
+            expect(queriedOldSignal).not.toBe(newSignal);
             expect(newSignal.aborted).toBe(false);
         });
     });
@@ -402,6 +405,42 @@ describe('Novel Mode: Active Gemini Request Abort on STOP', () => {
             cancelErr.name = 'AbortError';
 
             expect(isModelRefusalError(cancelErr)).toBe(false);
+        });
+
+        // P. Race Condition 防護測試: isCurrentSession() 通過後、呼叫 translateTexts 前按 STOP 必須 0 fetch calls
+        it('P: race condition - STOP triggered during async setup before translateTexts results in 0 fetch calls', async () => {
+            const registry = createNovelSessionRegistry();
+            registry.begin(5, 'session-race');
+
+            // 1. 模擬 isCurrentSession() 通過
+            expect(registry.isCurrentSession(5, 'session-race')).toBe(true);
+
+            // 2. 模擬非同步間隙：await state.get(...) / await loadGlossary(...)
+            // 此時使用者按下 STOP！
+            registry.cancel(5);
+
+            // 3. 取得 signal
+            const signal = registry.getAbortSignal(5, 'session-race');
+            expect(signal.aborted).toBe(true);
+
+            const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+            // 4. 即使調用 translateTexts，由於 signal.aborted === true，立即 throw 且 0 fetch calls
+            const options = buildNovelSingleRetryOptions({
+                model: 'gemini-3.5-flash-lite',
+                fallbackModel: 'gemini-2.5-flash',
+                signal
+            });
+
+            await expect(translateTexts(['日文段落'], {
+                apiKey: 'test-key',
+                ...options
+            })).rejects.toMatchObject({
+                isCancelled: true,
+                isExternalAbort: true
+            });
+
+            expect(fetchSpy).toHaveBeenCalledTimes(0);
         });
     });
 });
