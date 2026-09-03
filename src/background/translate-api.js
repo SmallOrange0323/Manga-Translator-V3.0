@@ -526,7 +526,15 @@ ${inputText}`;
  * @param {string} glossarySnippet - 術語注入片段
  * @returns {Array} 長度固定等於 base64Array.length 的結果陣列
  */
-export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null) {
+export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null, signal = null) {
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
+
     const n = base64Array.length;
     const model = modelOverride || await state.get('modelName', 'gemini-3.1-flash-lite');
 
@@ -602,6 +610,22 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
     // 超時時間動態計算：基準 25 秒 + 每張 3 秒，上限 60 秒 (超時果斷切換下一個 Key)
     const timeoutMs = Math.min(25 + n * 3, 60) * 1000;
     const controller = new AbortController();
+    let externalAborted = false;
+    let externalAbortHandler = null;
+
+    if (signal) {
+        externalAbortHandler = () => {
+            externalAborted = true;
+            controller.abort();
+        };
+        if (signal.aborted) {
+            externalAborted = true;
+            controller.abort();
+        } else {
+            signal.addEventListener('abort', externalAbortHandler, { once: true });
+        }
+    }
+
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     const startTime = performance.now();
@@ -660,10 +684,21 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
         return results;
 
     } catch (e) {
+        if (externalAborted || signal?.aborted || e?.isCancelled || e?.isExternalAbort) {
+            const cancelErr = new Error('Request aborted by user STOP');
+            cancelErr.name = 'AbortError';
+            cancelErr.isCancelled = true;
+            cancelErr.isExternalAbort = true;
+            log.info('TranslateAPI', '[批次] 偵測到外部 STOP 中斷訊號，立即終止請求');
+            throw cancelErr;
+        }
         if (e.name === 'AbortError') throw new Error(`批次翻譯逾時 (${timeoutMs / 1000}s)`);
         throw e;
     } finally {
         clearTimeout(timeoutId);
+        if (signal && externalAbortHandler) {
+            signal.removeEventListener('abort', externalAbortHandler);
+        }
     }
 }
 

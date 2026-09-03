@@ -28,8 +28,10 @@ export async function executeHybridRequest({ candidateKeys, scheduledKey, schedu
                 return { results, usedKey: key, usedModelName: modelName };
             } catch (error) {
                 lastError = error;
-                // Do not send a failover request after STOP/cancellation was received.
-                if (!await shouldContinue()) throw new HybridRequestAbortedError();
+                // 若收到外部 STOP 中斷訊號，立即終止所有重試與備援模型切換
+                if (error?.isCancelled || error?.isExternalAbort || error?.code === 'TRANSLATION_STOPPED' || !await shouldContinue()) {
+                    throw new HybridRequestAbortedError();
+                }
                 if (!isHybridFailoverError(error)) break;
             }
         }

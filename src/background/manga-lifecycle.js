@@ -83,6 +83,13 @@ export async function executeFallbackImages({
             };
             broadcastStatus(`第 ${item.originalIdx + 1} 張備援翻譯成功`, 'ok');
         } catch (singleErr) {
+            if (singleErr?.isCancelled || singleErr?.isExternalAbort) {
+                wasStopped = true;
+                for (let rest = k; rest < validItems.length; rest++) {
+                    fallbackResults[rest] = { error: '翻譯已停止' };
+                }
+                break;
+            }
             fallbackResults[k] = { error: singleErr.message || String(singleErr) };
             broadcastStatus(`❌ 第 ${item.originalIdx + 1} 張備援失敗: ${(singleErr.message || '').slice(0, 30)}`, 'err');
         }
