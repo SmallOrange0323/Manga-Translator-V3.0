@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldFallbackAfterOcrError, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldFallbackAfterOcrError, isMangaCancellation, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from './manga-cancellation.js';
@@ -2686,6 +2686,17 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
     const currentMangaKey = customMangaKey || navCtx[sourceTabId];
 
     if (fullScriptText.trim().length > 20) {
+        const mangaSignal = getMangaAbortSignal();
+        if (mangaSignal.aborted || (await state.get('isStopping'))) {
+            log.info('TwoStepPipeline', '進入階段 1.5 前偵測到中止訊號，終止流程');
+            if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+            if (resultTabId) {
+                activeTranslationJobs.delete(resultTabId);
+                delete sessionStoryContext[resultTabId];
+            }
+            return;
+        }
+
         broadcastStatus(`✨ [階段 1.5] 通讀全篇劇本，分析當話劇情大綱與人物關係...`, 'info');
         chrome.tabs.sendMessage(resultTabId, {
             action: 'updateProgress',
@@ -2696,8 +2707,20 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         try {
             const sessionAnalysis = await extractGlobalStoryAndGlossary(fullScriptText, {
                 mangaKey: currentMangaKey,
-                displayName: currentMangaKey
+                displayName: currentMangaKey,
+                signal: mangaSignal
             });
+
+            // Post-request guard 1：API 返回後若已被中止，立即終止流程且不寫入任何 context/glossary
+            if (mangaSignal.aborted || (await state.get('isStopping'))) {
+                log.info('TwoStepPipeline', '全域劇本分析完成後偵測到中止訊號，終止流程');
+                if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+                if (resultTabId) {
+                    activeTranslationJobs.delete(resultTabId);
+                    delete sessionStoryContext[resultTabId];
+                }
+                return;
+            }
 
             // 1. 當話劇情大綱與角色互動 ➔ 短期任務記憶體暫存
             sessionStoryContext[resultTabId] = {
@@ -2709,6 +2732,17 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
             if (sessionAnalysis.glossaryTerms && sessionAnalysis.glossaryTerms.length > 0 && currentMangaKey) {
                 await mergeGlossaryTerms(currentMangaKey, sessionAnalysis.glossaryTerms, 'ai');
                 log.info('TwoStepPipeline', `已將 ${sessionAnalysis.glossaryTerms.length} 筆全書專有名詞存入長期詞庫 (${currentMangaKey})`);
+            }
+
+            // Post-request guard 2：詞庫寫入後再次檢查中止訊號，阻止後續廣播與進入 Stage 2
+            if (mangaSignal.aborted || (await state.get('isStopping'))) {
+                log.info('TwoStepPipeline', '詞庫合併後偵測到中止訊號，終止流程');
+                if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+                if (resultTabId) {
+                    activeTranslationJobs.delete(resultTabId);
+                    delete sessionStoryContext[resultTabId];
+                }
+                return;
             }
 
             // 3. 封裝注入片段
@@ -2734,6 +2768,15 @@ ${termsSnippet}
 
             broadcastStatus(`🎯 已掌握全局設定（大綱+角色），開始進入批次精翻！`, 'ok');
         } catch (storyErr) {
+            if (isMangaCancellation(storyErr, mangaSignal) || (await state.get('isStopping'))) {
+                log.info('TwoStepPipeline', '全域劇本分析過程中偵測到中止訊號，終止流程');
+                if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
+                if (resultTabId) {
+                    activeTranslationJobs.delete(resultTabId);
+                    delete sessionStoryContext[resultTabId];
+                }
+                return;
+            }
             log.warn('TwoStepPipeline', `全域劇本分析失敗，退回無劇情背景精翻: ${storyErr.message}`);
         }
     }
