@@ -132,14 +132,16 @@ export async function translateNovelBatchWithRefusalIsolation(items, translateFn
  * @param {string} [params.prompt]
  * @param {string} [params.glossarySnippet]
  * @param {Object} [params.schema]
+ * @param {AbortSignal} [params.signal]
  * @returns {Object}
  */
-export function buildNovelSingleRetryOptions({ model, fallbackModel, prompt, glossarySnippet, schema } = {}) {
+export function buildNovelSingleRetryOptions({ model, fallbackModel, prompt, glossarySnippet, schema, signal } = {}) {
     return {
         model,
         fallbackModel,
         prompt,
         glossarySnippet: glossarySnippet || '',
+        signal: signal || null,
         schema: schema || {
             type: 'OBJECT',
             properties: {

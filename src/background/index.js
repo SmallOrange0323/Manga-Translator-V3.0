@@ -614,6 +614,7 @@ async function processDurableNovelJobs() {
                 '\n請嚴格遵守 1:1 對位，輸出 JSON 必須包含 index (0-based) 與 text (譯文)。';
 
             let mappedResult = null;
+            const signal = novelCancellationRegistry.getAbortSignal(job.tabId, job.sessionId);
 
             try {
                 const isolationResults = await translateNovelBatchWithRefusalIsolation(
@@ -625,13 +626,15 @@ async function processDurableNovelJobs() {
                             fallbackModel: fallbackModelName,
                             prompt: finalPrompt,
                             schema: schema,
-                            glossarySnippet
+                            glossarySnippet,
+                            signal
                         });
 
                         // Post-request Session Guard
                         if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
                             const abortErr = new Error('Session aborted');
                             abortErr.isAborted = true;
+                            abortErr.isCancelled = true;
                             throw abortErr;
                         }
 
@@ -656,7 +659,7 @@ async function processDurableNovelJobs() {
                 mappedResult = buildNovelIsolationMappedResult(isolationResults);
             } catch (apiErr) {
                 // 若為中止或 Session 變更，不建立失敗批次
-                if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
+                if (apiErr?.isCancelled || apiErr?.isExternalAbort || apiErr?.isAborted || !novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
                     log.info('Background', `[Durable Job] Session ${job.sessionId} 已中止，略過失敗批次建立`);
                     await removeNovelJobCheckpoint(job.sessionId);
                     continue;
@@ -1693,11 +1696,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   if (gl?.terms) glossarySnippet = buildGlossaryPromptSnippet(gl.terms);
               }
               
+              const signal = novelCancellationRegistry.getAbortSignal(tabId, sessionId);
               const retryOptions = buildNovelSingleRetryOptions({
                   model,
                   fallbackModel,
                   prompt,
-                  glossarySnippet
+                  glossarySnippet,
+                  signal
               });
               const result = await translateTexts([text], retryOptions);
               
@@ -1715,6 +1720,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   throw new Error('API 回應格式異常');
               }
           } catch(e) {
+              if (e?.isCancelled || e?.isExternalAbort || !novelCancellationRegistry.isCurrentSession(tabId, sessionId)) {
+                  log.info('Background', `[Novel] 單段重譯被中斷或 Session 已失效`);
+                  sendResponse({ success: false, status: 'cancelled', error: 'cancelled' });
+                  return;
+              }
               console.error('[Background] retranslateNovelParagraph failed:', e);
               sendResponse({ success: false, error: e.message });
           }

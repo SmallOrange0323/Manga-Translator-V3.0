@@ -98,6 +98,46 @@ function localizeObjectStrings(obj) {
 
 
 /**
+ * 可被 AbortSignal 中斷的延遲函式
+ * @param {number} ms 
+ * @param {AbortSignal} [signal] 
+ * @returns {Promise<void>}
+ */
+export function abortableDelay(ms, signal) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            const cancelErr = new Error('Request aborted by user STOP');
+            cancelErr.name = 'AbortError';
+            cancelErr.isCancelled = true;
+            cancelErr.isExternalAbort = true;
+            return reject(cancelErr);
+        }
+
+        let timerId = null;
+        let abortHandler = null;
+
+        if (signal) {
+            abortHandler = () => {
+                if (timerId) clearTimeout(timerId);
+                const cancelErr = new Error('Request aborted by user STOP');
+                cancelErr.name = 'AbortError';
+                cancelErr.isCancelled = true;
+                cancelErr.isExternalAbort = true;
+                reject(cancelErr);
+            };
+            signal.addEventListener('abort', abortHandler, { once: true });
+        }
+
+        timerId = setTimeout(() => {
+            if (signal && abortHandler) {
+                signal.removeEventListener('abort', abortHandler);
+            }
+            resolve();
+        }, ms);
+    });
+}
+
+/**
  * TranslateAPI: 封裝實戰級的 Gemini API 呼叫
  * 特色：
  * 1. 指數退避重試 (Exponential Backoff)
@@ -108,13 +148,23 @@ function localizeObjectStrings(obj) {
 export async function translateTexts(texts, options = {}) {
     // Bug #3 修復：確保 state 初始化完成，避免 SW 冷啟動時 API Key 池為空
     if (!state.isInitialized) await state.init();
+
     const {
         model = 'gemini-3.1-flash-lite',
         fallbackModel = null,
         prompt = 'Translate the following texts to Traditional Chinese. Return only JSON.',
         schema = null,
-        glossarySnippet = '' // 加入術語對照表片段
+        glossarySnippet = '', // 加入術語對照表片段
+        signal = null
     } = options;
+
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
 
     let { apiKey } = options;
 
@@ -174,10 +224,39 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
     let currentModel = model;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
+        // 每次 attempt 開始前檢查外部 signal
+        if (signal?.aborted) {
+            const cancelErr = new Error('Request aborted by user STOP');
+            cancelErr.name = 'AbortError';
+            cancelErr.isCancelled = true;
+            cancelErr.isExternalAbort = true;
+            throw cancelErr;
+        }
+
         const startTime = performance.now();
         // 每次嘗試都重新嘗試獲取下一個可用 Key (如果是因為 Key 被限速，換 Key 是正確的)
         const currentKey = (attempt > 1) ? (state.getNextApiKey() || apiKey) : apiKey;
         const keyAlias = state.getApiKeyAlias(currentKey);
+
+        // 加入 60 秒超時控制並橋接 external signal
+        const timeoutController = new AbortController();
+        let externalAborted = false;
+        let externalAbortHandler = null;
+
+        if (signal) {
+            externalAbortHandler = () => {
+                externalAborted = true;
+                timeoutController.abort();
+            };
+            if (signal.aborted) {
+                externalAborted = true;
+                timeoutController.abort();
+            } else {
+                signal.addEventListener('abort', externalAbortHandler, { once: true });
+            }
+        }
+
+        const timeoutId = setTimeout(() => timeoutController.abort(), 60000);
 
         try {
             // 自動修正模型名稱 (Gemini API 規範)
@@ -186,17 +265,13 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
             }
 
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${currentKey}`;
-            
-            // 加入 60 秒超時控制
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 60000);
 
             try {
                 const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
-                    signal: controller.signal
+                    signal: timeoutController.signal
                 });
 
                 const latencyMs = Math.round(performance.now() - startTime);
@@ -252,18 +327,38 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
 
             } finally {
                 clearTimeout(timeoutId);
+                if (signal && externalAbortHandler) {
+                    signal.removeEventListener('abort', externalAbortHandler);
+                }
             }
 
         } catch (err) {
+            // 外部 STOP 中斷判定：不進入重試，立即終止
+            if (externalAborted || signal?.aborted || err?.isCancelled || err?.isExternalAbort) {
+                const cancelErr = new Error('Request aborted by user STOP');
+                cancelErr.name = 'AbortError';
+                cancelErr.isCancelled = true;
+                cancelErr.isExternalAbort = true;
+                log.info('TranslateAPI', '偵測到外部 STOP 中斷訊號，立即終止請求且不進行重試');
+                throw cancelErr;
+            }
+
             const latencyMs = Math.round(performance.now() - startTime);
             log.warn('TranslateAPI', `第 ${attempt} 次嘗試失敗: ${err.message}`, { model: currentModel, latencyMs, keyAlias });
             
             lastError = err;
             
-            // Model Refusal 專屬重試策略 (Section 6)
+            // Model Refusal 專屬重試策略 (PR #12)
             if (isModelRefusalError(err)) {
                 // 6A. Primary 明確拒絕：若有不同 fallbackModel，立即切換 fallback，不等待 exponential backoff
                 if (currentModel === model && fallbackModel && fallbackModel !== currentModel) {
+                    if (signal?.aborted) {
+                        const cancelErr = new Error('Request aborted by user STOP');
+                        cancelErr.name = 'AbortError';
+                        cancelErr.isCancelled = true;
+                        cancelErr.isExternalAbort = true;
+                        throw cancelErr;
+                    }
                     log.info('TranslateAPI', `[Refusal Policy] 主要模型明確拒絕，立即切換至備援模型 ${fallbackModel}，零延遲重試`);
                     currentModel = fallbackModel;
                     continue;
@@ -281,9 +376,9 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
                 currentModel = fallbackModel;
             }
             
-            // 指數退避延遲
+            // 指數退避延遲 (可被 signal 立即中斷)
             const delay = Math.pow(2, attempt) * 1000;
-            await new Promise(r => setTimeout(r, delay));
+            await abortableDelay(delay, signal);
         }
     }
 
