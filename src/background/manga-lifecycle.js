@@ -107,6 +107,22 @@ export async function executeFallbackImages({
 }
 
 /**
+ * 判斷批次 OCR 發生錯誤時是否允許執行逐張 OCR fallback 重試
+ * 若收到外部 STOP 中斷訊號或任務已被取消，必須立即拒絕 fallback，防止發送無效請求
+ * @param {Error} error 
+ * @param {AbortSignal} [signal] 
+ * @returns {boolean}
+ */
+export function shouldFallbackAfterOcrError(error, signal) {
+    return !(
+        signal?.aborted ||
+        error?.isCancelled ||
+        error?.isExternalAbort ||
+        error?.code === 'TRANSLATION_STOPPED'
+    );
+}
+
+/**
  * 執行批次 OCR 失敗後的逐張 fallback 重試，保證在 STOP 觸發時立即中斷，不再發送後續 API 請求
  */
 export async function executeOcrFallbackImages({
@@ -115,17 +131,34 @@ export async function executeOcrFallbackImages({
     shouldContinue = async () => true
 }) {
     const results = Array(base64List.length).fill('');
+    let wasStopped = false;
     for (let idx = 0; idx < base64List.length; idx++) {
-        if (!await shouldContinue()) break;
+        if (!await shouldContinue()) {
+            wasStopped = true;
+            break;
+        }
         const b64 = base64List[idx];
         if (!b64) continue;
         try {
             results[idx] = await extractSingle(b64, idx);
         } catch (err) {
+            if (err?.isCancelled || err?.isExternalAbort || err?.code === 'TRANSLATION_STOPPED') {
+                wasStopped = true;
+                break;
+            }
             results[idx] = '';
         }
-        if (!await shouldContinue()) break;
+        if (!await shouldContinue()) {
+            wasStopped = true;
+            break;
+        }
     }
+    Object.defineProperty(results, 'wasStopped', {
+        value: wasStopped,
+        enumerable: false,
+        writable: true,
+        configurable: true
+    });
     return results;
 }
 

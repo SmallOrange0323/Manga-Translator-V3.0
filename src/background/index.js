@@ -8,7 +8,7 @@ import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
 import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
-import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
+import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, executeOcrFallbackImages, shouldFallbackAfterOcrError, shouldProceedToStage15, shouldProceedToStage2 } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from './manga-cancellation.js';
@@ -2630,18 +2630,29 @@ async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, na
         if (isWasmOcr) {
             batchScripts = await wasmOcrEngine.recognizeBatch(base64List);
         } else {
+            const mangaSignal = getMangaAbortSignal();
+            if (mangaSignal.aborted || (await state.get('isStopping'))) break;
+
             try {
                 batchScripts = await callGeminiAPIBatchOcr(base64List, {
                     model: ocrModelName,
-                    pageOffset: i
+                    pageOffset: i,
+                    signal: mangaSignal
                 });
             } catch (batchOcrErr) {
+                if (!shouldFallbackAfterOcrError(batchOcrErr, mangaSignal) || (await state.get('isStopping'))) {
+                    log.info('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 偵測到中止訊號，終止 OCR 流程`);
+                    break;
+                }
                 log.warn('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 失敗，嘗試逐張重試: ${batchOcrErr.message}`);
                 batchScripts = await executeOcrFallbackImages({
                     base64List,
-                    extractSingle: (b64) => extractTextFromImage(b64, { model: ocrModelName }),
-                    shouldContinue: async () => !(await state.get('isStopping'))
+                    extractSingle: (b64) => extractTextFromImage(b64, { model: ocrModelName, signal: mangaSignal }),
+                    shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted
                 });
+                if (batchScripts?.wasStopped || mangaSignal.aborted || (await state.get('isStopping'))) {
+                    break;
+                }
             }
         }
 

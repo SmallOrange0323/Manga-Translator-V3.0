@@ -737,6 +737,15 @@ export function parseBatchOutput(data, batchSize) {
  * @returns {Promise<string[]>} 長度固定為 base64Array.length 的各頁日文對白字串陣列
  */
 export async function callGeminiAPIBatchOcr(base64Array, options = {}) {
+    const signal = options.signal || null;
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
+
     if (!state.isInitialized) await state.init();
     const n = base64Array.length;
     if (n === 0) return [];
@@ -747,6 +756,15 @@ export async function callGeminiAPIBatchOcr(base64Array, options = {}) {
 
     const keyAlias = state.getApiKeyAlias(resolvedKey);
     const customOcrPrompt = (await state.get('customPromptOcr', '')) || '';
+
+    // 防範在 async setup 期間發生 STOP
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
 
     const systemPrompt = `
 <system_instructions>
@@ -805,6 +823,22 @@ ${customOcrPrompt ? `Custom extraction rules:\n${customOcrPrompt}` : ''}
 
     const timeoutMs = Math.min(30 + n * 10, 180) * 1000;
     const controller = new AbortController();
+    let externalAborted = false;
+    let externalAbortHandler = null;
+
+    if (signal) {
+        externalAbortHandler = () => {
+            externalAborted = true;
+            controller.abort();
+        };
+        if (signal.aborted) {
+            externalAborted = true;
+            controller.abort();
+        } else {
+            signal.addEventListener('abort', externalAbortHandler, { once: true });
+        }
+    }
+
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     const startTime = performance.now();
@@ -850,10 +884,21 @@ ${customOcrPrompt ? `Custom extraction rules:\n${customOcrPrompt}` : ''}
 
         return pageScripts;
     } catch (e) {
+        if (externalAborted || signal?.aborted || e?.isCancelled || e?.isExternalAbort) {
+            const cancelErr = new Error('Request aborted by user STOP');
+            cancelErr.name = 'AbortError';
+            cancelErr.isCancelled = true;
+            cancelErr.isExternalAbort = true;
+            log.info('TranslateAPI', '[批次 OCR] 偵測到外部 STOP 中斷訊號，立即終止請求');
+            throw cancelErr;
+        }
         if (e.name === 'AbortError') throw new Error(`批次 OCR 逾時 (${timeoutMs / 1000}s)`);
         throw e;
     } finally {
         clearTimeout(timeoutId);
+        if (signal && externalAbortHandler) {
+            signal.removeEventListener('abort', externalAbortHandler);
+        }
     }
 }
 
@@ -861,6 +906,15 @@ ${customOcrPrompt ? `Custom extraction rules:\n${customOcrPrompt}` : ''}
  * 【雙階段模式】單張圖片純文字 OCR 提取（備援或單頁模式使用）
  */
 export async function extractTextFromImage(imageBase64, options = {}) {
+    const signal = options.signal || null;
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
+
     if (!state.isInitialized) await state.init();
     const {
         model = await state.get('ocrModelName', 'gemini-3.1-flash-lite'),
@@ -869,6 +923,15 @@ export async function extractTextFromImage(imageBase64, options = {}) {
 
     const apiKey = options.apiKey || state.getNextApiKey();
     if (!apiKey) throw new Error('未設定 API Key');
+
+    // 防範在 async setup 期間發生 STOP
+    if (signal?.aborted) {
+        const cancelErr = new Error('Request aborted by user STOP');
+        cancelErr.name = 'AbortError';
+        cancelErr.isCancelled = true;
+        cancelErr.isExternalAbort = true;
+        throw cancelErr;
+    }
 
     const body = {
         contents: [
@@ -892,19 +955,31 @@ export async function extractTextFromImage(imageBase64, options = {}) {
     };
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: signal || undefined
+        });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OCR API 錯誤 (${response.status}): ${errorText}`);
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`OCR API 錯誤 (${response.status}): ${errorText}`);
+        }
+
+        const json = await response.json();
+        return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    } catch (e) {
+        if (signal?.aborted || e?.isCancelled || e?.isExternalAbort || e?.name === 'AbortError') {
+            const cancelErr = new Error('Request aborted by user STOP');
+            cancelErr.name = 'AbortError';
+            cancelErr.isCancelled = true;
+            cancelErr.isExternalAbort = true;
+            throw cancelErr;
+        }
+        throw e;
     }
-
-    const json = await response.json();
-    return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
 }
 
 /**
