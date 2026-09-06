@@ -1,9 +1,9 @@
-# 漫譯 V3.1.9 (Manga Translator V3.1.9) 專案交接與進度備忘錄
+# 漫譯 V3.1.10 (Manga Translator V3.1.10) 專案交接與進度備忘錄
 
-**文件生成時間**：2026-08-26  
-**最新版本號**：`V3.1.9`  
+**文件生成時間**：2026-09-06  
+**最新版本號**：`V3.1.10`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已全面升級為 **V3.1.9**。完成【State 即時跨 Context 同步與金鑰池動態刷新】、【翻譯生命週期整合測試與 Two-step STOP 零延遲中斷】、【MV3 預翻 Session Checkpoint 斷點續翻與資料極小化安全加固】、【Google Drive 雙軌獨立時間戳 API Key 衝突隔離】與【71 項全自動化單元/整合測試 100% 綠燈】。已通過 Vite 生產構建與 Edge 商店上架準備。
+**工作區狀態**：已全面升級為 **V3.1.10**。完成【State 即時跨 Context 同步與金鑰池動態刷新】、【Manga/Novel STOP 零延遲中斷】、【Rawkuma [data-image-data] 漫畫容器支援】與【337 項全自動化單元/整合測試 100% 綠燈】。已通過 Vite 生產構建。
 
 ---
 
