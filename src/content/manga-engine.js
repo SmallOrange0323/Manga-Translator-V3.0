@@ -200,11 +200,13 @@ function renderTranslationAt(rect, translatedText) {
 }
 
 // 動態注入 Spinner CSS
-const style = document.createElement('style');
-style.innerHTML = `
-@keyframes mt-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-`;
-document.head.appendChild(style);
+if (typeof document !== 'undefined' && document.head) {
+    const style = document.createElement('style');
+    style.innerHTML = `
+    @keyframes mt-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    `;
+    document.head.appendChild(style);
+}
 
 /**
  * 抓取網頁中的實體大圖 (過濾小圖示)
@@ -388,7 +390,8 @@ export function crawlImages() {
         '#list-imga', '#readerarea', '.reading-content', '.ts-main-image', 
         '.manga-image', '.page-break', '.blocks-gallery-item', '.js-page-image', 
         '.viewer-page', '.page-container', '[class*="page-image"]',
-        '.chap-content', '.viewer-cnt', '#reader', '.readerarea'
+        '.chap-content', '.viewer-cnt', '#reader', '.readerarea',
+        '[data-image-data]'
     ];
 
     imgs.forEach(img => {
