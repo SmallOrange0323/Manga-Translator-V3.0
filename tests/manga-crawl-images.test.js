@@ -59,9 +59,9 @@ describe('manga-engine: crawlImages 容器與圖片抓取測試', () => {
             return img;
         };
 
-        // 模擬 10 張在 [data-image-data] 容器內的 Rawkuma 正文圖片
+        // 模擬 10 張在 [data-image-data] 容器內的 Rawkuma 正文圖片 (網址含 lovery-girl 關鍵字)
         const chapterImgs = Array.from({ length: 10 }, (_, i) => 
-            createMockImg(`https://kuma.kyut.dev/wp-content/scr/t/raw/83.2/${i + 1}.jpg`)
+            createMockImg(`https://kuma.kyut.dev/wp-content/scr/t/the-frontier-life-of-the-low-class-ossan-healer-and-the-lovery-girl-manga-raw/83.2/${i + 1}.jpg`)
         );
 
         // 模擬容器外的網站 Logo
@@ -76,14 +76,54 @@ describe('manga-engine: crawlImages 容器與圖片抓取測試', () => {
 
         const result = crawlImages();
 
-        // 應成功抓出 10 張漫畫正文圖片
+        // 應成功抓出 10 張漫畫正文圖片，不受 URL 中包含 lovery 影響
         expect(result.images).toHaveLength(10);
-        expect(result.images[0].src).toBe('https://kuma.kyut.dev/wp-content/scr/t/raw/83.2/1.jpg');
-        expect(result.images[9].src).toBe('https://kuma.kyut.dev/wp-content/scr/t/raw/83.2/10.jpg');
+        expect(result.images[0].src).toBe('https://kuma.kyut.dev/wp-content/scr/t/the-frontier-life-of-the-low-class-ossan-healer-and-the-lovery-girl-manga-raw/83.2/1.jpg');
+        expect(result.images[9].src).toBe('https://kuma.kyut.dev/wp-content/scr/t/the-frontier-life-of-the-low-class-ossan-healer-and-the-lovery-girl-manga-raw/83.2/10.jpg');
 
         // Logo 應被 Container Domination 機制自動排除
         const hasLogo = result.images.some(img => img.src.includes('Rawkuma-Logo.png'));
         expect(hasLogo).toBe(false);
+    });
+
+    it('漫畫書名或路徑中包含 love, funny, angry, vote 等常見詞彙時，不被 junkKeywords 誤殺', () => {
+        const container = {
+            tagName: 'DIV',
+            id: 'readerarea',
+            closest(selector) { return selector === '#readerarea' ? container : null; }
+        };
+
+        const createMockImg = (src, width = 800, height = 1200) => ({
+            tagName: 'IMG',
+            src,
+            naturalWidth: width,
+            naturalHeight: height,
+            width, height,
+            offsetWidth: width,
+            offsetHeight: height,
+            classList: { contains: () => false },
+            style: {},
+            getAttribute: (attr) => attr === 'src' ? src : null,
+            closest: (selector) => selector === '#readerarea' ? container : null,
+            getBoundingClientRect: () => ({ width, height, left: 0, top: 0 })
+        });
+
+        const loveImgs = [
+            createMockImg('https://example.com/manga/kaguya-love-is-war/c1/01.jpg'),
+            createMockImg('https://example.com/manga/funny-story-vote/c1/02.jpg'),
+            createMockImg('https://example.com/manga/angry-healer/c1/03.jpg')
+        ];
+
+        globalThis.document.querySelectorAll = vi.fn((selector) => {
+            if (selector.includes('img')) return loveImgs;
+            return [];
+        });
+
+        const result = crawlImages();
+        expect(result.images).toHaveLength(3);
+        expect(result.images[0].src).toContain('love-is-war');
+        expect(result.images[1].src).toContain('funny-story-vote');
+        expect(result.images[2].src).toContain('angry-healer');
     });
 
     it('Rawkuma 圖片在剛載入 (width=0) 時，因在 [data-image-data] 容器內，不會被當作 isUnloadedJunk 排除', () => {

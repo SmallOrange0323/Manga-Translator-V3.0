@@ -368,7 +368,7 @@ export function crawlImages() {
             if (matches && matches.length >= 3) {
                 matches.forEach(imgUrl => {
                     const lower = imgUrl.toLowerCase();
-                    const isScriptJunk = ['logo', 'avatar', 'icon', 'banner', 'upvote', 'downvote', 'funny', 'love', 'surprised', 'angry', 'vote', 'emoji', 'reaction', '512x512', '256x256', '128x128'].some(k => lower.includes(k));
+                    const isScriptJunk = ['logo', 'avatar', 'icon', 'banner', 'upvote', 'downvote', 'emoji', 'reaction', '512x512', '256x256', '128x128'].some(k => lower.includes(k));
                     if (!isScriptJunk) {
                         try {
                             const fullUrl = new URL(imgUrl, window.location.href).href;
@@ -501,19 +501,24 @@ export function crawlImages() {
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;
         
-        // 垃圾關鍵字大滿貫 (徹底排除選單、加載轉輪、驗證碼、頭像、評分圖標、訪客計數器)
+        // 垃圾關鍵字過濾 (徹底排除選單、加載轉輪、驗證碼、頭像、評分圖標、訪客計數器)
+        // 注意：不可包含一般常用英文單字（如 love, funny, angry, vote），避免誤殺正文漫畫書名或路徑
         const junkKeywords = [
             'chance-load', 'captcha', 'lzloader', 'lzloader1', 'loader', 'spin', 'spinner',
             'loading', 'placeholder', 'emoji', 'avatar', 'icon', 'logo', 'button', 'banner', 'reaction',
-            'thumb', 'small', 'widget', 'social', 'badge', 'ad-', 'comment',
-            'footer', 'header', 'nav', 'share', 'profile', 'upvote', 'downvote',
-            'funny', 'love', 'surprised', 'angry', 'vote', 'rating', 'emoticon', 'stickers',
-            'smilies', 'dislike', 'thumbs-up', 'thumbs-down', 'wp-reactions', 'post-ratings', 'emotion',
+            'thumb', 'widget', 'social', 'badge', 'ad-', 'comment',
+            'footer', 'header', 'nav', 'upvote', 'downvote',
+            'emoticon', 'stickers', 'smilies', 'wp-reactions', 'post-ratings',
             'counter', 'whos.amung.us', 'hits', 'visitor', 'online', 'flagcounter', 'stat',
             'histats', 'tracker', 'clustrmaps', 'fc2.com', '99counter', 'cbox', 'user_online',
             'users_online', 'viewcount', 'traffic'
         ];
-        const isJunkUrl = junkKeywords.some(key => url && url.toLowerCase().includes(key));
+
+        // 容器保護機制：主閱讀容器內正文圖片僅排除明確載入轉輪佔位符，豁免一般 URL 詞彙檢測
+        const isContainerJunk = ['spinner', 'loading', 'placeholder', 'lzloader', 'loader'].some(key => url && url.toLowerCase().includes(key));
+        const isJunkUrl = isInMangaContainer
+            ? isContainerJunk
+            : junkKeywords.some(key => url && url.toLowerCase().includes(key));
         
         // 排除小於 800px 的 GIF 動畫加載圖 (漫畫正頁絕非小 GIF)
         const isGifLoader = url && url.toLowerCase().includes('.gif') && (width < 800 || height < 800 || isJunkUrl);
