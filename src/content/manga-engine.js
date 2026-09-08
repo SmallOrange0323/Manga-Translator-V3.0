@@ -391,8 +391,7 @@ export function crawlImages() {
         '.manga-image', '.page-break', '.blocks-gallery-item', '.js-page-image', 
         '.viewer-page', '.page-container', '[class*="page-image"]',
         '.chap-content', '.viewer-cnt', '#reader', '.readerarea',
-        '[data-image-data]',
-        '#images-content', '#vertical-content', '.container-reader-chapter', '.iv-card'
+        '[data-image-data]'
     ];
 
     imgs.forEach(img => {
@@ -492,11 +491,7 @@ export function crawlImages() {
         let isTooSmall = false;
         if (isInMangaContainer) {
             // 漫畫閱讀容器內：排除小於 250x350 的小圖示
-            // 若圖片帶有真實 dataSrc 且當前為極小佔位圖 (如 1x1 gif)，豁免尺寸檢查以支援 LazyLoad
-            const isPlaceholderWithDataSrc = !!dataSrc && (width <= 20 || height <= 20);
-            if (!isPlaceholderWithDataSrc) {
-                isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
-            }
+            isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
         } else {
             // 容器外：嚴格限制
             const isNaturalSmall = (width > 0 && width < 500) || (height > 0 && height < 400);

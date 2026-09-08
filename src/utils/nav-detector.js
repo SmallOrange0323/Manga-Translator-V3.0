@@ -1,36 +1,4 @@
 /**
- * 依據清單排序推導上一話 / 下一話連結 (相容正序與倒序)
- */
-function resolveNavFromList(list, selectedIdx, nav) {
-    if (selectedIdx === -1 || !list || list.length < 2) return;
-    const getChapNum = (t) => {
-        const m = (t || '').match(/[\d\.]+/);
-        return m ? parseFloat(m[0]) : 0;
-    };
-    const firstNum = getChapNum(list[0].title);
-    const lastNum = getChapNum(list[list.length - 1].title);
-    const isDescending = firstNum >= lastNum; // 倒序：最新話在最前
-
-    if (isDescending) {
-        // 倒序：上方 (idx - 1) 是下一話(較新)，下方 (idx + 1) 是上一話(較舊)
-        if (selectedIdx > 0 && list[selectedIdx - 1]?.url) {
-            nav.next = list[selectedIdx - 1].url;
-        }
-        if (selectedIdx < list.length - 1 && list[selectedIdx + 1]?.url) {
-            nav.prev = list[selectedIdx + 1].url;
-        }
-    } else {
-        // 正序：下方 (idx + 1) 是下一話(較新)，上方 (idx - 1) 是上一話(較舊)
-        if (selectedIdx < list.length - 1 && list[selectedIdx + 1]?.url) {
-            nav.next = list[selectedIdx + 1].url;
-        }
-        if (selectedIdx > 0 && list[selectedIdx - 1]?.url) {
-            nav.prev = list[selectedIdx - 1].url;
-        }
-    }
-}
-
-/**
  * 偵測網頁中的「下一話」、「上一話」導航連結，以及當前話數與完整章節選單
  */
 export function detectNavigationLinks() {
@@ -79,60 +47,36 @@ export function detectNavigationLinks() {
             }
 
             // 智慧推導上一話 / 下一話連結 (若當前為倒序或正序)
-            resolveNavFromList(list, selectedIdx, nav);
+            if (selectedIdx !== -1 && list.length >= 2) {
+                // 判斷章節排列順序 (抽取數字比對第 0 項與最後一項)
+                const getChapNum = (t) => {
+                    const m = (t || '').match(/[\d\.]+/);
+                    return m ? parseFloat(m[0]) : 0;
+                };
+                const firstNum = getChapNum(list[0].title);
+                const lastNum = getChapNum(list[list.length - 1].title);
+                const isDescending = firstNum >= lastNum; // 倒序：最新話在最前
+
+                if (isDescending) {
+                    // 倒序：上方 (idx - 1) 是下一話(較新)，下方 (idx + 1) 是上一話(較舊)
+                    if (selectedIdx > 0 && list[selectedIdx - 1].url) {
+                        nav.next = list[selectedIdx - 1].url;
+                    }
+                    if (selectedIdx < list.length - 1 && list[selectedIdx + 1].url) {
+                        nav.prev = list[selectedIdx + 1].url;
+                    }
+                } else {
+                    // 正序：下方 (idx + 1) 是下一話(較新)，上方 (idx - 1) 是上一話(較舊)
+                    if (selectedIdx < list.length - 1 && list[selectedIdx + 1].url) {
+                        nav.next = list[selectedIdx + 1].url;
+                    }
+                    if (selectedIdx > 0 && list[selectedIdx - 1].url) {
+                        nav.prev = list[selectedIdx - 1].url;
+                    }
+                }
+            }
         }
     });
-
-    // 1.5 嘗試從 <ul>/<ol> 自訂章節清單中獲取 (相容 JManga, MangaReader 等自訂下拉清單漫畫網站)
-    if (nav.chapterList.length === 0) {
-        const chapterUls = document.querySelectorAll(
-            'ul.reading-list, ul.chapters-list, .chapters-list-ul ul, ul.chapter-list, .chapter-list-read ul, .list-chapter ul'
-        );
-
-        chapterUls.forEach(ul => {
-            if (nav.chapterList.length > 0) return;
-            const items = Array.from(ul.querySelectorAll('li'));
-            if (items.length < 2) return;
-
-            const list = [];
-            let selectedIdx = -1;
-
-            items.forEach(li => {
-                const a = li.querySelector('a') || (li.tagName && li.tagName.toLowerCase() === 'a' ? li : null);
-                if (!a) return;
-                let optUrl = (a.getAttribute('href') || a.href || '').trim();
-                if (!optUrl || optUrl.startsWith('javascript:')) return;
-                try {
-                    optUrl = optUrl.startsWith('http') ? optUrl : new URL(optUrl, window.location.href).href;
-                } catch(e) {}
-
-                const optText = (a.innerText || a.textContent || li.getAttribute('data-number') || '').trim();
-                const normalizedOptUrl = optUrl.split('#')[0].replace(/\/$/, '');
-                
-                const isSelected = li.classList.contains('highlight') || 
-                                   li.classList.contains('active') || 
-                                   li.classList.contains('current') || 
-                                   li.classList.contains('selected') || 
-                                   (normalizedOptUrl && (currentUrl === normalizedOptUrl || decodeURIComponent(currentUrl) === decodeURIComponent(normalizedOptUrl)));
-
-                if (isSelected) {
-                    selectedIdx = list.length;
-                    if (!nav.currentChapter) nav.currentChapter = optText;
-                }
-
-                list.push({
-                    title: optText,
-                    url: optUrl,
-                    current: isSelected
-                });
-            });
-
-            if (list.length >= 2 && selectedIdx !== -1) {
-                nav.chapterList = list;
-                resolveNavFromList(list, selectedIdx, nav);
-            }
-        });
-    }
 
     // 2. 若尚未識別出當前話數，嘗試從 URL 或頁面標題（H1, Title）提取 (如 chapter-15.4、第15話)
     if (!nav.currentChapter) {

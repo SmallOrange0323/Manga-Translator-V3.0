@@ -2160,47 +2160,7 @@ async function crawlChapterImagesAndNav(chapterUrl) {
             }
         }
 
-        // 自訂清單解析 (相容 JManga 等自訂 ul 結構)
-        if (!nextNav || !prevNav) {
-            const ulMatch = html.match(/<ul[^>]+(?:class=["'][^"']*(?:reading-list|chapters-list|chapter-list)[^"']*["']|id=["'][^"']*chapters["'])[^>]*>([\s\S]*?)<\/ul>/i);
-            if (ulMatch && ulMatch[1]) {
-                const liRegex = /<li[^>]*>[\s\S]*?<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/li>/gi;
-                const ulList = [];
-                let curLiIdx = -1;
-                let liMatch;
-                const normalizedCur = chapterUrl.split('#')[0].replace(/\/$/, '');
-                while ((liMatch = liRegex.exec(ulMatch[1])) !== null) {
-                    const href = liMatch[1].trim();
-                    const title = liMatch[2].replace(/<[^>]+>/g, '').trim();
-                    try {
-                        const absHref = new URL(href, chapterUrl).href;
-                        const norm = absHref.split('#')[0].replace(/\/$/, '');
-                        const isCur = liMatch[0].includes('highlight') || 
-                                      liMatch[0].includes('active') || 
-                                      norm === normalizedCur || 
-                                      decodeURIComponent(norm) === decodeURIComponent(normalizedCur);
-                        if (isCur) curLiIdx = ulList.length;
-                        ulList.push({ url: absHref, title });
-                    } catch (_) {}
-                }
-                if (curLiIdx !== -1 && ulList.length >= 2) {
-                    const getNum = (t) => {
-                        const m = (t || '').match(/[\d\.]+/);
-                        return m ? parseFloat(m[0]) : 0;
-                    };
-                    const isDesc = getNum(ulList[0].title) >= getNum(ulList[ulList.length - 1].title);
-                    if (isDesc) {
-                        if (curLiIdx > 0 && !nextNav) nextNav = ulList[curLiIdx - 1].url;
-                        if (curLiIdx < ulList.length - 1 && !prevNav) prevNav = ulList[curLiIdx + 1].url;
-                    } else {
-                        if (curLiIdx < ulList.length - 1 && !nextNav) nextNav = ulList[curLiIdx + 1].url;
-                        if (curLiIdx > 0 && !prevNav) prevNav = ulList[curLiIdx - 1].url;
-                    }
-                }
-            }
-        }
-
-        // 連結標籤解析 (若未從 select 或 ul 取得)
+        // 連結標籤解析 (若未從 select 取得)
         if (!nextNav || !prevNav) {
             const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
             while ((match = linkRegex.exec(html)) !== null) {
