@@ -18,9 +18,7 @@ export const SYNCABLE_SETTING_KEYS = [
     'ocrBatchSize',
     'requestDelay',
     'imageMaxDimension',
-    'ocrModelName',
     'customPrompt',
-    'customPromptOcr',
     'novelModelName',
     'novelBatchSize',
     'novelPrompt',
@@ -55,7 +53,7 @@ export function sanitizeSyncableSettings(rawSettings) {
     const sanitized = {};
     for (const key of SYNCABLE_SETTING_KEYS) {
         if (rawSettings[key] !== undefined) {
-            sanitized[key] = rawSettings[key];
+            sanitized[key] = key === 'translationMode' ? 'one-step' : rawSettings[key];
         }
     }
     return sanitized;

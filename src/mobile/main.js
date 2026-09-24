@@ -124,6 +124,13 @@ async function scanImages() {
     try {
         // 向漫畫頁面發送 crawlImages 請求
         const response = await chrome.tabs.sendMessage(sourceTabId, { action: 'crawlImages' });
+        if (response?.error) {
+            foundImages = [];
+            foundNavLinks = null;
+            renderImageGrid();
+            updateStatus(response.error, true);
+            return;
+        }
         
         if (response && response.images) {
             foundImages = response.images;

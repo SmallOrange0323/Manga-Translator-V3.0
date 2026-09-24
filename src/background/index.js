@@ -1,8 +1,10 @@
+import { createMangaRecovery } from './manga-recovery.js';
+import { parseChapterHtml } from '../utils/chapter-parser.js';
 import { state } from '../utils/state.js';
 import * as Constants from '../utils/constants.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import './download-helper.js';
-import { loadGlossary, saveGlossary, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
+import { loadGlossary, saveGlossary, upsertGlossaryTerm, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
 import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch, extractGlobalStoryAndGlossary, extractTextFromImage, callGeminiAPIBatchOcr } from './translate-api.js';
 import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
@@ -12,7 +14,7 @@ import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompl
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
 import { beginMangaRun, cancelMangaRun, clearMangaRun, getMangaAbortSignal, isMangaRunAborted } from './manga-cancellation.js';
-import { savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
+import { createPretranslationSnapshot, savePretranslationCheckpoint, getPretranslationCheckpoints, removePretranslationCheckpoint, clearPretranslationCheckpointsForTabs, normalizeRestoredPretranslation, getPretranslationResumeIndex, selectLatestInterruptedCheckpoint } from './pretranslation-checkpoint.js';
 import { mapNovelTranslationResults } from './novel-result-mapping.js';
 import { novelCancellationRegistry, pruneQueueForTab } from './novel-cancellation.js';
 import { saveNovelSessionState, getNovelSessionStates, readNovelSessionStatesStrict, removeNovelSessionState, removeNovelSessionStateIfMatches, restoreNovelSessionRegistry } from './novel-session-state.js';
@@ -32,8 +34,7 @@ let capturedScreenshotForSelection = null;
 // 注意：此為記憶體變數，SW 重啟後清空屬正常行為
 const lastNovelUrlByTab = {};
 
-// 【雙階段模式】單話任務短期記憶體暫存區 (Session Context)，任務結束後自動釋放，絕不污染長期詞庫
-const sessionStoryContext = {};
+
 
 // 追蹤當前正在進行漫畫翻譯任務的分頁 (分頁 ID ➔ 任務詳情)
 const activeTranslationJobs = new Map();
@@ -41,6 +42,8 @@ const activeTranslationJobs = new Map();
 // 未來若要支援多 Tab 並行，需將 stop/pause、cancellation 與 job state 改為 per-job。
 const activeMangaTranslationRuns = new Set();
 const withMangaStartLock = createMangaStartLock();
+const mangaRecovery = createMangaRecovery(chrome);
+const pendingMangaJobs = new Map();
 
 
 
@@ -177,6 +180,9 @@ export async function cleanupNovelSessionIfCurrent(tabId, sessionId) {
 async function initializeNovelRecovery() {
     try {
         await state.init();
+        if (await state.get('translationMode', 'one-step') !== 'one-step') {
+            await state.set('translationMode', 'one-step');
+        }
 
         try {
             await state.set('isStopping', false); // 重置停止狀態
@@ -860,22 +866,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  if (message.action === 'GET_LOCAL_AI_STATUS') {
-    wasmOcrEngine.getGpuStatus().then(status => {
-      sendResponse({ success: true, data: status });
-    }).catch(err => {
-      sendResponse({ success: false, message: err.message });
-    });
-    return true;
-  }
-
-  if (message.action === 'CLEAR_LOCAL_AI_CACHE') {
-    wasmOcrEngine.clearCache().then(res => {
-      sendResponse(res);
-    }).catch(err => {
-      sendResponse({ success: false, message: err.message });
-    });
-    return true;
+  if (message.action === 'GET_LOCAL_AI_STATUS' || message.action === 'CLEAR_LOCAL_AI_CACHE') {
+    sendResponse({ success: false, message: '本地 OCR 與雙階段模式已停用' });
+    return false;
   }
 
   if (message.action === 'BEGIN_NOVEL_SESSION') {
@@ -1252,12 +1245,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               log.info('Background', `[跨話連續追漫] 讀者進入下一話 (${nextUrl})，消費預翻成果 (已完成 ${data.results.length}/${data.images?.length || '?'} 頁)！`);
               
               // 若預翻仍在進行中，將接收結果頁綁定為當前 resultTabId
-              data.associatedResultTabId = resultTabId;
 
               // 靜默更新生肉分頁網址（保持進度同步）
               if (sourceTabId && typeof sourceTabId === 'number') {
-                  chrome.tabs.update(sourceTabId, { url: nextUrl }).catch(() => {});
+                  await chrome.tabs.update(sourceTabId, { url: nextUrl });
               }
+
+              data.consumptionReady = (async () => {
+              data.foregroundJob = await mangaRecovery.begin({ sourceTabId, resultTabId, sourceUrl: nextUrl,
+                  images: data.images, navLinks: data.navLinks, batchSize: data.batchSize || 5 });
+              const items = data.results.map((item, index) => ({ ...item, pageIndex: index + 1, batchIndex: Math.floor(index / (data.batchSize || 5)) }));
+              const committed = await mangaRecovery.commit(data.foregroundJob, items.length, items);
+              if (!committed) throw new Error('Chapter changed before saved pretranslation could be attached');
+              if (data.isDone) await mangaRecovery.status(data.foregroundJob, 'completed');
+              })();
+              data.consumedResultTabId = resultTabId;
+              await data.consumptionReady;
 
               // 讀者已進入本話，為即將到來的下下一話啟動單話預翻 (深度始終保持為 1)
               if (data.navLinks?.next && typeof data.navLinks.next === 'string') {
@@ -1266,73 +1269,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   });
               }
 
-              sendResponse({ success: true, data });
+              const { consumptionReady, foregroundJob, ...readerData } = data;
+              sendResponse({ success: true, data: readerData, job: await mangaRecovery.snapshot(resultTabId) });
           } else {
               sendResponse({ success: false, data: null });
           }
-      })();
+      })().catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
 
   if (message.action === 'START_MANGA_BATCH_PC_MODE') {
-      let { tabId, images, mobile, navLinks, mangaKey, windowId } = message.payload;
-      if (!tabId && sender.tab) tabId = sender.tab.id;
-      if (!windowId && sender.tab) windowId = sender.tab.windowId;
-      
-      // 紀錄手動選擇的詞庫 key
-      if (mangaKey) {
-          state.get('navigationContext', {}).then(ctx => {
-              ctx[tabId] = mangaKey;
-              state.set('navigationContext', ctx);
-          });
-      }
-      
-      // 紀錄導航連結
-      if (navLinks) {
-          state.get('navLinksStore', {}).then(store => {
-              store[tabId] = navLinks;
-              state.set('navLinksStore', store);
-          });
-      }
-      // 行動端來源時加上 mobile=1 參數，讓結果頁知道要啟用行動閱讀器模式
-      const mobileParam = mobile ? '&mobile=1' : '';
-      // 儲存 payload，等 result.html 的 resultPageReady 訊號再開始翻譯
-      chrome.storage.local.set({ mt_batch_payload: { tabId, images } }, () => {
-          const createTab = (targetWindowId) => {
-              chrome.tabs.create({ url: chrome.runtime.getURL('src/reader/result.html') + '?tabId=' + tabId + mobileParam, windowId: targetWindowId }, (tab) => {
-                  if (chrome.runtime.lastError) {
-                      // Fallback if windowId is invalid
-                      chrome.tabs.create({ url: chrome.runtime.getURL('src/reader/result.html') + '?tabId=' + tabId + mobileParam }, (tab2) => {
-                          setupResultTab(tab2);
-                      });
-                  } else {
-                      setupResultTab(tab);
-                  }
-              });
-          };
-
-          const setupResultTab = (tab) => {
-              if (!tab) return;
-              state.get('pendingBatchJobs', {}).then(jobs => {
-                  jobs[tab.id] = { sourceTabId: tabId, images, navLinks: navLinks || null };
-                  state.set('pendingBatchJobs', jobs);
-                  setTimeout(() => {
-                      state.get('pendingBatchJobs', {}).then(jobs2 => {
-                          delete jobs2[tab.id];
-                          state.set('pendingBatchJobs', jobs2);
-                      });
-                  }, 60000);
-              });
-          };
-
-          if (windowId) {
-              createTab(windowId);
-          } else {
-              chrome.tabs.get(tabId, (sourceTab) => {
-                  createTab(sourceTab ? sourceTab.windowId : undefined);
-              });
-          }
-      });
+      const { images, mobile, navLinks, mangaKey, windowId } = message.payload;
+      const tabId = message.payload.tabId || sender.tab?.id;
+      openNewResultPage(tabId, images, navLinks, mangaKey, mobile, windowId)
+          .catch(err => log.error('Background', err.message));
       sendResponse({ status: 'ok' });
       return false;
   }
@@ -1350,7 +1300,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'STOP_TRANSLATION') {
       const tabId = message.payload?.tabId || sender.tab?.id;
       cancelMangaRun();
-      state.set('isStopping', true);
+      for (const data of pretranslatedChaptersMap.values()) {
+          if (data.consumedResultTabId) data.isCancelled = true;
+      }
+      state.set('isStopping', true).catch(err => log.warn('Background', err.message));
       log.warn('Background', '收到停止指令，正在中斷相關翻譯任務...');
       if (tabId) {
           const job = activeTranslationJobs.get(tabId);
@@ -1363,8 +1316,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           activeTranslationJobs.clear();
       }
       chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
-      sendResponse({ success: true, status: 'stopping' });
-      return false;
+      mangaRecovery.stop().then(() => sendResponse({ success: true, status: 'stopping' }))
+          .catch(err => sendResponse({ success: false, error: err.message }));
+      return true;
   }
 
   // 行動端專用：開啟行動版翻譯分頁
@@ -1379,20 +1333,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'resultPageReady') {
       const resultTabId = sender.tab?.id;
-      if (resultTabId) {
-          state.get('pendingBatchJobs', {}).then(jobs => {
-              if (jobs[resultTabId]) {
-                  const { sourceTabId, images, navLinks } = jobs[resultTabId];
-                  delete jobs[resultTabId];
-                  state.set('pendingBatchJobs', jobs);
-                  // 新任務必須等待先前被停止的任務真正退出後，才清除停止旗標並派發。
-                  startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks)
-                      .catch(err => log.error('Background', `啟動漫畫翻譯任務失敗: ${err.message}`));
-              }
+      (async () => {
+          await mangaRecovery.ready;
+          const pending = pendingMangaJobs.get(resultTabId);
+          if (pending) {
+              pendingMangaJobs.delete(resultTabId);
+              startNewMangaBatchProcessing(pending.sourceTabId, resultTabId, pending.images, pending.navLinks, false, null, pending.mangaKey)
+                  .catch(err => log.error('Background', err.message));
+          }
+          sendResponse({ status: 'ok', job: await mangaRecovery.snapshot(resultTabId) });
+      })().catch(err => sendResponse({ success: false, error: err.message }));
+      return true;
+  }
+  if (message.action === 'RESUME_MANGA_JOB') {
+      (async () => {
+          const resultTabId = sender.tab?.id;
+          let run;
+          await withMangaStartLock(async () => {
+              await Promise.allSettled([...activeMangaTranslationRuns]);
+              const job = await mangaRecovery.resume(resultTabId, message.jobId);
+              beginMangaRun();
+              await state.set('isStopping', false);
+              await state.set('isBatchPaused', false);
+              run = (await dispatchMangaBatchProcessing(job.sourceTabId, resultTabId, job.images, job.navLinks, job.isRetry, job.targetBatchIndex, job.mangaKey, job)).run;
           });
-      }
-      sendResponse({ status: 'ok' });
-      return false;
+          run.catch(err => log.error('Background', err.message));
+          sendResponse({ success: true });
+      })().catch(err => sendResponse({ success: false, error: err.message }));
+      return true;
   }
 
     if (message.action === 'GET_GLOSSARY_INFO') {
@@ -1494,77 +1462,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
   }
 
-  if (message.action === 'saveGlossaryTerm') {
-      const { mangaKey, displayName, ori, trans } = message;
-      if (!mangaKey || !ori || !trans) {
-          sendResponse({ success: false, error: '缺少必要欄位' });
-          return false;
-      }
-      (async () => {
-          try {
-              const existing = await loadGlossary(mangaKey) || { displayName: displayName || mangaKey, terms: [] };
-              const cleanOri = ori.trim();
-              const cleanTrans = trans.trim();
-              
-              const existingIndex = existing.terms.findIndex(t => t.ori === cleanOri);
-              if (existingIndex >= 0) {
-                  // 原文已存在，使用者手動覆蓋更新譯名
-                  existing.terms[existingIndex].trans = cleanTrans;
-                  existing.terms[existingIndex].source = 'user';
-                  existing.terms[existingIndex].updatedAt = Date.now();
-                  log.info('Glossary', `[詞彙更新] 作品 "${mangaKey}" 覆蓋詞彙: ${cleanOri} ➔ ${cleanTrans}`);
-              } else {
-                  // 新增詞彙
-                  existing.terms.push({ ori: cleanOri, trans: cleanTrans, source: 'user', createdAt: Date.now() });
-                  log.info('Glossary', `[詞彙新增] 作品 "${mangaKey}" 新增詞彙: ${cleanOri} ➔ ${cleanTrans}`);
-              }
-              await saveGlossary(mangaKey, existing);
-              sendResponse({ success: true, count: existing.terms.length });
-          } catch(e) {
-              sendResponse({ success: false, error: e.message });
-          }
-      })();
+  if (message.action === 'saveGlossaryTerm' || message.action === 'upsertGlossaryTerm') {
+      upsertGlossaryTerm(message.mangaKey, message.term || { ori: message.ori, trans: message.trans }, message.oldOri)
+          .then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
+      return true;
+  }
+  if (message.action === 'syncGlossariesNow') {
+      syncEngine.syncNow(message.token).then(lastSyncTime => sendResponse({ success: true, lastSyncTime }))
+          .catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
 
   if (message.action === 'deleteGlossaryTerm') {
       const { mangaKey, ori } = message;
       if (!mangaKey || !ori) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      deleteGlossaryTerm(mangaKey, ori).then(res => sendResponse(res));
+      deleteGlossaryTerm(mangaKey, ori).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
 
   if (message.action === 'deleteMultipleGlossaryTerms') {
       const { mangaKey, oris } = message;
       if (!mangaKey || !oris) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      deleteMultipleGlossaryTerms(mangaKey, oris).then(res => sendResponse(res));
+      deleteMultipleGlossaryTerms(mangaKey, oris).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
 
   if (message.action === 'deleteGlossary') {
       const { mangaKey } = message;
       if (!mangaKey) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      deleteGlossary(mangaKey).then(res => sendResponse(res));
+      deleteGlossary(mangaKey).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
 
   if (message.action === 'updateGlossaryDisplayName') {
       const { mangaKey, newDisplayName } = message;
       if (!mangaKey || !newDisplayName) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      updateGlossaryDisplayName(mangaKey, newDisplayName).then(res => sendResponse(res));
+      updateGlossaryDisplayName(mangaKey, newDisplayName).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
 
   if (message.action === 'importGlossaryTerms') {
       const { mangaKey, terms } = message;
       if (!mangaKey || !terms) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      importGlossaryTerms(mangaKey, terms).then(res => sendResponse(res));
+      importGlossaryTerms(mangaKey, terms).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
   if (message.action === 'retranslateImage') {
       const { url, tabId, mangaKey } = message;
       (async () => {
           try {
+              const initialJob = sender.tab?.id ? await mangaRecovery.snapshot(sender.tab.id) : null;
               let base64 = null;
               if (url && url.startsWith('data:image')) {
                   base64 = url.split(',')[1];
@@ -1617,6 +1564,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (result?.results) {
                   // 修復 Bug #3：優先採用 translateTexts 回傳的 usedModelName（已由 translate-api.js 注入），
                   // 若為舊版未含該欄位則 fallback 至本次實際使用的 usedModel
+                  if (initialJob) await mangaRecovery.replaceResult(sender.tab.id, initialJob.id, url, { results: result.results, usedModelName: result.usedModelName || usedModel });
                   sendResponse({ results: result.results, usedModelName: result.usedModelName || usedModel });
               } else {
                   throw new Error('API 回應格式異常');
@@ -1810,7 +1758,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               log.error('Background', `Mobile crawl failed: ${chrome.runtime.lastError.message}`);
               sendResponse({ images: [] });
           } else {
-              sendResponse({ images: response?.images || [] });
+              sendResponse({ images: response?.images || [], error: response?.error });
           }
       });
       return true; // 非同步
@@ -2047,16 +1995,17 @@ const PRETRANS_STORAGE_KEY = 'mt_pretranslated_chapters_cache';
 
 async function savePretranslatedChapterToStorage(url, data) {
     try {
-        const stored = await state.get(PRETRANS_STORAGE_KEY, {});
-        // 只保留最新 2 話快取，防止佔滿 storage 配額
-        const keys = Object.keys(stored);
-        if (keys.length >= 3) {
-            delete stored[keys[0]];
-        }
-        stored[url] = data;
-        await state.set(PRETRANS_STORAGE_KEY, stored);
+        if (await isTabIncognito(data.sourceTabId)) return;
+        const snapshot = createPretranslationSnapshot(data);
+        if (!snapshot) return;
+        snapshot.inProgress = false;
+        await state.update(PRETRANS_STORAGE_KEY, (current = {}) => {
+            const stored = { ...current, [url]: snapshot };
+            while (Object.keys(stored).length > 2) delete stored[Object.keys(stored)[0]];
+            return stored;
+        });
     } catch (e) {
-        log.warn('Background', `預翻資料持久化寫入失敗: ${e.message}`);
+        log.warn('Background', '預翻資料持久化寫入失敗: ' + e.message);
     }
 }
 
@@ -2084,110 +2033,7 @@ async function crawlChapterImagesAndNav(chapterUrl) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const html = await res.text();
 
-        // 1. 優先從漫畫正文容器抽取 (避免抓到 Header Logo, 按鈕圖示, 訪客計數器與 Footer 雜圖)
-        const images = [];
-        const seenUrls = new Set();
-        const junkKeywords = [
-            'logo', 'banner', 'icon', 'button', 'turn-off', 'light', 'dark', 'avatar',
-            'widget', 'social', 'badge', 'emoji', 'reaction', 'loading', 'placeholder',
-            'thumb', 'small', 'header', 'footer', 'advert', 'donate', 'rating', 'vote',
-            '512x512', '256x256', '128x128', 'chance-load', 'lzloader', 'captcha',
-            'counter', 'whos.amung.us', 'hits', 'visitor', 'online', 'flagcounter', 'stat',
-            'histats', 'tracker', 'clustrmaps', 'fc2.com', '99counter', 'cbox', 'user_online',
-            'users_online', 'viewcount', 'traffic'
-        ];
-
-        // 嘗試截取主流漫畫容器 HTML
-        let targetHtml = html;
-        const containerMatch = html.match(/<(?:div|article|section)[^>]+(?:id|class)=["'](?:readerarea|reading-content|list-imga|ts-main-image|manga-image|viewer-cnt|chapter-content)["'][^>]*>([\s\S]*?)<\/(?:div|article|section)>/i);
-        if (containerMatch && containerMatch[1]) {
-            targetHtml = containerMatch[1];
-        }
-
-        const imgRegex = /<img[^>]+(?:data-src|data-lazy-src|data-original|data-aload|src)=["']([^"']+)["'][^>]*>/gi;
-        let match;
-        while ((match = imgRegex.exec(targetHtml)) !== null) {
-            const fullTag = match[0];
-            let imgUrl = match[1].trim();
-            if (!imgUrl || imgUrl.startsWith('data:') || imgUrl.endsWith('.svg')) continue;
-            
-            const lower = (imgUrl + ' ' + fullTag).toLowerCase();
-            const isJunk = junkKeywords.some(k => lower.includes(k));
-            if (isJunk) continue;
-
-            // 檢查標籤中是否有小尺寸屬性 (如 width="80" 或 height="30")
-            const dimMatch = fullTag.match(/(?:width|height)=["']?(\d+)["']?/i);
-            if (dimMatch && parseInt(dimMatch[1]) > 0 && parseInt(dimMatch[1]) < 200) {
-                continue; // 排除小於 200px 的計數器與按鈕
-            }
-
-            try {
-                imgUrl = new URL(imgUrl, chapterUrl).href;
-            } catch (_) {}
-
-            if (!seenUrls.has(imgUrl)) {
-                seenUrls.add(imgUrl);
-                images.push(imgUrl);
-            }
-        }
-
-        // 2. 提取下下一話與上一話導航連結 (支援下拉選單與連結標籤)
-        let nextNav = null;
-        let prevNav = null;
-
-        // 下拉選單解析
-        const selectMatch = html.match(/<select[^>]*>([\s\S]*?)<\/select>/i);
-        if (selectMatch && selectMatch[1]) {
-            const optRegex = /<option[^>]+value=["']([^"']+)["'][^>]*>([\s\S]*?)<\/option>/gi;
-            const optList = [];
-            let currentOptIdx = -1;
-            let optMatch;
-            while ((optMatch = optRegex.exec(selectMatch[1])) !== null) {
-                const optVal = optMatch[1].trim();
-                const isCur = optMatch[0].includes('selected') || (optVal && chapterUrl.includes(optVal));
-                if (isCur) currentOptIdx = optList.length;
-                optList.push(optVal);
-            }
-            if (currentOptIdx !== -1 && optList.length >= 2) {
-                const isDesc = optList[0] > optList[optList.length - 1];
-                if (isDesc) {
-                    if (currentOptIdx > 0) nextNav = new URL(optList[currentOptIdx - 1], chapterUrl).href;
-                    if (currentOptIdx < optList.length - 1) prevNav = new URL(optList[currentOptIdx + 1], chapterUrl).href;
-                } else {
-                    if (currentOptIdx < optList.length - 1) nextNav = new URL(optList[currentOptIdx + 1], chapterUrl).href;
-                    if (currentOptIdx > 0) prevNav = new URL(optList[currentOptIdx - 1], chapterUrl).href;
-                }
-            }
-        }
-
-        // 連結標籤解析 (若未從 select 取得)
-        if (!nextNav || !prevNav) {
-            const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-            while ((match = linkRegex.exec(html)) !== null) {
-                const href = match[1].trim();
-                const text = match[2].replace(/<[^>]+>/g, '').trim();
-                if (!href || href === '#' || href.startsWith('javascript:')) continue;
-
-                let absHref;
-                try {
-                    absHref = new URL(href, chapterUrl).href;
-                } catch (_) {
-                    continue;
-                }
-
-                if (/下一[話话頁页章回節节]|next(?:\s*page|\s*chapter)?|次へ/i.test(text) || /(?:next|next-chapter|next_page)/i.test(href)) {
-                    if (!nextNav && absHref !== chapterUrl) nextNav = absHref;
-                }
-                if (/上一[話话頁页章回節节]|prev(?:ious)?|前へ/i.test(text) || /(?:prev|prev-chapter|prev_page)/i.test(href)) {
-                    if (!prevNav && absHref !== chapterUrl) prevNav = absHref;
-                }
-            }
-        }
-
-        return {
-            images,
-            navLinks: { prev: prevNav, next: nextNav }
-        };
+        return parseChapterHtml(html, chapterUrl);
     } catch (err) {
         log.warn('Background', `[跨話靜默探針] HTML 抓取解析失敗: ${err.message}`);
         return { images: [], navLinks: { prev: null, next: null } };
@@ -2330,14 +2176,11 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             await savePretranslationCheckpoint(jobData);
 
             // 若讀者已切換至本話，即時串流推送本批翻譯結果至結果頁
-            if (jobData.associatedResultTabId) {
-                chrome.tabs.sendMessage(jobData.associatedResultTabId, {
-                    action: 'batchComplete',
-                    batchIndex: Math.floor(i / batchSize),
-                    totalBatches: Math.ceil(chapterImages.length / batchSize),
-                    batchResults: batchResults,
-                    isLastBatch: (i + batchSize >= chapterImages.length)
-                }).catch(() => {});
+            if (jobData.consumedResultTabId) {
+                await jobData.consumptionReady;
+                const items = batchResults.map((item, index) => ({ ...item, pageIndex: i + index + 1, batchIndex: Math.floor(i / batchSize) }));
+                const committed = await mangaRecovery.commit(jobData.foregroundJob, jobData.processedCount, items, () => !jobData.isCancelled);
+                if (!committed) jobData.isCancelled = true;
             }
 
             if (i + batchSize < chapterImages.length && !jobData.isCancelled) {
@@ -2351,6 +2194,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             resultCount: jobData.results.length,
             imageCount: jobData.images.length
         });
+        if (jobData.foregroundJob) await mangaRecovery.status(jobData.foregroundJob, completion.isDone ? 'completed' : 'interrupted');
         jobData.status = completion.status;
         jobData.isDone = completion.isDone;
         if (completion.status === 'cancelled') {
@@ -2367,6 +2211,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             log.warn('Background', `[跨話連續追漫] 預翻結果不完整 (${jobData.results.length}/${jobData.images.length})`);
         }
     } catch (err) {
+        if (jobData.foregroundJob) await mangaRecovery.status(jobData.foregroundJob, 'interrupted').catch(() => {});
         jobData.error = err.message;
         jobData.status = 'error';
         await removePretranslationCheckpoint(nextUrl);
@@ -2484,47 +2329,20 @@ async function handleProcessScreenshot(rect, tabId) {
  * openNewResultPage — 開一個新的結果頁並儲存 pendingBatchJobs
  * 供 navigateAndTranslate 的 fallback（結果頁已關閉時）使用
  */
-function openNewResultPage(sourceTabId, images, navLinks, mangaKey, mobile) {
-    const mobileParam = mobile ? '&mobile=1' : '&mobile=0';
-    chrome.tabs.get(sourceTabId, (sourceTab) => {
-        const targetWindowId = sourceTab ? sourceTab.windowId : undefined;
-        chrome.tabs.create({
-            url: chrome.runtime.getURL('src/reader/result.html') + `?tabId=${sourceTabId}${mobileParam}`,
-            windowId: targetWindowId
-        }, (resultTab) => {
-            if (chrome.runtime.lastError) {
-                // Fallback
-                chrome.tabs.create({
-                    url: chrome.runtime.getURL('src/reader/result.html') + `?tabId=${sourceTabId}${mobileParam}`
-                }, (tab2) => setupNewResultPageJob(tab2, sourceTabId, images, navLinks, mangaKey));
-            } else {
-                setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKey);
-            }
-        });
-    });
-}
-
-function setupNewResultPageJob(resultTab, sourceTabId, images, navLinks, mangaKey) {
-    if (!resultTab) {
-        log.warn('Background', 'openNewResultPage: 無法建立結果頁');
-        return;
-    }
-    state.get('pendingBatchJobs', {}).then(jobs => {
-        jobs[resultTab.id] = { sourceTabId, images, navLinks: navLinks || null, mangaKey: mangaKey || null };
-        state.set('pendingBatchJobs', jobs);
-        setTimeout(() => {
-            state.get('pendingBatchJobs', {}).then(jobs2 => {
-                delete jobs2[resultTab.id];
-                state.set('pendingBatchJobs', jobs2);
-            });
-        }, 60000);
-    });
+async function openNewResultPage(sourceTabId, images, navLinks, mangaKey, mobile, windowId) {
+    const source = sourceTabId ? await chrome.tabs.get(sourceTabId).catch(() => null) : null;
+    const options = { url: 'about:blank' };
+    if (windowId || source?.windowId) options.windowId = windowId || source.windowId;
+    const tab = await chrome.tabs.create(options).catch(() => chrome.tabs.create({ url: 'about:blank' }));
+    await mangaRecovery.begin({ sourceTabId, resultTabId: tab.id, images, navLinks, mangaKey, batchSize: Math.max(1, parseInt(await state.get('ocrBatchSize', 5)) || 1) });
+    pendingMangaJobs.set(tab.id, { sourceTabId, images, navLinks, mangaKey });
+    if (mangaKey) await state.update('navigationContext', (ctx = {}) => ({ ...ctx, [sourceTabId]: mangaKey }));
+    if (navLinks) await state.update('navLinksStore', (ctx = {}) => ({ ...ctx, [sourceTabId]: navLinks }));
+    await chrome.tabs.update(tab.id, { url: chrome.runtime.getURL('src/reader/result.html') + '?tabId=' + sourceTabId + (mobile ? '&mobile=1' : '') });
 }
 
 /**
- * 漫畫批次翻譯統一派發器：依據使用者設定之 translationMode 分流
- * - one-step: 一條龍模式 (每批圖片直接送 Vision 直譯，極速、零等待)
- * - two-step: 雙階段模式 (先快速 OCR 提煉全書劇本 ➔ 1次通讀暫存劇情大綱與角色關係 ➔ 帶全域記憶 Vision 精翻)
+ * 漫畫批次翻譯統一派發器：僅保留圖片直接翻譯。
  */
 async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
     let createdRun;
@@ -2543,12 +2361,10 @@ async function startNewMangaBatchProcessing(sourceTabId, resultTabId, images, na
     return createdRun;
 }
 
-async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
-    const mode = await state.get('translationMode', 'one-step');
+async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null, resumedJob = null) {
+    const mode = 'one-step';
     log.info('Background', `[任務派發] 當前模式: ${mode}，圖片數: ${images.length}，是否重試: ${isRetry}，指定作品Key: ${customMangaKey || '無'}`);
-    const run = (mode === 'two-step' && !isRetry)
-        ? processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, customMangaKey)
-        : processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey);
+    const run = processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, '', customMangaKey, resumedJob);
     activeMangaTranslationRuns.add(run);
     run.finally(() => {
         activeMangaTranslationRuns.delete(run);
@@ -2556,253 +2372,8 @@ async function dispatchMangaBatchProcessing(sourceTabId, resultTabId, images, na
     return { run };
 }
 
-/**
- * 【雙階段模式 (Two-Step Story Pipeline)】專屬處理器：
- * 階段 1：使用 ocrModelName (如 Gemma 4 26B / Flash-Lite) 快速提取全書純日文對白，拼裝成 fullScriptText
- * 階段 1.5：1 次純文字 API 通讀全本台詞，萃取【單話劇情大綱 + 角色關係 + 專有名詞】
- *           - 單話劇情大綱與角色關係 ➔ 寫入 sessionStoryContext 短期暫存
- *           - 專屬術語 ➔ 合併存入長期詞庫 (saveGlossary)
- * 階段 2：組合 sessionContextSnippet，呼叫 Vision 精翻輸出
- */
-async function processMangaBatchTwoStepMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, customMangaKey = null) {
-    if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'two-step' });
-    if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'two-step' });
-
-    const broadcastStatus = (msg, type = 'info') => {
-        if (!sourceTabId) return;
-        chrome.tabs.sendMessage(sourceTabId, {
-            action: 'TRANSLATION_STATUS',
-            payload: { msg, type }
-        }).catch(() => {});
-    };
-
-    swKeepAlive.start();
-    try {
-        log.info('TwoStepPipeline', `啟動雙階段劇本預讀工作流：共 ${images.length} 張圖片`);
-        broadcastStatus(`📖 [階段 1] 啟動 OCR 提取全書台詞劇本 (共 ${images.length} 頁)...`, 'info');
-        chrome.tabs.sendMessage(resultTabId, {
-            action: 'updateProgress',
-            current: `正在提取全書劇本 (0/${images.length})`,
-            total: images.length
-        });
-
-    const maxDim = parseInt(await state.get('imageMaxDimension', 1280)) || 1280;
-    const ocrModelName = await state.get('ocrModelName', 'gemini-3.1-flash-lite');
-    const isWasmOcr = (ocrModelName === 'local-wasm-ocr');
-    const ocrBatchSize = parseInt(await state.get('ocrBatchSize', 10)) || 10;
-
-    log.info('TwoStepPipeline', `[階段 1] 模式: ${isWasmOcr ? '💻 本地 WASM OCR' : `☁️ 雲端批次 OCR (${ocrModelName})`}，每批打包: ${ocrBatchSize} 頁，傳送尺寸: ${maxDim}px`);
-
-    // ── 階段 1：OCR 提取全書台詞 (雙緩衝管線預載) ──
-    const scriptLines = [];
-    let nextOcrBatchPromise = (images.length > 0)
-        ? fetchAndResizeBatch(images.slice(0, ocrBatchSize), maxDim, sourceTabId)
-        : Promise.resolve([]);
-
-    for (let i = 0; i < images.length; i += ocrBatchSize) {
-        if (await state.get('isStopping')) break;
-        const currentBatch = images.slice(i, i + ocrBatchSize);
-        const startPage = i + 1;
-        const endPage = Math.min(i + ocrBatchSize, images.length);
-
-        chrome.tabs.sendMessage(resultTabId, {
-            action: 'updateProgress',
-            current: `正在提取第 ${startPage}~${endPage} 頁劇本...`,
-            total: images.length
-        }).catch(() => {});
-        broadcastStatus(`📖 [階段 1] 正在提取第 ${startPage}~${endPage} 頁劇本...`, 'info');
-
-        // 1. 取得本批預先壓縮好的 Base64
-        const base64List = await nextOcrBatchPromise;
-
-        // 預載結束後、發起任何 OCR API 之前，立即再次檢查 isStopping
-        if (await state.get('isStopping')) break;
-
-        // 2. 雙緩衝管線：若有下一批，立即在發送 API 前啟動背景預載預壓
-        const nextOcrStart = i + ocrBatchSize;
-        if (nextOcrStart < images.length) {
-            nextOcrBatchPromise = fetchAndResizeBatch(images.slice(nextOcrStart, nextOcrStart + ocrBatchSize), maxDim, sourceTabId);
-        } else {
-            nextOcrBatchPromise = Promise.resolve([]);
-        }
-
-        let batchScripts = [];
-        if (isWasmOcr) {
-            batchScripts = await wasmOcrEngine.recognizeBatch(base64List);
-        } else {
-            const mangaSignal = getMangaAbortSignal();
-            if (mangaSignal.aborted || (await state.get('isStopping'))) break;
-
-            try {
-                batchScripts = await callGeminiAPIBatchOcr(base64List, {
-                    model: ocrModelName,
-                    pageOffset: i,
-                    signal: mangaSignal
-                });
-            } catch (batchOcrErr) {
-                if (!shouldFallbackAfterOcrError(batchOcrErr, mangaSignal) || (await state.get('isStopping'))) {
-                    log.info('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 偵測到中止訊號，終止 OCR 流程`);
-                    break;
-                }
-                log.warn('TwoStepPipeline', `第 ${startPage}~${endPage} 頁批次 OCR 失敗，嘗試逐張重試: ${batchOcrErr.message}`);
-                batchScripts = await executeOcrFallbackImages({
-                    base64List,
-                    extractSingle: (b64) => extractTextFromImage(b64, { model: ocrModelName, signal: mangaSignal }),
-                    shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted
-                });
-                if (batchScripts?.wasStopped || mangaSignal.aborted || (await state.get('isStopping'))) {
-                    break;
-                }
-            }
-        }
-
-        batchScripts.forEach((text, idx) => {
-            const pageNum = i + idx + 1;
-            if (text && text.trim()) {
-                scriptLines.push(`[P.${pageNum}]\n${text.trim()}`);
-            }
-        });
-    }
-
-    // ── 【第一道 STOP 守衛：Stage 1 OCR 結束 ➔ 進入 Stage 1.5 之前】 ──
-    const cleanupStoppedTwoStepRun = () => {
-        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-        if (resultTabId) {
-            activeTranslationJobs.delete(resultTabId);
-            delete sessionStoryContext[resultTabId];
-        }
-    };
-
-    const isStoppingAfterOcr = await state.get('isStopping');
-    if (!shouldProceedToStage15({ wasStopped: isStoppingAfterOcr, isStopping: isStoppingAfterOcr })) {
-        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 1.5 與階段 2');
-        cleanupStoppedTwoStepRun();
-        return;
-    }
-
-    const fullScriptText = scriptLines.join('\n\n');
-    log.info('TwoStepPipeline', `全書劇本提取完成，有效台詞段落: ${scriptLines.length} 頁，總字數: ${fullScriptText.length} 字`);
-
-    // ── 階段 1.5：全域劇本通讀與分層存儲 ──
-    let sessionContextSnippet = '';
-    const navCtx = await state.get('navigationContext', {});
-    chrome.tabs.sendMessage(resultTabId, { action: 'clearResults', expectedCount: images.length }).catch(() => {});
-    const currentMangaKey = customMangaKey || navCtx[sourceTabId];
-
-    if (fullScriptText.trim().length > 20) {
-        const mangaSignal = getMangaAbortSignal();
-        if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
-            log.info('TwoStepPipeline', '進入階段 1.5 前偵測到中止訊號，終止流程');
-            cleanupStoppedTwoStepRun();
-            return;
-        }
-
-        broadcastStatus(`✨ [階段 1.5] 通讀全篇劇本，分析當話劇情大綱與人物關係...`, 'info');
-        chrome.tabs.sendMessage(resultTabId, {
-            action: 'updateProgress',
-            current: `正在分析全局劇情大綱與人物關係...`,
-            total: images.length
-        }).catch(() => {});
-
-        try {
-            const sessionAnalysis = await extractGlobalStoryAndGlossary(fullScriptText, {
-                mangaKey: currentMangaKey,
-                displayName: currentMangaKey,
-                signal: mangaSignal
-            });
-
-            // Post-request guard 1：API 返回後若已被中止，立即終止流程且不寫入任何 context/glossary
-            if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
-                log.info('TwoStepPipeline', '全域劇本分析完成後偵測到中止訊號，終止流程');
-                cleanupStoppedTwoStepRun();
-                return;
-            }
-
-            // 1. 當話劇情大綱與角色互動 ➔ 短期任務記憶體暫存
-            sessionStoryContext[resultTabId] = {
-                storySummary: sessionAnalysis.storySummary || '',
-                characterRelationships: sessionAnalysis.characterRelationships || []
-            };
-
-            // 2. 專屬術語 ➔ 合併存入長期詞庫
-            if (sessionAnalysis.glossaryTerms && sessionAnalysis.glossaryTerms.length > 0 && currentMangaKey) {
-                await mergeGlossaryTerms(currentMangaKey, sessionAnalysis.glossaryTerms, 'ai');
-                log.info('TwoStepPipeline', `已將 ${sessionAnalysis.glossaryTerms.length} 筆全書專有名詞存入長期詞庫 (${currentMangaKey})`);
-            }
-
-            // Post-request guard 2：詞庫寫入後再次檢查中止訊號，阻止後續讀取、廣播與進入 Stage 2
-            if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
-                log.info('TwoStepPipeline', '詞庫合併後偵測到中止訊號，終止流程');
-                cleanupStoppedTwoStepRun();
-                return;
-            }
-
-            // 3. 封裝注入片段
-            const relText = (sessionAnalysis.characterRelationships || [])
-                .map(r => `• ${r.charA} 與 ${r.charB}: ${r.relation} (稱呼: ${r.callCharB || '無'})`)
-                .join('\n');
-
-            const allTerms = await loadGlossary(currentMangaKey);
-
-            // Post-request guard 3：詞庫讀取後再次檢查中止訊號，阻止後續 prompt snippet 建構、成功廣播與進入 Stage 2
-            if (!shouldContinueMangaStoryAnalysis({ signal: mangaSignal, isStopping: await state.get('isStopping') })) {
-                log.info('TwoStepPipeline', '詞庫讀取後偵測到中止訊號，終止流程');
-                cleanupStoppedTwoStepRun();
-                return;
-            }
-
-            const termsSnippet = buildGlossaryPromptSnippet(allTerms?.terms || []);
-
-            sessionContextSnippet = `
-<story_context>
-  <current_chapter_summary>
-${sessionAnalysis.storySummary || '無'}
-  </current_chapter_summary>
-  <character_relationships>
-${relText || '無'}
-  </character_relationships>
-  <required_terms>
-${termsSnippet}
-  </required_terms>
-</story_context>`;
-
-            broadcastStatus(`🎯 已掌握全局設定（大綱+角色），開始進入批次精翻！`, 'ok');
-        } catch (storyErr) {
-            if (isMangaCancellation(storyErr, mangaSignal) || (await state.get('isStopping'))) {
-                log.info('TwoStepPipeline', '全域劇本分析過程中偵測到中止訊號，終止流程');
-                cleanupStoppedTwoStepRun();
-                return;
-            }
-            log.warn('TwoStepPipeline', `全域劇本分析失敗，退回無劇情背景精翻: ${storyErr.message}`);
-        }
-    }
-    } catch (err) {
-        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-        if (resultTabId) {
-            activeTranslationJobs.delete(resultTabId);
-            delete sessionStoryContext[resultTabId];
-        }
-        throw err;
-    } finally {
-        swKeepAlive.stop();
-    }
-
-    const isStopping = await state.get('isStopping');
-    if (!shouldProceedToStage2({ wasStopped: isStopping, isStopping, scriptLinesCount: scriptLines.length })) {
-        log.warn('TwoStepPipeline', '階段 1 OCR 過程中已被停止，中止進入階段 2 翻譯');
-        if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
-        if (resultTabId) {
-            activeTranslationJobs.delete(resultTabId);
-            delete sessionStoryContext[resultTabId];
-        }
-        return;
-    }
-
-    return await processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks, isRetry, targetBatchIndex, sessionContextSnippet, customMangaKey);
-}
-
 // PC 模式的專屬翻譯處理器 (雙緩衝管線版本 - 0 延遲無縫流式批次)
-async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '', customMangaKey = null) {
+async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLinks = null, isRetry = false, targetBatchIndex = null, injectedGlossarySnippet = '', customMangaKey = null, resumedJob = null) {
     if (sourceTabId) activeTranslationJobs.set(sourceTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
     if (resultTabId) activeTranslationJobs.set(resultTabId, { sourceTabId, resultTabId, imgCount: images.length, mode: 'one-step' });
     const cleanupTranslationJob = () => {
@@ -2810,7 +2381,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         if (sourceTabId) activeTranslationJobs.delete(sourceTabId);
         if (resultTabId) {
             activeTranslationJobs.delete(resultTabId);
-            delete sessionStoryContext[resultTabId];
         }
     };
 
@@ -2822,9 +2392,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         }).catch(() => {});
     };
 
-    if (!isRetry) {
-        chrome.tabs.sendMessage(resultTabId, { action: 'clearResults', expectedCount: images.length });
-    }
+    let durableJob = resumedJob;
+    const runSignal = getMangaAbortSignal();
     broadcastStatus(`🚀 開始翻譯 ${images.length} 張圖片...`, 'info');
 
     chrome.runtime.sendMessage({
@@ -2836,7 +2405,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         action: 'updateProgress',
         current: 0,
         total: images.length
-    });
+    }).catch(() => {});
 
     let modelName;
     let fallbackModelName;
@@ -2921,7 +2490,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             chrome.tabs.sendMessage(resultTabId, {
                 action: 'setNavigation',
                 navLinks: resolvedNavLinks
-            });
+            }).catch(() => {});
         }, 500);
     }
 
@@ -2930,7 +2499,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         // 4. 讀取批次大小與圖片大小設定
         const isGemmaMode = modelName.toLowerCase().includes('gemma');
         const ocrBatchSizeSetting = await state.get('ocrBatchSize', 5);
-        const batchSize = isGemmaMode ? 1 : (parseInt(ocrBatchSizeSetting) || 1);
+        const batchSize = resumedJob?.batchSize || (isGemmaMode ? 1 : Math.max(1, parseInt(ocrBatchSizeSetting) || 1));
+        durableJob ||= await mangaRecovery.begin({ sourceTabId, resultTabId, images, navLinks: resolvedNavLinks, mangaKey: currentMangaKey, batchSize, isRetry, targetBatchIndex });
         const requestDelay = await state.get('requestDelay', 4000);
         const maxDim = await state.get('imageMaxDimension', 1024);
         const candidateKeys = (state.apiKeys && state.apiKeys.length > 0) ? [...state.apiKeys] : [null];
@@ -2944,18 +2514,18 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
         log.info('Background', `開始管線批次翻譯：共 ${images.length} 張，每批=${batchSize} 張，傳送尺寸=${maxDim}px (2D交錯加速: ${isHybrid ? `已啟用 [Key池=${candidateKeys.length}組 / 主: ${modelName} / 次: ${secondaryModelName}], 延遲: ${effectiveDelay}ms` : `關閉, 延遲: ${requestDelay}ms`})`);
 
-        let completedCount = 0;
+        let completedCount = durableJob.processedCount;
         let allBatchResults = [];
         let wasStopped = false;
         let wasAborted = false;
 
         // ── 5. 雙緩衝管線 (Double-Buffered Pipeline) 啟動：提前非同步預載第 1 批 ──
         let nextBatchPromise = (images.length > 0)
-            ? fetchAndResizeBatch(images.slice(0, batchSize), maxDim, sourceTabId)
+            ? fetchAndResizeBatch(images.slice(completedCount, completedCount + batchSize), maxDim, sourceTabId)
             : Promise.resolve([]);
 
         // 主迴圈：依 batchSize 切塊，流水線無縫處理
-        for (let i = 0; i < images.length; i += batchSize) {
+        for (let i = completedCount; i < images.length; i += batchSize) {
             // Kill-Switch 檢查
             if (resultTabId && typeof resultTabId === 'number') {
                 try {
@@ -3157,51 +2727,22 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 break;
             }
 
-            // 回傳本批結果給 UI
-            for (let j = 0; j < currentBatch.length; j++) {
-                const imgData = currentBatch[j];
-                const imgSrc = imgData.src || imgData;
+            const items = currentBatch.map((imgData, j) => {
                 const res = allPageResults[j];
-                completedCount++;
-
-                const currentBatchIdx = (targetBatchIndex !== null && targetBatchIndex !== undefined) 
-                    ? targetBatchIndex 
-                    : Math.floor(i / batchSize);
-                // 檢測本批次是否觸發了模型內容安全審查
-                const hasProhibitedInBatch = allPageResults.some(r => r?.isProhibited || (r?.error && (r.error.includes('SAFETY') || r.error.includes('BLOCKLIST') || r.error.includes('Prohibited') || r.error.includes('過濾器'))));
-
-                const isErr = !res || res.error || (res.results && res.results.length === 0 && hasProhibitedInBatch);
-                if (isErr) {
-                    const isFirstInBatch = (j === 0);
-                    const isItemProhibited = res?.isProhibited || (res?.error && (res.error.includes('SAFETY') || res.error.includes('BLOCKLIST') || res.error.includes('Prohibited') || res.error.includes('過濾器'))) || hasProhibitedInBatch;
-                    const errorMsg = res?.error || (isItemProhibited ? '觸發 Google AI 安全性過濾器 (Prohibited Content)，模型拒絕翻譯' : '翻譯失敗或無回應');
-
-                    broadcastStatus(`❌ 第 ${completedCount} 張翻譯失敗: ${errorMsg}`, 'error');
-                    chrome.tabs.sendMessage(resultTabId, {
-                        action: 'appendResult',
-                        data: { 
-                            image: imgSrc, 
-                            error: errorMsg,
-                            isProhibited: isItemProhibited,
-                            isBatchFirstProhibited: isFirstInBatch && isItemProhibited,
-                            batchIndex: currentBatchIdx,
-                            pageIndex: completedCount
-                        }
-                    }).catch(() => {});
-                } else {
-                    const actualModel = res.usedModelName || batchModel;
-                    await incrementDailyUsage(actualModel);
-                    allBatchResults.push(...(res.results || []));
-                    chrome.tabs.sendMessage(resultTabId, {
-                        action: 'appendResult',
-                        data: { 
-                            image: imgSrc, 
-                            results: res.results, 
-                            usedModelName: actualModel,
-                            batchIndex: currentBatchIdx,
-                            pageIndex: completedCount
-                        }
-                    }).catch(() => {});
+                const prohibited = Boolean(res?.isProhibited || /SAFETY|BLOCKLIST|Prohibited|過濾器/.test(res?.error || ''));
+                return { image: imgData.src || imgData, results: res?.results || [],
+                    ...(res?.error || !res ? { error: res?.error || '翻譯失敗或無回應' } : {}),
+                    isProhibited: prohibited, isBatchFirstProhibited: j === 0 && prohibited,
+                    usedModelName: res?.usedModelName || batchModel,
+                    batchIndex: targetBatchIndex ?? Math.floor(i / batchSize), pageIndex: i + j + 1 };
+            });
+            const committed = await mangaRecovery.commit(durableJob, i + currentBatch.length, items, () => !runSignal.aborted);
+            if (!committed) { wasStopped = true; break; }
+            completedCount = committed.processedCount;
+            for (const item of items) {
+                if (!item.error) {
+                    await incrementDailyUsage(item.usedModelName);
+                    allBatchResults.push(...item.results);
                 }
             }
 
@@ -3223,6 +2764,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         }
 
         if (!shouldCompleteMangaTranslation({ wasStopped, wasAborted, isStopping })) {
+            await mangaRecovery.status(durableJob, wasStopped ? 'stopped' : 'interrupted');
             const statusMessage = wasStopped ? '翻譯已停止' : '翻譯已中止（結果分頁已關閉）';
             broadcastStatus(`⏹️ ${statusMessage}`, 'warn');
             chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
@@ -3263,7 +2805,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             if (allBatchResults.length === 0) log.warn('Background', `[術語萃取-DEBUG] ⛔ 跳過萃取：allBatchResults 為空，翻譯結果可能格式錯誤。`);
         }
 
-        chrome.tabs.sendMessage(resultTabId, { action: 'batchComplete' }).catch(() => {});
+        await mangaRecovery.status(durableJob, 'completed');
         broadcastStatus(`✅ 全部 ${images.length} 張翻譯完成！請查看結果頁。`, 'success');
         // 廣播任務完成，讓 Sidepanel 恢復開始按鈕
         chrome.runtime.sendMessage({ action: 'TRANSLATION_DONE' }).catch(() => {});
@@ -3277,6 +2819,10 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 log.warn('Background', `[跨話連續追漫] 背景預翻下一話失敗: ${err.message}`);
             });
         }
+    } catch (err) {
+        if (durableJob) await mangaRecovery.status(durableJob, 'interrupted').catch(() => {});
+        chrome.tabs.sendMessage(resultTabId, { action: 'mangaRecoveryError', error: err.message }).catch(() => {});
+        throw err;
     } finally {
         cleanupTranslationJob();
         swKeepAlive.stop();
@@ -3410,6 +2956,9 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 // 3. 垃圾回收：當分頁關閉時，清除該分頁的小說模式狀態、進行中任務與相關 context
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  pendingMangaJobs.delete(tabId);
+  mangaRecovery.remove(tabId).catch(err => log.warn('Background', err.message));
+  if (activeTranslationJobs.has(tabId)) cancelMangaRun();
   // 清理記憶體中的翻譯中任務與保活計數
   if (activeTranslationJobs.has(tabId)) {
     const job = activeTranslationJobs.get(tabId);
@@ -3419,7 +2968,6 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     }
     activeTranslationJobs.delete(tabId);
   }
-  delete sessionStoryContext[tabId];
   delete lastNovelUrlByTab[tabId];
   novelCancellationRegistry.clear(tabId);
   removeNovelSessionState(tabId).catch(err => log.warn('Background', `清理分頁 ${tabId} session state 失敗:`, err));
@@ -3427,12 +2975,12 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
   // 清理與該分頁關聯的跨話預翻快取 (記憶體 + Session Checkpoint)
   for (const [chUrl, data] of pretranslatedChaptersMap.entries()) {
-    if (data.associatedResultTabId === tabId || data.sourceTabId === tabId) {
+    if (data.associatedResultTabId === tabId || data.consumedResultTabId === tabId || data.sourceTabId === tabId) {
       pretranslatedChaptersMap.delete(chUrl);
       log.info('Background', `[跨話連續追漫] 分頁 ${tabId} 已關閉，釋放預翻快取: ${chUrl}`);
     }
   }
-  if (activePretranslateJob && (activePretranslateJob.associatedResultTabId === tabId || activePretranslateJob.sourceTabId === tabId)) {
+  if (activePretranslateJob && (activePretranslateJob.associatedResultTabId === tabId || activePretranslateJob.consumedResultTabId === tabId || activePretranslateJob.sourceTabId === tabId)) {
     activePretranslateJob.isCancelled = true;
     activePretranslateJob = null;
   }
@@ -3529,6 +3077,14 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
 
         for (let attempt = 1; attempt <= 12; attempt++) {
             const res = await sendMessageWithRetry(tabId, { action: 'crawlImages' });
+            if (res?.error) {
+                log.warn('Background', `[AutoBatch] ${res.error}`);
+                chrome.tabs.sendMessage(tabId, {
+                    action: 'TRANSLATION_STATUS',
+                    payload: { msg: res.error, type: 'error', crawlBlocked: true }
+                }).catch(() => {});
+                return;
+            }
             const currentImages = res?.images || [];
             const count = currentImages.length;
 
@@ -3577,7 +3133,7 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
                     }, (res) => {
                         if (chrome.runtime.lastError) {
                             log.warn('Background', '[AutoBatch] 結果頁無回應，改開新頁');
-                            openNewResultPage(tabId, images, navLinks, mangaKey, mobile);
+                            openNewResultPage(tabId, images, navLinks, mangaKey, mobile).catch(err => log.error('Background', err.message));
                         } else {
                             startNewMangaBatchProcessing(tabId, resultTabId, images, navLinks)
                                 .catch(err => log.error('Background', `[AutoBatch] 接力翻譯啟動失敗: ${err.message}`));
@@ -3589,7 +3145,7 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
                 log.warn('Background', '[AutoBatch] 原有結果頁已關閉，開新頁');
             }
         }
-        openNewResultPage(tabId, images, navLinks, mangaKey, mobile);
+        openNewResultPage(tabId, images, navLinks, mangaKey, mobile).catch(err => log.error('Background', err.message));
     } catch (err) {
         log.error('Background', `[AutoBatch] 接力翻譯啟動失敗（8次重試均失敗）: ${err.message}`);
         // 廣播錯誤狀態給行動端（生肉網頁）的控制面板日誌區，方便實機除錯
@@ -3701,7 +3257,7 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
         'apiKeyLastModified',
         'settingsLastModified',
         'targetLanguage',
-        'mangaGlossaries',
+        'mangaGlossaries', 'mangaGlossaryTombstones',
         'modelName',
         'novelModelName',
         'customPrompt',
@@ -3728,4 +3284,3 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
         });
     }
 });
-

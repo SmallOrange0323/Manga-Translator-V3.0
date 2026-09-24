@@ -1,12 +1,12 @@
-# 漫譯 V3.1.10 (Manga Translator V3.1.10) 🎌
+# 漫譯 V3.1.11 (Manga Translator V3.1.11) 🎌
 
-![Version](https://img.shields.io/badge/version-3.1.10-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.1.11-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.1.10** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。  
-支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**2D 二維交錯輪替調度（Key × Model 負載分配）、核心狀態隊列鎖防護、跨話自動連續預翻、流暢無阻的集中閱讀、左右/上下對話框對照、4 大經典字型切換、全書劇本預讀與 Google Drive 雙向雲端同步**！
+**漫譯 V3.1.11** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
+支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**一條龍看圖翻譯、2D 二維交錯輪替調度（Key × Model 負載分配）、核心狀態隊列鎖防護、跨話自動連續預翻、集中閱讀、左右/上下對話框對照、4 大經典字型切換與 Google Drive 雙向雲端同步**。
 
 ---
 
@@ -44,13 +44,6 @@
 * **100vw 單頁精準橫向滑動 (Horizontal Scroll-Snap)**：專為行動裝置打造，左右滑動時精準逐頁切換，享受如翻閱實體漫畫般的絲滑手感。
 * **全域 Bottom Sheet 翻譯抽屜**：隨時由下往上滑出，直覺瀏覽當頁所有對話，橫向滑動卡片時抽屜內容自動同步切換。
 * **智慧懸浮按鈕 (FAB)**：滿版和風「漫」字按鈕，支援自由拖曳、邊緣智慧吸附記憶與閒置自動靠邊微縮。
-
----
-
-### 🧠 3. 雙階段工作流 (Two-Step Pipeline)
-* **全書劇本通讀 + 劇情暫存精翻**：
-  1. **階段一 (OCR 劇本提取)**：高速提取全書台詞並生成章節大綱與人物關係表。
-  2. **階段二 (Vision 視覺精翻)**：結合全書前情提要與上下文，深度潤色每一頁漫畫對白。
 
 ---
 

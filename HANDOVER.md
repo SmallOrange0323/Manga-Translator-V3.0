@@ -1,5 +1,7 @@
 # 漫譯 V3.1.10 (Manga Translator V3.1.10) 專案交接與進度備忘錄
 
+> 歷史交接紀錄（2026-09-06）。本文描述當時的開發狀態，其中雙階段劇本預讀、OCR 模型與本機 WASM OCR 路線已退役；目前支援的一條龍翻譯流程與設定請以 README 為準。
+
 **文件生成時間**：2026-09-06  
 **最新版本號**：`V3.1.10`  
 **遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  

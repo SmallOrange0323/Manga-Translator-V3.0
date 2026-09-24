@@ -1,5 +1,6 @@
 // src/content/manga-engine.js
 import { detectNavigationLinks } from '../utils/nav-detector.js';
+import { parseWnacgPageUrls } from '../utils/wnacg-parser.js';
 
 let overlay = null;
 let selectionBox = null;
@@ -294,6 +295,50 @@ export async function triggerLazyScroll() {
     } catch(e) {}
 }
 
+export async function crawlImagesForRequest() {
+    const page = new URL(window.location.href);
+    const album = /^\/photos-slide-aid-(\d+)\.html$/.exec(page.pathname);
+    if (/(^|\.)wnacg\.com$/i.test(page.hostname) && album) {
+        try {
+            const script = [...document.querySelectorAll('script[src]')].find(element => {
+                const url = new URL(element.src, page.href);
+                return url.origin === page.origin
+                    && url.pathname === `/photos-item-aid-${album[1]}.html`;
+            });
+            if (!script) throw new Error('找不到閱讀器圖片資料');
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 6000);
+            let source;
+            try {
+                const response = await fetch(script.src, {
+                    credentials: 'same-origin', cache: 'no-store', signal: controller.signal
+                });
+                if (!response.ok) throw new Error(`圖片資料讀取失敗 (${response.status})`);
+                source = await response.text();
+            } finally {
+                clearTimeout(timeout);
+            }
+            const urls = parseWnacgPageUrls(source, page.href);
+            const expectedPages = document.querySelectorAll('.v-slot[data-index]').length;
+            if (expectedPages && urls.length !== expectedPages) {
+                throw new Error(`圖片清單只有 ${urls.length}/${expectedPages} 頁`);
+            }
+            const firstVisible = document.querySelector('#slot-0 img')?.src;
+            if (firstVisible && urls[0] !== firstVisible) {
+                throw new Error('圖片清單與目前章節不一致');
+            }
+            return { images: urls.map(src => ({ src })), navLinks: detectNavigationLinks() };
+        } catch (error) {
+            return {
+                images: [], navLinks: detectNavigationLinks(),
+                error: `無法確認紳士漫畫整話圖片已載入：${error.message}。請重新整理章節後再試。`
+            };
+        }
+    }
+    await triggerLazyScroll();
+    return crawlImages();
+}
+
 export function crawlImages() {
     let mangaImages = [];
 
@@ -336,17 +381,29 @@ export function crawlImages() {
     });
 
     // ── 1. GigaViewer / Comic-y-ours / 生肉網站 JSON 媒體庫專屬自動解析 ──
+    const episodePageUrls = [];
+    let protectedCanvasEpisode = false;
+    let protectedPageCount = 0;
     try {
         const jsonEl = document.getElementById('episode-json') || document.querySelector('[data-episode-json]');
         if (jsonEl) {
             const rawJson = jsonEl.dataset.episodeJson || jsonEl.dataset.value || jsonEl.textContent || '';
             const data = JSON.parse(rawJson);
-            const pages = data?.readableProduct?.pageStructure?.pages || data?.pages || [];
+            const pageStructure = data?.readableProduct?.pageStructure;
+            protectedCanvasEpisode = !!pageStructure?.choJuGiga;
+            const pages = pageStructure?.pages || data?.pages || [];
+            if (protectedCanvasEpisode && Array.isArray(pages)) {
+                protectedPageCount = pages.filter(p => p?.type === 'main').length;
+            }
             pages.forEach(p => {
+                if (protectedCanvasEpisode || (pageStructure && p?.type !== 'main')) return;
                 const src = p.src || p.url || p.image_url;
                 if (src) {
                     try {
-                        const fullUrl = new URL(src, window.location.href).href;
+                        const parsed = new URL(src, window.location.href);
+                        if (!/^https?:$/.test(parsed.protocol)) return;
+                        const fullUrl = parsed.href;
+                        if (pageStructure) episodePageUrls.push(fullUrl);
                         mangaImages.push({ url: fullUrl, width: 800, height: 1200 });
                     } catch(e) {}
                 }
@@ -354,6 +411,15 @@ export function crawlImages() {
         }
     } catch(e) {
         console.warn('[Manga-Engine] GigaViewer JSON 提取失敗，回退至廣用掃描', e);
+    }
+
+    // The episode manifest lists the complete chapter; the live DOM may hold only
+    // a few canvases plus unrelated cover and recommendation images.
+    if (episodePageUrls.length && !protectedCanvasEpisode) {
+        return {
+            images: [...new Set(episodePageUrls)].map(src => ({ src })),
+            navLinks: detectNavigationLinks()
+        };
     }
 
     // ── 2. <script> 標籤漫畫圖片陣列全域正則掃描器 (生肉網站 Script 變數適配) ──
@@ -550,12 +616,21 @@ export function crawlImages() {
     // 智慧型去重與 Canvas 還原圖優先：若存在 Canvas 解密還原圖，優先採用 Canvas 避免被打亂的原始圖檔取代
     const canvasImages = candidatePool.filter(m => m.isCanvas);
     let finalImages = candidatePool;
-    if (canvasImages.length > 0) {
+    if (protectedCanvasEpisode) {
+        // Raw page URLs are scrambled; only the site's rendered canvases are readable.
+        finalImages = mangaImages.filter(m => m.isCanvas);
+    } else if (canvasImages.length > 0) {
         finalImages = canvasImages;
     }
 
     const uniqueUrls = [...new Set(finalImages.map(m => m.url))];
     const navLinks = detectNavigationLinks();
+    if (protectedCanvasEpisode && uniqueUrls.length < protectedPageCount) {
+        return {
+            images: [], navLinks,
+            error: `此網站只載入了 ${uniqueUrls.length}/${protectedPageCount} 頁可讀畫布，無法安全翻譯整話。`
+        };
+    }
     
     return {
         images: uniqueUrls.map(url => ({ src: url })),

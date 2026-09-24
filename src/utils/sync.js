@@ -1,6 +1,6 @@
 // src/utils/sync.js
 import { state } from './state.js';
-import { GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
+import { mergeRemoteGlossaries, getGlossarySnapshot } from '../background/glossary-manager.js';
 import { log } from './logger.js';
 import { SYNCABLE_SETTING_KEYS, sanitizeSyncableSettings, resolveApiKeySync } from './sync-policy.js';
 
@@ -296,39 +296,6 @@ async function updateSyncFile(token, fileId, contentData) {
 }
 
 /**
- * 合併術語清單
- * @param {Array} localTerms 
- * @param {Array} cloudTerms 
- */
-function mergeGlossaryTerms(localTerms = [], cloudTerms = []) {
-  const mergedMap = new Map();
-
-  // 1. 先放雲端的
-  cloudTerms.forEach(term => {
-    mergedMap.set(term.ori, term);
-  });
-
-  // 2. 本地的覆蓋或加入，比對 createdAt 或 source
-  localTerms.forEach(term => {
-    const existing = mergedMap.get(term.ori);
-    if (!existing) {
-      mergedMap.set(term.ori, term);
-    } else {
-      const localTime = term.createdAt || 0;
-      const cloudTime = existing.createdAt || 0;
-      // 使用者手動設定的優先於 AI 學習；同等級則以時間新者優先
-      if (term.source === 'user' && existing.source !== 'user') {
-        mergedMap.set(term.ori, term);
-      } else if (term.source === existing.source && localTime > cloudTime) {
-        mergedMap.set(term.ori, term);
-      }
-    }
-  });
-
-  return Array.from(mergedMap.values());
-}
-
-/**
  * 執行雙向資料同步（拉取、合併、上傳）
  * 雙軌獨立架構：
  * - 軌道 1：一般偏好設定（以 settingsLastModified 獨立消解衝突，嚴格白名單過濾）
@@ -339,15 +306,7 @@ function mergeGlossaryTerms(localTerms = [], cloudTerms = []) {
 export async function performBiDirectionalSync(token) {
   log.info('GoogleSync', '開始進行雙向資料同步 (雙軌衝突隔離架構)...');
   
-  // 1. 獲取本機所有相關資料
-  const localStore = await chrome.storage.local.get(null);
-  const localSettings = sanitizeSyncableSettings(localStore);
-  const localSettingsTime = localStore[SETTINGS_LAST_MODIFIED_KEY] || 0;
-  const localApiKey = localStore.apiKey || '';
-  const localApiKeyTime = localStore.apiKeyLastModified || 0;
-  const localGlossaries = localStore[GLOSSARY_STORAGE_KEY] || {};
-
-  // 2. 查詢雲端同步檔案
+  // 1. 查詢雲端同步檔案
   let fileId = await findSyncFile(token);
   let cloudData = null;
 
@@ -362,10 +321,15 @@ export async function performBiDirectionalSync(token) {
     }
   }
 
+  // Read local settings and API credentials only after the network wait.
+  // Edits made while downloading must participate in conflict resolution.
+  const localStore = await chrome.storage.local.get(null);
+  const localSettings = sanitizeSyncableSettings(localStore);
+  const localSettingsTime = Number(localStore[SETTINGS_LAST_MODIFIED_KEY]) || 0;
+  const localApiKey = localStore.apiKey || '';
+  const localApiKeyTime = Number(localStore.apiKeyLastModified) || 0;
   let finalSettings = { ...localSettings };
-  let finalGlossaries = { ...localGlossaries };
-  let settingsUpdated = false;
-  let glossariesUpdated = false;
+  let applyCloudSettings = false;
 
   // ── 軌道 1：一般偏好設定合併 (以 settingsLastModified 判定) ──
   if (cloudData) {
@@ -376,49 +340,19 @@ export async function performBiDirectionalSync(token) {
       log.info('GoogleSync', '雲端一般設定較新，將覆蓋本機設定');
       // 嚴格白名單過濾，絕不 spread 任意未知欄位或 apiKey
       finalSettings = sanitizeSyncableSettings(cloudData.settings || {});
-      settingsUpdated = true;
+      applyCloudSettings = true;
     } else if (localSettingsTime > cloudSettingsTime) {
       log.info('GoogleSync', '本機一般設定較新，雲端設定將被更新');
-      settingsUpdated = true;
     }
-
-    // ── 漫畫詞庫合併 (Glossaries) ──
-    const cloudGlossaries = cloudData.glossaries || {};
-    const allMangaKeys = new Set([
-      ...Object.keys(localGlossaries),
-      ...Object.keys(cloudGlossaries)
-    ]);
-
-    allMangaKeys.forEach(mangaKey => {
-      const localManga = localGlossaries[mangaKey];
-      const cloudManga = cloudGlossaries[mangaKey];
-
-      if (localManga && cloudManga) {
-        const mergedTerms = mergeGlossaryTerms(localManga.terms, cloudManga.terms);
-        const newerLastUsed = Math.max(localManga.lastUsed || 0, cloudManga.lastUsed || 0);
-        const displayName = (localManga.lastUsed || 0) >= (cloudManga.lastUsed || 0) 
-          ? (localManga.displayName || cloudManga.displayName)
-          : (cloudManga.displayName || localManga.displayName);
-
-        finalGlossaries[mangaKey] = {
-          displayName,
-          lastUsed: newerLastUsed,
-          terms: mergedTerms
-        };
-        glossariesUpdated = true;
-      } else if (cloudManga) {
-        finalGlossaries[mangaKey] = cloudManga;
-        glossariesUpdated = true;
-      } else if (localManga) {
-        finalGlossaries[mangaKey] = localManga;
-        glossariesUpdated = true;
-      }
-    });
 
   } else {
     log.info('GoogleSync', '未找到雲端同步檔案，將直接上傳本機資料建立雲端備份。');
-    settingsUpdated = true;
-    glossariesUpdated = true;
+  }
+
+  // Download can take seconds. Merge inside the glossary writer so it reads
+  // edits made during that wait instead of committing the initial snapshot.
+  if (cloudData) {
+    await mergeRemoteGlossaries(cloudData.glossaries || {}, cloudData.glossaryTombstones || {});
   }
 
   // ── 軌道 2：API Key 專屬安全雙軌合併 (以 apiKeyLastModified 獨立判定) ──
@@ -442,8 +376,11 @@ export async function performBiDirectionalSync(token) {
 
   // 寫入本機 Storage
   const updatePayload = {};
-  if (settingsUpdated) {
+  if (applyCloudSettings) {
     Object.assign(updatePayload, finalSettings);
+    updatePayload[SETTINGS_LAST_MODIFIED_KEY] = nextSettingsTime;
+  } else if (!localSettingsTime && nextSettingsTime) {
+    updatePayload[SETTINGS_LAST_MODIFIED_KEY] = nextSettingsTime;
   }
   if (apiKeyLocalUpdated) {
     updatePayload.apiKey = finalApiKey;
@@ -453,12 +390,11 @@ export async function performBiDirectionalSync(token) {
     updatePayload.apiKeyLastModified = finalApiKeyTime || now;
   }
 
-  updatePayload[GLOSSARY_STORAGE_KEY] = finalGlossaries;
-  updatePayload[SYNC_LAST_TIME_KEY] = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
-  updatePayload[SYNC_STATUS_KEY] = '已與雲端同步';
-  
-  await chrome.storage.local.set(updatePayload);
+  if (Object.keys(updatePayload).length) await chrome.storage.local.set(updatePayload);
   await state.refreshCache();
+
+  // Capture the latest committed glossary state immediately before upload.
+  const glossarySnapshot = await getGlossarySnapshot();
 
   // 寫入雲端檔案 (新版 Schema: 頂層 apiKey 與 apiKeyLastModified，settings 內絕不再含 apiKey)
   const syncPayload = {
@@ -466,7 +402,8 @@ export async function performBiDirectionalSync(token) {
     settingsLastModified: nextSettingsTime,
     apiKey: finalApiKey,
     apiKeyLastModified: finalApiKeyTime || now,
-    glossaries: finalGlossaries,
+    glossaries: glossarySnapshot.glossaries,
+    glossaryTombstones: glossarySnapshot.tombstones,
     lastSyncTime: now
   };
 
@@ -478,6 +415,9 @@ export async function performBiDirectionalSync(token) {
     log.info('GoogleSync', `新建雲端同步檔案成功！ID: ${fileId}`);
   }
 
+  const lastSyncTime = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  await chrome.storage.local.set({ [SYNC_LAST_TIME_KEY]: lastSyncTime, [SYNC_STATUS_KEY]: '已與雲端同步' });
+
   // 重新初始化 state 快取
   await state.init();
   
@@ -487,5 +427,5 @@ export async function performBiDirectionalSync(token) {
     payload: { mangaKey: null }
   }).catch(() => {});
 
-  return updatePayload[SYNC_LAST_TIME_KEY];
+  return lastSyncTime;
 }

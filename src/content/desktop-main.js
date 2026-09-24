@@ -1,6 +1,6 @@
 import { state } from '../utils/state.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
-import { toggleSelectionMode, crawlImages, triggerLazyScroll } from './manga-engine.js';
+import { toggleSelectionMode, crawlImagesForRequest } from './manga-engine.js';
 import { log } from '../utils/logger.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
 import { createNovelRehydrateController } from './novel-rehydrate-client.js';
@@ -18,6 +18,10 @@ export function initDesktopMode() {
 
   // 監聽背景訊息 (電腦版專屬)
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'TRANSLATION_STATUS' && request.payload?.crawlBlocked) {
+        alert(request.payload.msg);
+        return false;
+    }
     if (request.action === 'translateNovelPage') {
         log.info('Content-Desktop', '收到手動 translateNovelPage 訊息，使 Rehydrate 失效並啟動新翻譯');
         rehydrateController.onManualStart();
@@ -88,13 +92,13 @@ export function initDesktopMode() {
     }
 
     if (request.action === 'crawlImages') {
-        triggerLazyScroll().then(() => {
-            const results = crawlImages();
+        crawlImagesForRequest().then(results => {
             sendResponse({ 
                 images: results.images, 
-                navLinks: results.navLinks 
+                navLinks: results.navLinks,
+                error: results.error
             });
-        });
+        }).catch(error => sendResponse({ images: [], error: error.message }));
         return true; // 非同步響應
     }
 

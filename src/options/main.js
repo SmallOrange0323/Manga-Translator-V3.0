@@ -1,12 +1,29 @@
 // src/options/main.js
 import { state } from '../utils/state.js';
-import { loadGlossary, saveGlossary, deduplicateGlossaries, GLOSSARY_STORAGE_KEY } from '../background/glossary-manager.js';
+import { loadGlossary, getGlossarySnapshot } from '../background/glossary-manager.js';
 import * as Constants from '../utils/constants.js';
-import { getAuthToken, performBiDirectionalSync } from '../utils/sync.js';
+import { getAuthToken } from '../utils/sync.js';
 import { saveApiKeyPoolIfChanged } from '../utils/sync-policy.js';
+import { createGlossaryRefreshGate, createGlossaryTermRow, setGlossaryHeaderFields } from './glossary-dom.js';
 
 let currentSelectedMangaKey = null;
 const MAX_KEYS = 10;
+const glossaryRefreshGate = createGlossaryRefreshGate({
+    getSelectedKey: () => currentSelectedMangaKey,
+    isEditing: isGlossaryDetailBusy,
+    refresh: mangaKey => selectManga(mangaKey, { passive: true }).catch(console.error)
+});
+
+function sendBackgroundAction(action, payload = {}) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ action, ...payload }, response => {
+            const runtimeError = chrome.runtime.lastError;
+            if (runtimeError) return reject(new Error(runtimeError.message));
+            if (!response?.success) return reject(new Error(response?.error || '背景作業失敗'));
+            resolve(response);
+        });
+    });
+}
 
 /**
  * 初始化選項頁面邏輯
@@ -33,11 +50,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         // 5. 監聽背景訊息
         chrome.runtime.onMessage.addListener((request) => {
             if (request.action === 'GLOSSARY_UPDATED') {
-                if (currentSelectedMangaKey === request.payload.mangaKey) {
-                    selectManga(request.payload.mangaKey).catch(console.error);
-                }
+                glossaryRefreshGate.request(request.payload?.mangaKey);
                 refreshGlossaryList().catch(console.error);
             }
+        });
+
+        document.getElementById('mangaDetail')?.addEventListener('focusout', () => {
+            // Focus may move to another glossary input during the same event turn.
+            setTimeout(() => glossaryRefreshGate.flush(), 0);
         });
 
         console.log('[漫譯 V3.0] 選項頁面載入成功');
@@ -81,7 +101,6 @@ async function initGeneralSettings() {
         ['useFallbackModelOnBatchRetry', false],
         ['requestDelay', 4000],
         ['imageMaxDimension', 1024],
-        ['ocrModelName', 'gemma-4-26b-a4b-it'],
         ['enableTaiwanLocalization', true],
         ['autoPretranslateNextChapter', true],
         ['incognitoPrivacyMode', true],
@@ -92,7 +111,7 @@ async function initGeneralSettings() {
     for (const [id, def] of fields) {
         const el = document.getElementById(id);
         if (!el) continue;
-        const val = await state.get(id, def);
+        const val = id === 'translationMode' ? 'one-step' : await state.get(id, def);
         
         if (el.type === 'checkbox') {
             el.checked = !!val;
@@ -114,21 +133,6 @@ async function initGeneralSettings() {
     const promptEl = document.getElementById('customPrompt');
     if (promptEl) promptEl.value = customPrompt;
 
-    const ocrPrompt = await state.get('customPromptOcr', Constants.DEFAULT_PROMPT_OCR);
-    const ocrPromptEl = document.getElementById('customPromptOcr');
-    if (ocrPromptEl) ocrPromptEl.value = ocrPrompt;
-
-    // 模式切換動態連動：當選擇雙階段模式時，展開 OCR 模型選擇區
-    const translationModeSelect = document.getElementById('translationMode');
-    const ocrContainer = document.getElementById('ocrModelContainer');
-    if (translationModeSelect && ocrContainer) {
-        const updateOcrVisibility = () => {
-            ocrContainer.style.display = translationModeSelect.value === 'two-step' ? 'block' : 'none';
-        };
-        updateOcrVisibility();
-        translationModeSelect.addEventListener('change', updateOcrVisibility);
-    }
-
     // 雙模型 Hybrid 輪替加速：開關動態顯示次要模型選擇區
     const hybridToggle = document.getElementById('hybridModeEnabled');
     const hybridWrapper = document.getElementById('hybridSecondaryModelWrapper');
@@ -140,42 +144,6 @@ async function initGeneralSettings() {
         hybridToggle.addEventListener('change', updateHybridUI);
     }
 
-    // 初始化本機 WebGPU 狀態與清理快取按鈕
-    initLocalAiManager();
-}
-
-/**
- * 初始化本機 WebGPU 狀態偵測與快取管理
- */
-function initLocalAiManager() {
-    const gpuStatusText = document.getElementById('gpuStatusText');
-    const btnClearCache = document.getElementById('btnClearLocalAiCache');
-
-    // 向 Background 查詢 WebGPU 狀態
-    chrome.runtime.sendMessage({ action: 'GET_LOCAL_AI_STATUS' }, (resp) => {
-        if (resp && resp.success && resp.data && gpuStatusText) {
-            const { hasWebGPU, adapterName } = resp.data;
-            if (hasWebGPU) {
-                gpuStatusText.textContent = `🎮 本地模型: Manga-OCR (ViT) | 顯卡加速: ${adapterName}`;
-                gpuStatusText.style.color = '#155724';
-            } else {
-                gpuStatusText.textContent = `💻 本地模型: Manga-OCR (ViT) | 模式: CPU/WASM (${adapterName})`;
-                gpuStatusText.style.color = '#856404';
-            }
-        }
-    });
-
-    if (btnClearCache) {
-        btnClearCache.addEventListener('click', () => {
-            btnClearCache.disabled = true;
-            btnClearCache.textContent = '⏳ 清理中...';
-            chrome.runtime.sendMessage({ action: 'CLEAR_LOCAL_AI_CACHE' }, (res) => {
-                btnClearCache.disabled = false;
-                btnClearCache.textContent = '✅ 已清理';
-                setTimeout(() => { btnClearCache.textContent = '🧹 清理快取'; }, 2000);
-            });
-        });
-    }
 }
 
 /**
@@ -284,7 +252,7 @@ function setupEventHandlers() {
             
             // 只有在 API Key Pool 真正改變時才更新 apiKey 與 apiKeyLastModified
             await saveApiKeyPoolIfChanged(keys, state);
-            await state.set('translationMode', document.getElementById('translationMode').value);
+            await state.set('translationMode', 'one-step');
             await state.set('modelName', document.getElementById('modelName').value);
             await state.set('fallbackModelName', document.getElementById('fallbackModelName').value);
             await state.set('customPrompt', document.getElementById('customPrompt').value);
@@ -295,9 +263,6 @@ function setupEventHandlers() {
                 if (el) await state.set(id, parseInt(el.value));
             }
             
-            const ocrModelEl = document.getElementById('ocrModelName');
-            if(ocrModelEl) await state.set('ocrModelName', ocrModelEl.value);
-
             const fallbackRetry = document.getElementById('useFallbackModelOnBatchRetry');
             if(fallbackRetry) await state.set('useFallbackModelOnBatchRetry', fallbackRetry.checked);
 
@@ -340,13 +305,10 @@ function setupEventHandlers() {
     const resetPromptBtn = document.getElementById('resetPromptBtn');
     if (resetPromptBtn) {
         resetPromptBtn.onclick = () => {
-            const mode = document.getElementById('translationMode').value;
             const model = document.getElementById('modelName').value.toLowerCase();
             let prompt = Constants.DEFAULT_PROMPT_ONE_STEP;
             
-            if (mode === 'two-step') {
-                prompt = Constants.DEFAULT_PROMPT_TWO_STEP;
-            } else if (model.includes('gemma')) {
+            if (model.includes('gemma')) {
                 prompt = Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP;
             }
             
@@ -378,19 +340,11 @@ function setupEventHandlers() {
                 const data = await res.json();
                 const validModels = data.models.filter(m => m.supportedGenerationMethods.includes('generateContent'));
                 
-                ['modelName', 'fallbackModelName', 'novelModelName', 'ocrModelName'].forEach(id => {
+                ['modelName', 'fallbackModelName', 'novelModelName', 'secondaryModelName'].forEach(id => {
                     const el = document.getElementById(id);
                     if (!el) return;
                     const oldVal = el.value;
                     el.innerHTML = '';
-
-                    // 若為 OCR 模型選單，預先加入本地端 Manga-OCR 選項
-                    if (id === 'ocrModelName') {
-                        const localOpt = document.createElement('option');
-                        localOpt.value = 'local-wasm-ocr';
-                        localOpt.textContent = '💻 本地端 Manga-OCR (WebGPU 顯卡加速 / 日文漫畫專用 / 0 API 消耗)';
-                        el.appendChild(localOpt);
-                    }
 
                     validModels.forEach(m => {
                         const mid = m.name.replace('models/', '');
@@ -463,7 +417,7 @@ async function initGoogleSyncSettings() {
                 if (syncSpinner) syncSpinner.style.display = 'inline-block';
                 if (syncBtnText) syncBtnText.textContent = ' 同步中...';
 
-                const lastSyncStr = await performBiDirectionalSync(token);
+                const { lastSyncTime: lastSyncStr } = await sendBackgroundAction('syncGlossariesNow', { token });
                 
                 await state.set('enableCloudSync', true);
                 await state.set('googleSyncStatus', '已與雲端同步');
@@ -513,7 +467,7 @@ async function initGoogleSyncSettings() {
                 token = await getAuthToken(true);
             }
 
-            const lastSyncStr = await performBiDirectionalSync(token);
+            const { lastSyncTime: lastSyncStr } = await sendBackgroundAction('syncGlossariesNow', { token });
             
             // 自動確保開關開啟
             syncEnabledEl.checked = true;
@@ -554,17 +508,7 @@ async function refreshGlossaryList() {
     if (!mangaListEl) return;
 
     try {
-        const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        let glossaries = data[GLOSSARY_STORAGE_KEY] || {};
-        
-        // 自動執行全局去重合併
-        const deduplicated = deduplicateGlossaries(glossaries);
-        if (Object.keys(deduplicated).length !== Object.keys(glossaries).length) {
-            glossaries = deduplicated;
-            chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: glossaries }).catch(() => {});
-        } else {
-            glossaries = deduplicated;
-        }
+        const { glossaries = {} } = await getGlossarySnapshot();
 
         const keys = Object.keys(glossaries).sort((a, b) => (glossaries[b].lastUsed || 0) - (glossaries[a].lastUsed || 0));
 
@@ -596,11 +540,15 @@ async function refreshGlossaryList() {
         });
 
     } catch (e) {
-        mangaListEl.innerHTML = `<div class="empty-state">載入失敗: ${e.message}</div>`;
+        mangaListEl.replaceChildren();
+        const errorEl = document.createElement('div');
+        errorEl.className = 'empty-state';
+        errorEl.textContent = `載入失敗: ${e.message}`;
+        mangaListEl.appendChild(errorEl);
     }
 }
 
-async function selectManga(mangaKey) {
+async function selectManga(mangaKey, { passive = false } = {}) {
     currentSelectedMangaKey = mangaKey;
     document.querySelectorAll('.manga-item').forEach(el => {
         el.classList.toggle('active', el.dataset.key === mangaKey);
@@ -610,7 +558,22 @@ async function selectManga(mangaKey) {
     if (!detailEl) return;
 
     const entry = await loadGlossary(mangaKey);
+    if (mangaKey !== currentSelectedMangaKey) return;
+    if (passive && glossaryRefreshGate.isBlocked()) {
+        glossaryRefreshGate.request(mangaKey);
+        return;
+    }
+    if (!entry) {
+        detailEl.textContent = '找不到此作品詞庫';
+        return;
+    }
     renderGlossaryDetail(mangaKey, entry);
+}
+
+function isGlossaryDetailBusy() {
+    const detail = document.getElementById('mangaDetail');
+    const active = document.activeElement;
+    return !!(detail?.contains(active) && active?.matches('input[type="text"], textarea'));
 }
 
 function renderGlossaryDetail(mangaKey, entry) {
@@ -620,9 +583,9 @@ function renderGlossaryDetail(mangaKey, entry) {
     detailEl.innerHTML = `
         <div class="detail-header">
             <div class="manga-title-edit-container">
-                <input type="text" id="mangaDisplayNameInput" class="manga-title-edit" value="${entry.displayName || mangaKey}" title="點擊更改作品顯示名稱">
+                <input type="text" id="mangaDisplayNameInput" class="manga-title-edit" title="點擊更改作品顯示名稱">
             </div>
-            <div class="meta-info">標識碼: <code>${mangaKey}</code> | 累積術語: ${termCount} / 500</div>
+            <div class="meta-info">標識碼: <code id="mangaKeyText"></code> | 累積術語: <span id="termCountText"></span> / 500</div>
             <div id="ai-loader-text" class="ai-loader-text" style="display:none; color: #4CAF50; font-weight:bold; margin-top:8px;">
                 <span class="ai-loader"></span>背景 AI 正在萃取新術語...
             </div>
@@ -650,17 +613,27 @@ function renderGlossaryDetail(mangaKey, entry) {
         </div>
     `;
 
+    setGlossaryHeaderFields({
+        nameInput: document.getElementById('mangaDisplayNameInput'),
+        keyText: document.getElementById('mangaKeyText'),
+        countText: document.getElementById('termCountText')
+    }, mangaKey, entry, termCount);
+
     // 名稱編輯功能
     const nameInput = document.getElementById('mangaDisplayNameInput');
     nameInput?.addEventListener('change', async () => {
         const newName = nameInput.value.trim();
         if (newName && newName !== entry.displayName) {
-            const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-            const all = data[GLOSSARY_STORAGE_KEY] || {};
-            if(all[mangaKey]) {
-                all[mangaKey].displayName = newName;
-                await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-                refreshGlossaryList();
+            const finishWrite = glossaryRefreshGate.beginWrite();
+            try {
+                await sendBackgroundAction('updateGlossaryDisplayName', { mangaKey, newDisplayName: newName });
+                entry.displayName = newName;
+                await refreshGlossaryList();
+            } catch (error) {
+                nameInput.value = entry.displayName || mangaKey;
+                alert('更名失敗: ' + error.message);
+            } finally {
+                finishWrite();
             }
         }
     });
@@ -670,20 +643,7 @@ function renderGlossaryDetail(mangaKey, entry) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty-state">此作品尚無術語</td></tr>';
     } else {
         entry.terms.forEach((term) => {
-            const tr = document.createElement('tr');
-            const isUser = term.source === 'user';
-            tr.innerHTML = `
-                <td><input type="checkbox" class="term-checkbox" data-ori="${term.ori}"></td>
-                <td><input type="text" class="term-input" data-field="ori" value="${term.ori}" data-old-ori="${term.ori}"></td>
-                <td><input type="text" class="term-input" data-field="trans" value="${term.trans}"></td>
-                <td>
-                    <div class="action-btns">
-                        <span class="badge ${isUser ? 'badge-user' : 'badge-ai'}" title="${isUser ? '使用者手動修改' : 'AI 自動學習'}">${isUser ? '🔒' : '🤖'}</span>
-                        <span class="save-tick" style="display:none; color:green; font-weight:bold; font-size:12px;">✅ 儲存</span>
-                        <button class="btn-small btn-danger delete-term-btn">✕</button>
-                    </div>
-                </td>
-            `;
+            const tr = createGlossaryTermRow(term);
 
             const oriInput = tr.querySelector('[data-field="ori"]');
             const transInput = tr.querySelector('[data-field="trans"]');
@@ -695,25 +655,25 @@ function renderGlossaryDetail(mangaKey, entry) {
                 if (!newOri || !newTrans) return;
 
                 if (newOri !== oldOri || newTrans !== term.trans) {
-                    const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-                    const all = data[GLOSSARY_STORAGE_KEY] || {};
-                    if(all[mangaKey]) {
-                        const t = all[mangaKey].terms.find(x => x.ori === oldOri);
-                        if(t) {
-                            t.ori = newOri;
-                            t.trans = newTrans;
-                            t.source = 'user';
-                            await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-                            
-                            oriInput.dataset.oldOri = newOri;
-                            const badge = tr.querySelector('.badge');
-                            badge.className = 'badge badge-user';
-                            badge.textContent = '🔒';
-                            
-                            const tick = tr.querySelector('.save-tick');
-                            tick.style.display = 'inline-block';
-                            setTimeout(()=> tick.style.display = 'none', 1500);
-                        }
+                    const finishWrite = glossaryRefreshGate.beginWrite();
+                    try {
+                        await sendBackgroundAction('upsertGlossaryTerm', {
+                            mangaKey, term: { ori: newOri, trans: newTrans }, oldOri
+                        });
+                        oriInput.dataset.oldOri = newOri;
+                        tr.querySelector('.term-checkbox').dataset.ori = newOri;
+                        term.ori = newOri;
+                        term.trans = newTrans;
+                        const badge = tr.querySelector('.badge');
+                        badge.className = 'badge badge-user';
+                        badge.textContent = '🔒';
+                        const tick = tr.querySelector('.save-tick');
+                        tick.style.display = 'inline-block';
+                        setTimeout(() => { tick.style.display = 'none'; }, 1500);
+                    } catch (error) {
+                        alert('儲存術語失敗: ' + error.message);
+                    } finally {
+                        finishWrite();
                     }
                 }
             };
@@ -722,12 +682,11 @@ function renderGlossaryDetail(mangaKey, entry) {
 
             tr.querySelector('.delete-term-btn').onclick = async () => {
                 if(!confirm(`確定刪除術語 '${term.ori}' ?`)) return;
-                const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-                const all = data[GLOSSARY_STORAGE_KEY] || {};
-                if(all[mangaKey]) {
-                    all[mangaKey].terms = all[mangaKey].terms.filter(x => x.ori !== term.ori);
-                    await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-                    selectManga(mangaKey);
+                try {
+                    await sendBackgroundAction('deleteGlossaryTerm', { mangaKey, ori: oriInput.dataset.oldOri });
+                    await selectManga(mangaKey);
+                } catch (error) {
+                    alert('刪除術語失敗: ' + error.message);
                 }
             };
             
@@ -769,18 +728,13 @@ function renderGlossaryDetail(mangaKey, entry) {
             
             if (!confirm(`確定要刪除選取的 ${orisToDelete.length} 筆術語嗎？`)) return;
             
-            chrome.runtime.sendMessage({
-                action: 'deleteMultipleGlossaryTerms',
-                mangaKey: mangaKey,
-                oris: orisToDelete
-            }, (response) => {
-                if (response && response.success) {
-                    alert(`成功刪除 ${response.deletedCount} 筆術語！`);
-                    selectManga(mangaKey);
-                } else {
-                    alert('刪除失敗: ' + (response?.error || '未知錯誤'));
-                }
-            });
+            try {
+                const response = await sendBackgroundAction('deleteMultipleGlossaryTerms', { mangaKey, oris: orisToDelete });
+                alert(`成功刪除 ${response.deletedCount} 筆術語！`);
+                await selectManga(mangaKey);
+            } catch (error) {
+                alert('刪除失敗: ' + error.message);
+            }
         };
     }
 
@@ -803,13 +757,11 @@ function renderGlossaryDetail(mangaKey, entry) {
         const trans = prompt('請輸入「中文譯名」:');
         if(!trans) return;
 
-        const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        const all = data[GLOSSARY_STORAGE_KEY] || {};
-        if(all[mangaKey]) {
-            if(all[mangaKey].terms.some(t => t.ori === ori)) return alert('該原文已存在！');
-            all[mangaKey].terms.push({ ori: ori.trim(), trans: trans.trim(), source: 'user', createdAt: Date.now() });
-            await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-            selectManga(mangaKey);
+        try {
+            await sendBackgroundAction('upsertGlossaryTerm', { mangaKey, term: { ori: ori.trim(), trans: trans.trim() } });
+            await selectManga(mangaKey);
+        } catch (error) {
+            alert('新增術語失敗: ' + error.message);
         }
     };
 
@@ -855,11 +807,13 @@ function renderGlossaryDetail(mangaKey, entry) {
     // 刪除整部
     document.getElementById('deleteGlossaryBtn').onclick = async () => {
         if(!confirm(`確定要刪除「${entry.displayName || mangaKey}」詞庫嗎？此操作無法還原！`)) return;
-        const data = await chrome.storage.local.get([GLOSSARY_STORAGE_KEY]);
-        const all = data[GLOSSARY_STORAGE_KEY] || {};
-        delete all[mangaKey];
-        await chrome.storage.local.set({ [GLOSSARY_STORAGE_KEY]: all });
-        detailEl.innerHTML = '<div class="empty-state">請由左側選擇作品</div>';
-        refreshGlossaryList();
+        try {
+            await sendBackgroundAction('deleteGlossary', { mangaKey });
+            currentSelectedMangaKey = null;
+            detailEl.innerHTML = '<div class="empty-state">請由左側選擇作品</div>';
+            await refreshGlossaryList();
+        } catch (error) {
+            alert('刪除詞庫失敗: ' + error.message);
+        }
     };
 }

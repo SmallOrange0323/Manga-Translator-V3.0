@@ -1,6 +1,8 @@
 import { LOADING_GIF_FILENAME, RUNNING_ANIMS } from '../utils/constants.js';
 
 let translatedData = [];
+let lastMangaRevision = -1;
+let activeMangaJob = null;
 const container = document.getElementById('results-container');
 let currentTheme = 'umamusume';
 let sourceTabId = null;
@@ -151,40 +153,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // 恢復重載前保存的翻譯資料 (用於行動版/電腦版切換)
-    const savedDataStr = sessionStorage.getItem('mt_translated_data');
-    if (savedDataStr) {
-        try {
-            const savedData = JSON.parse(savedDataStr);
-            if (savedData && savedData.length > 0) {
-                translatedData = savedData;
-                
-                if (sessionStorage.getItem('mt_translation_complete') === '1') {
-                    document.getElementById('loading-overlay').classList.add('hidden');
-                } else {
-                    const progText = sessionStorage.getItem('mt_progress_text');
-                    if (progText) document.getElementById('progress-text').innerText = progText;
-                }
-                
-                savedData.forEach((item, idx) => {
-                    const batchIdx = item.batchIndex !== undefined ? item.batchIndex : Math.floor(idx / 10);
-                    const targetGrid = getOrCreateBatchSection(batchIdx);
-                    const card = buildCard(item, idx);
-                    targetGrid.appendChild(card);
-                    if (window._bindMobileCard) window._bindMobileCard(card);
-                });
-                
-                if (sessionStorage.getItem('mt_translation_complete') === '1') {
-                    updateRetryAllBtn();
-                }
-            }
-        } catch (e) {
-            console.warn("Failed to restore translated data:", e);
-        }
-        sessionStorage.removeItem('mt_translated_data');
-        sessionStorage.removeItem('mt_translation_complete');
-        sessionStorage.removeItem('mt_progress_text');
-    }
+    sessionStorage.removeItem('mt_translated_data');
+    sessionStorage.removeItem('mt_translation_complete');
+    sessionStorage.removeItem('mt_progress_text');
 
     // 掛載匯出功能
     document.getElementById('export-html-btn')?.addEventListener('click', saveAsHTML);
@@ -347,7 +318,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 通知背景結果分頁已載入完成
-    chrome.runtime.sendMessage({ action: "resultPageReady" }).catch(() => {});
+    chrome.runtime.sendMessage({ action: "resultPageReady" }).then(response => {
+        if (response?.job) applyMangaSnapshot(response.job);
+        else if (response?.error) showRecoveryError(response.error);
+    }).catch(err => showRecoveryError(err.message));
 
     // 初始化語彙庫 Modal
     setupGlossaryModal();
@@ -848,7 +822,8 @@ function updateNavUI(navLinks) {
             }
         }, (response) => {
             if (response && response.success && response.data) {
-                renderPretranslatedChapter(response.data);
+                if (response.job) applyMangaSnapshot(response.job);
+                else renderPretranslatedChapter(response.data);
             } else {
                 // 快取未命中：退回生肉分頁跳轉
                 sendNavigateMessageWithRetry({
@@ -1153,7 +1128,84 @@ function getOrCreateBatchSection(batchIndex) {
     return section.querySelector('.mt-batch-grid');
 }
 
+
+function showRecoveryError(message) {
+    document.getElementById('loading-overlay')?.classList.add('hidden');
+    let notice = document.getElementById('manga-recovery-notice');
+    if (!notice) {
+        notice = document.createElement('div');
+        notice.id = 'manga-recovery-notice';
+        notice.setAttribute('role', 'status');
+        notice.style.cssText = 'padding:16px;margin:16px;border:1px solid #d97706;border-radius:8px;';
+        container.before(notice);
+    }
+    notice.textContent = message;
+    return notice;
+}
+
+function applyMangaSnapshot(job) {
+    if (!job || job.revision <= lastMangaRevision) return;
+    lastMangaRevision = job.revision;
+    activeMangaJob = job;
+    sourceTabId = job.sourceTabId || sourceTabId;
+    activeMangaKey = job.mangaKey || activeMangaKey;
+    translatedData = job.results.map(item => {
+        const existing = translatedData.find(row => row.pageIndex === item.pageIndex);
+        // Keep temporary image pixels in this live page only.
+        return !item.image && existing?.image && existing.pageIndex === item.pageIndex && job.id === existing._jobId
+            ? { ...item, image: existing.image, _jobId: job.id } : { ...item, _jobId: job.id };
+    });
+    container.innerHTML = '';
+    translatedData.forEach((item, index) => {
+        const card = buildCard(item, index);
+        getOrCreateBatchSection(item.batchIndex || 0).appendChild(card);
+        if (window._bindMobileCard) window._bindMobileCard(card);
+    });
+    placeholdersCreated = true;
+    if (job.navLinks) updateNavUI(job.navLinks);
+    document.getElementById('progress-text').innerText = job.processedCount + ' / ' + job.images.length;
+    document.getElementById('loading-overlay').classList.toggle('hidden', job.status !== 'running');
+    document.getElementById('manga-recovery-notice')?.remove();
+    const missingImages = job.images.slice(job.processedCount).some(src => !src);
+    if (job.status === 'interrupted' || job.status === 'stopped') {
+        const notice = showRecoveryError(missingImages
+            ? '此任務含暫存圖片，無法從中斷處繼續。請回原網頁重新擷取未完成的圖片。'
+            : (job.status === 'stopped' ? '翻譯已停止。' : '背景服務曾中斷，已恢復保存的譯文。') + ' 按「繼續翻譯」才會發出新的翻譯請求。');
+        if (!missingImages) {
+            const button = document.createElement('button');
+            button.textContent = '繼續翻譯';
+            button.addEventListener('click', async () => {
+                button.disabled = true;
+                try {
+                    const response = await chrome.runtime.sendMessage({ action: 'RESUME_MANGA_JOB', jobId: activeMangaJob.id });
+                    if (!response?.success) throw new Error(response?.error || '無法繼續任務');
+                } catch (err) { showRecoveryError(err.message); }
+            });
+            notice.appendChild(button);
+        }
+    } else if (job.status === 'source-changed') {
+        showRecoveryError('來源章節已變更。已保存的譯文仍可閱讀；請從原網頁開始新的翻譯。');
+    } else if (job.results.some(item => !item.image)) {
+        const notice = document.createElement('p');
+        notice.id = 'manga-recovery-notice';
+        notice.textContent = '部分暫存圖片已失效，已保存的譯文仍可閱讀；圖片需回原網頁重新擷取。';
+        container.before(notice);
+    }
+    resetNavButtons();
+    updateRetryAllBtn();
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'mangaSnapshot') {
+        applyMangaSnapshot(request.job);
+        sendResponse({ status: 'success' });
+        return false;
+    }
+    if (request.action === 'mangaRecoveryError') {
+        showRecoveryError(request.error);
+        sendResponse({ status: 'success' });
+        return false;
+    }
     if (request.action === "appendResult") {
         const imgUrl = request.data?.image || '';
         const batchIdx = request.data?.batchIndex !== undefined ? request.data.batchIndex : 0;
@@ -1168,6 +1220,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (existingErrorCard) {
             // 覆蓋模式：原地替換舊卡片
             const existingIndex = existingErrorCard.dataset.index;
+            translatedData[parseInt(existingIndex) || 0] = request.data;
             realCard = buildCard(request.data, parseInt(existingIndex) || 0);
             existingErrorCard.replaceWith(realCard);
         } else {
@@ -1351,7 +1404,7 @@ function buildCard(item, index) {
                     此批次漫畫畫面或台詞觸發了 Google AI 安全性過濾器 (SAFETY / BLOCKLIST)，模型直接拒絕翻譯本批內容。
                 </div>
                 <div class="prohibited-tip">
-                    💡 <strong>解鎖建議：</strong>您可點擊下方按鈕重新嘗試單張翻譯，或在選項頁開啟「📖 雙階段劇本預讀模式」（先抽文字再翻譯）即可 100% 避開圖片視覺審查！
+                    💡 <strong>處理建議：</strong>您可重新嘗試單張翻譯，或手動校對原文後使用文字翻譯。模型仍可能拒絕部分內容。
                 </div>
             `;
             errorGroup.appendChild(prohibitedBanner);

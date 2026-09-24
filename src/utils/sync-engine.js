@@ -14,7 +14,8 @@ import { getAuthToken, performBiDirectionalSync } from './sync.js';
 class SyncEngine {
   constructor() {
     this.syncDebounceTimer = null;
-    this.isSyncing = false;
+    this.activeSync = null;
+    this.dirty = false;
   }
 
   /**
@@ -22,6 +23,10 @@ class SyncEngine {
    * @param {Object} changes 本次變更的 storage 內容
    */
   triggerSync(changes = {}) {
+    if (this.activeSync) {
+      this.dirty = true;
+      return;
+    }
     if (this.syncDebounceTimer) {
       clearTimeout(this.syncDebounceTimer);
     }
@@ -39,20 +44,12 @@ class SyncEngine {
    * 執行背景自動同步
    */
   async syncUp() {
-    if (this.isSyncing) {
-      log.info('SyncEngine', '同步任務正在進行中，跳過本次同步');
-      return;
-    }
-
     // 檢查是否啟用了雲端同步
     const enableCloudSync = await state.get('enableCloudSync', false);
     if (!enableCloudSync) {
       log.info('SyncEngine', '使用者未啟用雲端同步，跳過背景上傳');
       return;
     }
-
-    this.isSyncing = true;
-    log.info('SyncEngine', '背景防抖觸發：開始執行 Google Drive 雙向即時同步...');
 
     try {
       // 1. 嘗試靜默獲取 Token (不彈出授權視窗)
@@ -65,14 +62,7 @@ class SyncEngine {
       }
 
       // 2. 執行真實的雙向拉取與上傳同步
-      const lastSyncStr = await performBiDirectionalSync(token);
-      log.info('SyncEngine', `背景自動即時同步成功！同步時間: ${lastSyncStr}`);
-
-      // 廣播最新狀態至 UI
-      chrome.runtime.sendMessage({
-        action: 'CLOUD_SYNC_STATUS',
-        payload: { success: true, timestamp: Date.now(), lastSyncTime: lastSyncStr }
-      }).catch(() => {});
+      return await this.syncNow(token);
 
     } catch (err) {
       log.error('SyncEngine', '背景執行自動雲端同步時發生異常:', err.message);
@@ -82,8 +72,33 @@ class SyncEngine {
         action: 'CLOUD_SYNC_STATUS',
         payload: { success: false, error: err.message }
       }).catch(() => {});
+    }
+  }
+
+  // Manual and background sync share one in-flight operation. Storage changes
+  // observed while the upload is pending request another full round trip.
+  async syncNow(token) {
+    if (this.activeSync) {
+      this.dirty = true;
+      return this.activeSync;
+    }
+    this.activeSync = (async () => {
+      let lastSyncStr;
+      do {
+        this.dirty = false;
+        lastSyncStr = await performBiDirectionalSync(token);
+      } while (this.dirty);
+      log.info('SyncEngine', `同步成功！同步時間: ${lastSyncStr}`);
+      chrome.runtime.sendMessage({
+        action: 'CLOUD_SYNC_STATUS',
+        payload: { success: true, timestamp: Date.now(), lastSyncTime: lastSyncStr }
+      }).catch(() => {});
+      return lastSyncStr;
+    })();
+    try {
+      return await this.activeSync;
     } finally {
-      this.isSyncing = false;
+      this.activeSync = null;
     }
   }
 }

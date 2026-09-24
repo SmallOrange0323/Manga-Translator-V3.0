@@ -175,6 +175,20 @@ describe('Google Drive Sync Policy & API Key Conflict Isolation Tests', () => {
             expect(sanitized).not.toHaveProperty('novelQueue');
             expect(sanitized).not.toHaveProperty('randomUnknownSecret');
         });
+
+        it('retires two-step settings from incoming cloud data', () => {
+            const sanitized = sanitizeSyncableSettings({
+                translationMode: 'two-step',
+                ocrModelName: 'local-wasm-ocr',
+                customPromptOcr: 'legacy',
+                customPrompt: 'current prompt'
+            });
+
+            expect(sanitized.translationMode).toBe('one-step');
+            expect(sanitized.customPrompt).toBe('current prompt');
+            expect(sanitized).not.toHaveProperty('ocrModelName');
+            expect(sanitized).not.toHaveProperty('customPromptOcr');
+        });
     });
 
     describe('Test 9: Malformed Cloud API Key 安全防禦', () => {

@@ -1,6 +1,6 @@
 import { log } from '../utils/logger.js';
 import { state } from '../utils/state.js';
-import { crawlImages, triggerLazyScroll } from './manga-engine.js';
+import { crawlImagesForRequest } from './manga-engine.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
 import { extractMangaMetadata } from './n-e-extractor.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
@@ -270,18 +270,24 @@ export function initMobileMode() {
   const toggleDrawer = (active) => {
     overlay.classList.toggle('active', active);
     drawer.classList.toggle('active', active);
-    if (active) scanImages();
+    if (active) scanImages().catch(error => {
+      drawer.querySelector('#status-text').textContent = error.message;
+    });
   };
 
-  const scanImages = () => {
+  const scanImages = async () => {
     const statusText = drawer.querySelector('#status-text');
     const grid = drawer.querySelector('#drawer-grid');
     statusText.textContent = '正在掃描圖片...';
     grid.innerHTML = '';
     
-    const results = crawlImages();
+    const results = await crawlImagesForRequest();
     const images = results.images;
     const navLinks = results.navLinks;
+    if (results.error) {
+        statusText.textContent = results.error;
+        return;
+    }
     foundImages = images;
     foundNavLinks = navLinks;
     
@@ -645,13 +651,13 @@ export function initMobileMode() {
     }
 
     if (request.action === 'crawlImages') {
-        triggerLazyScroll().then(() => {
-            const results = crawlImages();
+        crawlImagesForRequest().then(results => {
             sendResponse({ 
                 images: results.images, 
-                navLinks: results.navLinks 
+                navLinks: results.navLinks,
+                error: results.error
             });
-        });
+        }).catch(error => sendResponse({ images: [], error: error.message }));
         return true; // 非同步
     }
 
