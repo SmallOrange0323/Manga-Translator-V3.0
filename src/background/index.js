@@ -1,5 +1,6 @@
 import { createMangaRecovery } from './manga-recovery.js';
 import { parseChapterHtml } from '../utils/chapter-parser.js';
+import { crawlJestfulChapterInTab } from './jestful-prefetch.js';
 import { state } from '../utils/state.js';
 import * as Constants from '../utils/constants.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
@@ -331,14 +332,14 @@ async function restorePretranslationCheckpoints() {
                 }
             }
 
-            if (isValidTab) {
+            if (isValidTab && (!isJestfulChapterUrl(latestInterrupted.url) || latestInterrupted.images.length >= 2)) {
                 // 來源分頁驗證成功後，才寫入記憶體 Map 並安全恢復
                 pretranslatedChaptersMap.set(latestInterrupted.url, latestInterrupted);
                 log.info('Background', `[跨話連續追漫] 正在從 Service Worker 重啟中恢復預翻: ${latestInterrupted.url} (已完成 ${latestInterrupted.processedCount}/${latestInterrupted.images.length} 頁)`);
                 startPretranslateNextChapter(latestInterrupted.url, latestInterrupted.sourceTabId, latestInterrupted.associatedResultTabId)
                     .catch(err => log.warn('Background', `恢復預翻失敗: ${err.message}`));
             } else {
-                log.info('Background', `[跨話連續追漫] 來源分頁 ${latestInterrupted.sourceTabId} 已不存在，清理 checkpoint: ${latestInterrupted.url}`);
+                log.info('Background', `[跨話連續追漫] 來源分頁不存在或預翻圖片不足，清理 checkpoint: ${latestInterrupted.url}`);
                 await removePretranslationCheckpoint(latestInterrupted.url);
             }
         }
@@ -1228,7 +1229,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           } else {
               sendResponse({ exists: false });
           }
-      })();
+      })().catch(err => sendResponse({ exists: false, error: err.message }));
       return true; // 保持異步通道
   }
 
@@ -1992,6 +1993,18 @@ async function resizeImageBlobToBase64(blob, maxDim) {
 const pretranslatedChaptersMap = new Map(); // key: chapterUrl, value: { url, images, results, navLinks, usedModelName, isDone, inProgress, error, associatedResultTabId, sourceTabId }
 let activePretranslateJob = null;
 const PRETRANS_STORAGE_KEY = 'mt_pretranslated_chapters_cache';
+const JESTFUL_PRETRANS_STORAGE_KEY = 'mt_jestful_pretranslated_chapters_cache_v2';
+
+function isJestfulChapterUrl(value) {
+    try {
+        const url = new URL(value);
+        return /(^|\.)jestful\.net$/i.test(url.hostname) && /-chapter-[\d.]+\.html$/i.test(url.pathname);
+    } catch (_) { return false; }
+}
+
+function pretranslationStorageKey(url) {
+    return isJestfulChapterUrl(url) ? JESTFUL_PRETRANS_STORAGE_KEY : PRETRANS_STORAGE_KEY;
+}
 
 async function savePretranslatedChapterToStorage(url, data) {
     try {
@@ -1999,7 +2012,7 @@ async function savePretranslatedChapterToStorage(url, data) {
         const snapshot = createPretranslationSnapshot(data);
         if (!snapshot) return;
         snapshot.inProgress = false;
-        await state.update(PRETRANS_STORAGE_KEY, (current = {}) => {
+        await state.update(pretranslationStorageKey(url), (current = {}) => {
             const stored = { ...current, [url]: snapshot };
             while (Object.keys(stored).length > 2) delete stored[Object.keys(stored)[0]];
             return stored;
@@ -2011,7 +2024,7 @@ async function savePretranslatedChapterToStorage(url, data) {
 
 async function getPretranslatedChapterFromStorage(url) {
     try {
-        const stored = await state.get(PRETRANS_STORAGE_KEY, {});
+        const stored = await state.get(pretranslationStorageKey(url), {});
         return stored[url] || null;
     } catch (_) {
         return null;
@@ -2021,8 +2034,12 @@ async function getPretranslatedChapterFromStorage(url) {
 /**
  * crawlChapterImagesAndNav — 在背景靜默抓取下一話 HTML，並提取漫畫圖片清單與下下一話導航連結
  */
-async function crawlChapterImagesAndNav(chapterUrl) {
+async function crawlChapterImagesAndNav(chapterUrl, sourceTabId) {
     try {
+        if (isJestfulChapterUrl(chapterUrl)) {
+            if (!sourceTabId) throw new Error('找不到來源分頁');
+            return await crawlJestfulChapterInTab(chrome, chapterUrl, sourceTabId, ensureContentScriptInjected);
+        }
         log.info('Background', `[跨話靜默探針] 正在抓取下一話 HTML: ${chapterUrl}...`);
         const res = await fetch(chapterUrl, {
             headers: {
@@ -2046,7 +2063,10 @@ async function crawlChapterImagesAndNav(chapterUrl) {
 async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
     if (!nextUrl || typeof nextUrl !== 'string') return;
     const isEnabled = await state.get('autoPretranslateNextChapter', true);
-    if (!isEnabled) return;
+    if (!isEnabled) {
+        log.info('Background', `[跨話連續追漫] 自動預翻設定已關閉，略過 ${nextUrl}`);
+        return;
+    }
 
     let resumeIndex = 0;
     let initialResults = [];
@@ -2099,7 +2119,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         let navLinks = jobData.navLinks;
 
         if (!chapterImages || chapterImages.length === 0) {
-            const crawlData = await crawlChapterImagesAndNav(nextUrl);
+            const crawlData = await crawlChapterImagesAndNav(nextUrl, sourceTabId);
             if (!crawlData.images || crawlData.images.length === 0) throw new Error('無法獲取圖片');
             chapterImages = crawlData.images;
             navLinks = crawlData.navLinks;
@@ -2771,6 +2791,17 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             return;
         }
 
+        // The foreground pages are already committed. Start the next chapter now,
+        // before recovery bookkeeping or optional glossary work can delay it.
+        if (resolvedNavLinks?.next && typeof resolvedNavLinks.next === 'string') {
+            log.info('Background', `[跨話連續追漫] 當前話已處理完成，準備預翻 ${resolvedNavLinks.next}`);
+            startPretranslateNextChapter(resolvedNavLinks.next, sourceTabId, resultTabId).catch(err => {
+                log.warn('Background', `[跨話連續追漫] 背景預翻下一話失敗: ${err.message}`);
+            });
+        } else {
+            log.warn('Background', '[跨話連續追漫] 當前話沒有下一話網址，略過預翻');
+        }
+
         // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護) ──
         const isIncognitoBatch = await isTabIncognito(sourceTabId);
         const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
@@ -2812,13 +2843,6 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         // 修復 Bug #矛盾2：任務完成後重置為 false，而非設為 true
         // UI 端收到 batchComplete 後自行隱藏停止按鈕，不依賴 isStopping 旗標
         await state.set('isStopping', false);
-
-        // ── 跨話連續追漫：當前話翻完，自動於背景啟動下一話預翻 ──
-        if (resolvedNavLinks?.next && typeof resolvedNavLinks.next === 'string') {
-            startPretranslateNextChapter(resolvedNavLinks.next, sourceTabId, resultTabId).catch(err => {
-                log.warn('Background', `[跨話連續追漫] 背景預翻下一話失敗: ${err.message}`);
-            });
-        }
     } catch (err) {
         if (durableJob) await mangaRecovery.status(durableJob, 'interrupted').catch(() => {});
         chrome.tabs.sendMessage(resultTabId, { action: 'mangaRecoveryError', error: err.message }).catch(() => {});
@@ -3083,6 +3107,9 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
                     action: 'TRANSLATION_STATUS',
                     payload: { msg: res.error, type: 'error', crawlBlocked: true }
                 }).catch(() => {});
+                if (resultTabId) chrome.tabs.sendMessage(resultTabId, {
+                    action: 'mangaRecoveryError', error: res.error
+                }).catch(() => {});
                 return;
             }
             const currentImages = res?.images || [];
@@ -3113,6 +3140,9 @@ async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
 
         if (!crawlResult || !crawlResult.images || crawlResult.images.length === 0) {
             log.warn('Background', '[AutoBatch] 接力翻譯：多次輪詢後抓圖結果仍為空，中止');
+            if (resultTabId) chrome.tabs.sendMessage(resultTabId, {
+                action: 'mangaRecoveryError', error: '下一話尚未載入可辨識的漫畫圖片。請在原網頁確認圖片顯示後重新翻譯。'
+            }).catch(() => {});
             return;
         }
 

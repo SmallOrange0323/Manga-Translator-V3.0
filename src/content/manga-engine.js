@@ -340,6 +340,26 @@ export async function crawlImagesForRequest() {
 }
 
 export function crawlImages() {
+    const page = new URL(window.location.href);
+    if (/(^|\.)jestful\.net$/i.test(page.hostname) && /-chapter-[\d.]+\.html$/i.test(page.pathname)) {
+        const images = [...document.querySelectorAll('#list-imga img[alt]')]
+            .filter(img => /^Page\s+\d+$/i.test(img.getAttribute('alt') || ''))
+            .map(img => {
+                const value = img.getAttribute('data-src') || img.getAttribute('data-original')
+                    || img.currentSrc || img.src;
+                try {
+                    const url = new URL(value, page.href);
+                    return /^https?:$/.test(url.protocol) && !/(?:loading|placeholder|spacer)\.(?:gif|png|jpe?g|webp)$/i.test(url.pathname)
+                        ? url.href : null;
+                } catch (_) { return null; }
+            }).filter(Boolean);
+        const pages = [...new Set(images)];
+        return {
+            images: pages.length >= 2 ? pages.map(src => ({ src })) : [],
+            navLinks: detectNavigationLinks(),
+            ...(pages.length >= 2 ? {} : { error: 'Jestful 尚未載入完整漫畫頁面圖片，請確認原網頁圖片顯示後再試。' })
+        };
+    }
     let mangaImages = [];
 
     // ── -1. 專屬 DOM 切割拼圖 (Scrambled DOM Tiles) 自動重繪還原 ──

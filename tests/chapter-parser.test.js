@@ -9,6 +9,29 @@ afterEach(() => {
 });
 
 describe('background chapter HTML parsing', () => {
+    it('prefetches only Jestful reader pages and keeps its fractional chapter navigation', () => {
+        const url = 'https://jestful.net/series-raw-chapter-13.2.html';
+        const html = `<img src="https://ads.example/creative-847.jpg">
+            <div id="list-imga"><img alt="Page 1" src="https://j2.jfimv2.xyz/images4/1.jpg">
+            <img alt="Page 2" data-src="https://j2.jfimv2.xyz/images4/2.jpg" src="/loading.gif"></div>
+            <select><option value="series-raw-chapter-13.3.html">Chapter 13.3</option>
+            <option selected value="series-raw-chapter-13.2.html">Chapter 13.2</option>
+            <option value="series-raw-chapter-13.1.html">Chapter 13.1</option></select>`;
+        expect(parseChapterHtml(html, url)).toEqual({
+            images: ['https://j2.jfimv2.xyz/images4/1.jpg', 'https://j2.jfimv2.xyz/images4/2.jpg'],
+            navLinks: { prev: 'https://jestful.net/series-raw-chapter-13.1.html',
+                next: 'https://jestful.net/series-raw-chapter-13.3.html' }
+        });
+    });
+
+    it('does not send a Jestful advert or loader to pretranslation before reader pages appear', () => {
+        const html = `<img src="https://ads.example/creative-847.jpg">
+            <div id="list-imga"><img alt="Loading" src="/images/ready-847.jpg"></div>`;
+        expect(parseChapterHtml(html, 'https://jestful.net/series-raw-chapter-13.3.html').images).toEqual([]);
+        expect(parseChapterHtml('<div id="list-imga"><img alt="Page 1" src="https://cdn.example/one.jpg"></div>',
+            'https://jestful.net/series-raw-chapter-13.3.html').images).toEqual([]);
+    });
+
     it('prefetches only GigaViewer main pages from episode-json ahead of page chrome', () => {
         const payload = { readableProduct: { pageStructure: { pages: [
             { type: 'other', hide: true },

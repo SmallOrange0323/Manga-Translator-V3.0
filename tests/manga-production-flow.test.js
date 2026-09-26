@@ -48,6 +48,7 @@ function foreground(f, recovery, translate) {
         get: async (key, fallback) => settings[key] ?? fallback,
         set: async (key, value) => { settings[key] = value; }, getApiKeyAlias: () => 'test', getNextApiKey: () => 'fake-key' };
     const fetchImages = vi.fn(async batch => batch.map(image => 'encoded:' + image));
+    const startPretranslateNextChapter = vi.fn(async () => {});
     const dependencies = { chrome: f.chrome, state, log, activeTranslationJobs: new Map(),
         clearMangaRun: () => controller.abort(), getMangaAbortSignal: () => controller.signal,
         mangaRecovery: recovery, Constants: { DEFAULT_PROMPT_ONE_STEP: 'test prompt' },
@@ -55,14 +56,27 @@ function foreground(f, recovery, translate) {
         swKeepAlive: { start() {}, stop() {} }, fetchAndResizeBatch: fetchImages,
         translateTexts: translate, executeHybridRequest, HybridRequestAbortedError, getHybridSchedule, getEffectiveDelay,
         executeFallbackImages, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults,
+        startPretranslateNextChapter,
         incrementDailyUsage: vi.fn(async () => {}),
         setTimeout: callback => queueMicrotask(callback)
     };
     const run = productionFunction('processMangaBatchPCMode', '\n\n\n/**', dependencies);
-    return { run: resumed => run(1, 2, images, null, false, null, '', null, resumed), controller, settings, fetchImages };
+    return { run: (resumed, navLinks = null) => run(1, 2, images, navLinks, false, null, '', null, resumed),
+        controller, settings, fetchImages, startPretranslateNextChapter };
 }
 
 describe('actual foreground manga and consume flows', () => {
+    it('starts the next chapter after committing all pages even if completion bookkeeping fails', async () => {
+        const f = fixture();
+        const recovery = createMangaRecovery(f.chrome);
+        vi.spyOn(recovery, 'status').mockRejectedValueOnce(new Error('completion storage failure'));
+        const translate = vi.fn(async () => ({ results: [{ original: 'text', translation: '譯文' }] }));
+        const worker = foreground(f, recovery, translate);
+        const next = 'https://manga.test/ch2';
+        await expect(worker.run(null, { prev: null, next })).rejects.toThrow('completion storage failure');
+        expect(worker.startPretranslateNextChapter).toHaveBeenCalledWith(next, 1, 2);
+    });
+
     it('restarts after first saved batch, sends only remaining page after explicit resume and rejects old response', async () => {
         const f = fixture();
         const oldRecovery = createMangaRecovery(f.chrome);
@@ -150,7 +164,7 @@ describe('actual foreground manga and consume flows', () => {
         let cache = {};
         const update = vi.fn(async (_key, transform) => { cache = structuredClone(transform(cache)); });
         const save = productionFunction('savePretranslatedChapterToStorage', 'async function getPretranslatedChapterFromStorage', {
-            state: { update }, PRETRANS_STORAGE_KEY: 'cache', createPretranslationSnapshot,
+            state: { update }, pretranslationStorageKey: () => 'cache', createPretranslationSnapshot,
             isTabIncognito: async () => privateSource, log
         });
         const data = { url: 'https://manga.test/ch2', sourceTabId: 1, images,

@@ -766,14 +766,13 @@ function renderPretranslatedChapter(chapterData) {
         updateNavUI(chapterData.navLinks);
     }
 
-    // 4. 滾動條平滑移回最頂部
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-
-    // 5. 恢復按鈕狀態
+    // 4. 恢復按鈕狀態；捲動位置由換話成功的共同路徑重設。
     resetNavButtons();
 }
 
+let pretranslateBadgeGeneration = 0;
 function updateNavUI(navLinks) {
+    const badgeGeneration = ++pretranslateBadgeGeneration;
     const { prev, next, currentChapter, chapterList } = navLinks || {};
     const navBar = document.getElementById('chapter-nav-bar');
     const prevBtn = document.getElementById('nav-prev-chapter-btn');
@@ -824,6 +823,10 @@ function updateNavUI(navLinks) {
             if (response && response.success && response.data) {
                 if (response.job) applyMangaSnapshot(response.job);
                 else renderPretranslatedChapter(response.data);
+                // Recovery snapshots may arrive before this response. Reset after
+                // the chapter switch succeeds, regardless of which renderer ran.
+                window.scrollTo(0, 0);
+                container.scrollTo?.(0, 0);
             } else {
                 // 快取未命中：退回生肉分頁跳轉
                 sendNavigateMessageWithRetry({
@@ -890,11 +893,17 @@ function updateNavUI(navLinks) {
     // 檢查下一話預翻狀態並更新徽章
     const pretransBadge = document.getElementById('nav-pretranslate-badge');
     if (safeNext && pretransBadge) {
+        let checks = 0;
         const checkBadgeStatus = () => {
+            if (badgeGeneration !== pretranslateBadgeGeneration) return;
             chrome.runtime.sendMessage({
                 action: 'CHECK_PRETRANSLATED_CHAPTER',
                 payload: { nextUrl: safeNext }
             }, (resp) => {
+                if (badgeGeneration !== pretranslateBadgeGeneration) return;
+                const retry = () => {
+                    if (++checks < 100) setTimeout(checkBadgeStatus, 3000);
+                };
                 if (resp && resp.exists) {
                     if (resp.isDone) {
                         pretransBadge.style.display = 'inline-block';
@@ -905,10 +914,18 @@ function updateNavUI(navLinks) {
                         pretransBadge.style.display = 'inline-block';
                         pretransBadge.textContent = `⏳預翻中 (${resp.count}/${resp.total || '?'})`;
                         pretransBadge.style.background = '#ff9800';
-                        setTimeout(checkBadgeStatus, 3000);
+                        retry();
+                    } else if (resp.error || resp.status === 'error') {
+                        pretransBadge.style.display = 'inline-block';
+                        pretransBadge.textContent = '⚠預翻失敗';
+                        pretransBadge.style.background = '#d9534f';
+                        pretransBadge.title = resp.error || '請查看擴充功能 Service Worker 訊息';
+                    } else {
+                        retry();
                     }
                 } else {
                     pretransBadge.style.display = 'none';
+                    retry();
                 }
             });
         };
@@ -1203,6 +1220,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     if (request.action === 'mangaRecoveryError') {
         showRecoveryError(request.error);
+        resetNavButtons();
         sendResponse({ status: 'success' });
         return false;
     }

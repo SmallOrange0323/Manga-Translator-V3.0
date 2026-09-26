@@ -28,6 +28,29 @@ describe('manga-engine: crawlImages 容器與圖片抓取測試', () => {
         globalThis.window.location.href = 'https://rawkuma.net/manga/test/chapter-83.2/';
     });
 
+    it('uses only labeled Jestful reader pages when unrelated images are present', () => {
+        globalThis.window.location.href = 'https://jestful.net/series-raw-chapter-13.2.html';
+        globalThis.document.querySelectorAll = selector => selector === '#list-imga img[alt]' ? [
+            { src: 'https://j2.jfimv2.xyz/images4/1.jpg', getAttribute: key => key === 'alt' ? 'Page 1' : null },
+            { src: 'https://ads.example/ready-847.jpg', getAttribute: key => key === 'alt' ? 'Advertisement' : null },
+            { src: 'https://j2.jfimv2.xyz/images4/2.jpg', getAttribute: key => key === 'alt' ? 'Page 2' : null }
+        ] : [];
+        expect(crawlImages().images).toEqual([
+            { src: 'https://j2.jfimv2.xyz/images4/1.jpg' },
+            { src: 'https://j2.jfimv2.xyz/images4/2.jpg' }
+        ]);
+    });
+
+    it('stops Jestful navigation when only a loading placeholder is visible', () => {
+        globalThis.window.location.href = 'https://jestful.net/series-raw-chapter-13.3.html';
+        globalThis.document.querySelectorAll = selector => selector === '#list-imga img[alt]' ? [
+            { src: 'https://ads.example/ready-847.jpg', getAttribute: key => key === 'alt' ? 'Loading' : null }
+        ] : [];
+        const result = crawlImages();
+        expect(result.images).toEqual([]);
+        expect(result.error).toContain('尚未載入');
+    });
+
     it('loads all Wnacg pages from its same-origin reader list without scrolling', async () => {
         const previousFetch = globalThis.fetch;
         const urls = Array.from({ length: 80 }, (_, index) =>

@@ -152,6 +152,8 @@ function parseEpisodeJsonImages(html, baseUrl) {
 }
 
 function parseImages(html, baseUrl) {
+    const jestfulChapter = /(^|\.)jestful\.net$/i.test(new URL(baseUrl).hostname)
+        && /-chapter-[\d.]+\.html$/i.test(new URL(baseUrl).pathname);
     const tags = htmlTags(html.replace(/<(script|style)\b(?:"[^"]*"|'[^']*'|[^'">])*?>[\s\S]*?<\/\1\s*>/gi, ''));
     const records = [];
     const stack = [];
@@ -172,15 +174,19 @@ function parseImages(html, baseUrl) {
             if ((width > 0 && width < 200) || (height > 0 && height < 200)) continue;
             const inReader = stack.some(item => item.reader);
             const url = imageUrl(attrs, baseUrl, inReader);
-            if (url) records.push({ url, inReader });
+            if (url) records.push({ url, inReader,
+                jestfulPage: stack.some(item => item.jestfulReader) && /^Page\s+\d+$/i.test(attrs.alt || '') });
         } else if (!/\/>$/.test(tag) && !/^(?:area|base|br|embed|hr|input|link|meta|source|wbr)$/.test(name)) {
             const names = [attrs.id, ...(attrs.class || '').split(/\s+/)].filter(Boolean);
-            stack.push({ name, reader: Object.hasOwn(attrs, 'data-image-data')
+            stack.push({ name, jestfulReader: names.some(value => value.toLowerCase() === 'list-imga'),
+                reader: Object.hasOwn(attrs, 'data-image-data')
                 || names.some(value => READER_CONTAINERS.has(value.toLowerCase())) });
         }
     }
-    const candidates = records.some(item => item.inReader) ? records.filter(item => item.inReader) : records;
-    return [...new Set(candidates.map(item => item.url))];
+    const candidates = jestfulChapter ? records.filter(item => item.jestfulPage)
+        : records.some(item => item.inReader) ? records.filter(item => item.inReader) : records;
+    const images = [...new Set(candidates.map(item => item.url))];
+    return jestfulChapter && images.length < 2 ? [] : images;
 }
 
 function parseSelectLists(html, baseUrl) {
