@@ -97,6 +97,14 @@ describe('foreground manga recovery coordinator', () => {
         expect(rows[1]).toMatchObject({ pageIndex: 2, batchIndex: 1, results: [{ original: 'B', translation: '乙' }] });
     });
 
+    it('does not replace the reader job when retry has no saved chapter to preserve', async () => {
+        const f = fixture();
+        const recovery = createMangaRecovery(f.chrome);
+        await expect(recovery.begin({ ...options, images: [options.images[1]], isRetry: true }))
+            .rejects.toThrow('找不到原章節');
+        expect(await recovery.snapshot(2)).toBeNull();
+    });
+
     it('pretranslation cache serialization excludes foreground ownership and readiness promises', () => {
         const snapshot = createPretranslationSnapshot({ ...options, url: 'https://manga.test/ch2', results: [item],
             consumptionReady: Promise.resolve(), foregroundJob: { id: 'old-owner' }, consumedResultTabId: 2 });

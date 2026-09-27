@@ -1227,10 +1227,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   data: data.isDone && !data.isCancelled ? data : null
               });
           } else {
-              sendResponse({ exists: false });
+              const savedStatus = await getPretranslationStatus(nextUrl);
+              sendResponse(savedStatus ? { exists: true, ...savedStatus } : { exists: false });
           }
       })().catch(err => sendResponse({ exists: false, error: err.message }));
       return true; // 保持異步通道
+  }
+
+  if (message.action === 'RETRY_PRETRANSLATED_CHAPTER') {
+      const { nextUrl } = message.payload || {};
+      (async () => {
+          const resultTabId = sender.tab?.id;
+          const readerUrl = chrome.runtime.getURL('src/reader/result.html');
+          if (!resultTabId || !sender.tab.url?.startsWith(readerUrl)) throw new Error('只能從結果頁重試預翻');
+          const job = await mangaRecovery.snapshot(resultTabId);
+          if (!job || job.status === 'source-changed' || job.navLinks?.next !== nextUrl ||
+              !/^https?:\/\//i.test(nextUrl)) throw new Error('下一話已變更，請重新整理結果頁');
+          const existing = pretranslatedChaptersMap.get(nextUrl);
+          if (existing?.inProgress || queuedPretranslationUrls.has(nextUrl)) {
+              sendResponse({ status: 'retrying' });
+              return;
+          }
+          if (existing?.isDone) throw new Error('下一話已預翻完成');
+          if (existing) pretranslatedChaptersMap.delete(nextUrl);
+          await setPretranslationStatus(nextUrl, null, job.sourceTabId).catch(() => {});
+          startPretranslateNextChapter(nextUrl, job.sourceTabId, resultTabId, true)
+              .catch(err => log.warn('Background', `手動重試預翻失敗: ${err.message}`));
+          sendResponse({ status: 'retrying' });
+      })().catch(err => sendResponse({ status: 'error', error: err.message }));
+      return true;
   }
 
   if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER') {
@@ -1992,8 +2017,33 @@ async function resizeImageBlobToBase64(blob, maxDim) {
 // ── 跨話無縫連續追漫：預翻快取池與任務控制器 ──
 const pretranslatedChaptersMap = new Map(); // key: chapterUrl, value: { url, images, results, navLinks, usedModelName, isDone, inProgress, error, associatedResultTabId, sourceTabId }
 let activePretranslateJob = null;
+let pretranslationQueue = Promise.resolve();
+const queuedPretranslationUrls = new Set();
 const PRETRANS_STORAGE_KEY = 'mt_pretranslated_chapters_cache';
 const JESTFUL_PRETRANS_STORAGE_KEY = 'mt_jestful_pretranslated_chapters_cache_v2';
+const PRETRANS_STATUS_KEY = 'mt_pretranslation_status_v1';
+
+async function setPretranslationStatus(url, status, sourceTabId, error = null) {
+    const source = sourceTabId ? await chrome.tabs.get(sourceTabId).catch(() => null) : null;
+    if (!source || source.incognito || isIncognitoProcess) return;
+    await state.update(PRETRANS_STATUS_KEY, (current = {}) => {
+        const next = { ...current };
+        if (!status) delete next[url];
+        else next[url] = { status, error: error ? String(error).slice(0, 300) : null,
+            sourceTabId, updatedAt: Date.now() };
+        while (Object.keys(next).length > 10) delete next[Object.keys(next)[0]];
+        return next;
+    });
+}
+
+async function getPretranslationStatus(url) {
+    const statuses = await state.get(PRETRANS_STATUS_KEY, {});
+    const saved = statuses[url] || null;
+    if (saved?.status === 'running' && Date.now() - saved.updatedAt > 5 * 60 * 1000) {
+        return { ...saved, status: 'error', error: '背景預翻已中斷，可手動重試' };
+    }
+    return saved;
+}
 
 function isJestfulChapterUrl(value) {
     try {
@@ -2060,10 +2110,27 @@ async function crawlChapterImagesAndNav(chapterUrl, sourceTabId) {
 /**
  * startPretranslateNextChapter — 啟動下一話的背景靜默預翻 (嚴格單話佇列 + SW保活 + Session Checkpoint 斷點續翻)
  */
-async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
+function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, force = false) {
+    if (!nextUrl || queuedPretranslationUrls.has(nextUrl)) return Promise.resolve();
+    queuedPretranslationUrls.add(nextUrl);
+    const task = pretranslationQueue.catch(() => {}).then(async () => {
+        if (sourceTabId) {
+            const source = await chrome.tabs.get(sourceTabId).catch(() => null);
+            if (!source) return;
+        }
+        await runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, force);
+    }).catch(async err => {
+        await setPretranslationStatus(nextUrl, 'error', sourceTabId, err.message).catch(() => {});
+        throw err;
+    });
+    pretranslationQueue = task.catch(() => {});
+    return task.finally(() => queuedPretranslationUrls.delete(nextUrl));
+}
+
+async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, force = false) {
     if (!nextUrl || typeof nextUrl !== 'string') return;
     const isEnabled = await state.get('autoPretranslateNextChapter', true);
-    if (!isEnabled) {
+    if (!isEnabled && !force) {
         log.info('Background', `[跨話連續追漫] 自動預翻設定已關閉，略過 ${nextUrl}`);
         return;
     }
@@ -2088,6 +2155,9 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
             jobData.associatedResultTabId = resultTabId || existing.associatedResultTabId;
         }
     }
+
+    await setPretranslationStatus(nextUrl, 'running', sourceTabId).catch(err =>
+        log.warn('Background', `預翻狀態寫入失敗: ${err.message}`));
 
     const batchSizeSetting = await state.get('ocrBatchSize', 10);
     const batchSize = Math.max(1, parseInt(batchSizeSetting) || 10);
@@ -2219,15 +2289,18 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         jobData.isDone = completion.isDone;
         if (completion.status === 'cancelled') {
             await removePretranslationCheckpoint(nextUrl);
+            await setPretranslationStatus(nextUrl, null, sourceTabId).catch(() => {});
             log.info('Background', `[跨話連續追漫] 下一話預翻已取消`);
         } else if (completion.status === 'completed') {
             // 先保存完成的 local 快取，再清理 session checkpoint
             await savePretranslatedChapterToStorage(nextUrl, jobData);
             await removePretranslationCheckpoint(nextUrl);
+            await setPretranslationStatus(nextUrl, null, sourceTabId).catch(() => {});
             log.info('Background', `[跨話連續追漫] 🎉 下一話 (${nextUrl}) 全部預翻完成！共 ${jobData.results.length} 頁已在記憶體待命！`);
         } else {
             jobData.error = completion.error;
             await removePretranslationCheckpoint(nextUrl);
+            await setPretranslationStatus(nextUrl, 'error', sourceTabId, jobData.error).catch(() => {});
             log.warn('Background', `[跨話連續追漫] 預翻結果不完整 (${jobData.results.length}/${jobData.images.length})`);
         }
     } catch (err) {
@@ -2235,6 +2308,7 @@ async function startPretranslateNextChapter(nextUrl, sourceTabId, resultTabId) {
         jobData.error = err.message;
         jobData.status = 'error';
         await removePretranslationCheckpoint(nextUrl);
+        await setPretranslationStatus(nextUrl, 'error', sourceTabId, err.message).catch(() => {});
         log.warn('Background', `[跨話連續追漫] 預翻失敗: ${err.message}`);
     } finally {
         jobData.inProgress = false;

@@ -62,6 +62,24 @@ describe('production reader recovery message listener', () => {
         expect(page.nodes.get('loading-overlay').classList.contains('hidden')).toBe(true);
     });
 
+    it('keeps other batches visible when a retry snapshot contains only the selected batch', () => {
+        const page = reader();
+        const images = [1, 2, 3].map(n => `https://manga.test/${n}.jpg`);
+        const rows = images.map((image, index) => ({ image, pageIndex: index + 1,
+            batchIndex: index, results: [{ original: 'text', translation: `old ${index + 1}` }] }));
+        const original = { ...job(1, 'completed'), sourceUrl: 'https://manga.test/ch1', images,
+            processedCount: 3, results: rows };
+        page.apply(original);
+        page.apply({ ...original, id: 'retry', revision: 2, isRetry: true, status: 'running',
+            images: [images[1]], processedCount: 0, results: [rows[1]] });
+        expect(page.cards).toHaveLength(3);
+        page.apply({ ...original, id: 'retry', revision: 3, isRetry: true,
+            images: [images[1]], processedCount: 1,
+            results: [{ ...rows[1], results: [{ original: 'text', translation: 'new 2' }] }] });
+        expect(page.cards).toHaveLength(3);
+        expect(page.read().map(row => row.results[0].translation)).toEqual(['old 1', 'new 2', 'old 3']);
+    });
+
     it('shows live recovery errors and stops the loading indicator', () => {
         const page = reader();
         page.deliver({ action: 'mangaRecoveryError', error: 'Checkpoint unavailable' });
@@ -72,6 +90,43 @@ describe('production reader recovery message listener', () => {
 });
 
 describe('next chapter pretranslation badge', () => {
+    it('shows saved failure, offers retry, and distinguishes status lookup errors', () => {
+        vi.useFakeTimers();
+        try {
+            const nodes = new Map();
+            const document = { getElementById(id) {
+                if (!nodes.has(id)) nodes.set(id, { style: {}, classList: { add() {} }, textContent: '', title: '' });
+                return nodes.get(id);
+            } };
+            let checkReply = { exists: true, status: 'error', error: '圖片抓取失敗' };
+            const sendMessage = vi.fn((message, callback) => callback(message.action === 'CHECK_PRETRANSLATED_CHAPTER'
+                ? checkReply : { status: 'retrying' }));
+            const sectionStart = source.indexOf('let pretranslateBadgeGeneration = 0;');
+            const sectionEnd = source.indexOf('\nlet placeholdersCreated = false;', sectionStart);
+            const updateNavUI = new Function('document', 'chrome', 'isSafeUrl',
+                'sourceTabId', 'activeMangaKey', 'urlParams', 'sendNavigateMessageWithRetry',
+                'applyMangaSnapshot', 'renderPretranslatedChapter', 'window', 'container',
+                source.slice(sectionStart, sectionEnd) + '\nreturn updateNavUI;')(
+                    document, { runtime: { sendMessage } }, value => /^https?:\/\//.test(value),
+                    1, null, new URLSearchParams(), vi.fn(), vi.fn(), vi.fn(), {}, {}
+                );
+            const nextUrl = 'https://rawkuma.net/manga/example/chapter-4/';
+            updateNavUI({ next: nextUrl });
+            expect(nodes.get('nav-pretranslate-badge').textContent).toBe('⚠預翻失敗');
+            expect(nodes.get('nav-pretranslate-retry-btn').style.display).toBe('inline-flex');
+            nodes.get('nav-pretranslate-retry-btn').onclick();
+            expect(sendMessage).toHaveBeenCalledWith({ action: 'RETRY_PRETRANSLATED_CHAPTER',
+                payload: { nextUrl } }, expect.any(Function));
+            expect(nodes.get('nav-pretranslate-retry-btn').style.display).toBe('none');
+            checkReply = { exists: false, error: 'storage unavailable' };
+            vi.runOnlyPendingTimers();
+            expect(nodes.get('nav-pretranslate-badge').textContent).toBe('⚠狀態查詢失敗');
+            expect(nodes.get('nav-pretranslate-badge').title).toBe('storage unavailable');
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('keeps checking after an initial cache miss and shows the completed pretranslation', async () => {
         vi.useFakeTimers();
         try {

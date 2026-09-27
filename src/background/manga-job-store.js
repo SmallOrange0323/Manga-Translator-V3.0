@@ -44,14 +44,17 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
                 const previous = jobs[resultTabId];
                 if (images.length > 800) throw new Error('每個漫畫任務最多支援 800 頁');
                 if (!previous && Object.keys(jobs).length >= 8) throw new Error('最多保留 8 個漫畫結果頁，請先關閉舊結果頁');
+                if (isRetry && (!previous || previous.results.length === 0)) {
+                    throw new Error('找不到原章節的翻譯結果，請從原網頁重新翻譯');
+                }
                 const job = {
-                    id: crypto.randomUUID(), sourceTabId, resultTabId, sourceUrl,
+                    id: crypto.randomUUID(), sourceTabId, resultTabId, sourceUrl: isRetry ? previous.sourceUrl : sourceUrl,
                     images: images.map(imageRef), navLinks: navLinks ? {
                         prev: imageRef(navLinks.prev), next: imageRef(navLinks.next), currentChapter: String(navLinks.currentChapter || ''),
                         chapterList: (Array.isArray(navLinks.chapterList) ? navLinks.chapterList : []).slice(0, 2000)
                             .map(item => ({ title: String(item?.title || ''), url: imageRef(item?.url), current: Boolean(item?.current) }))
                             .filter(item => item.url)
-                    } : null,
+                    } : (isRetry ? previous.navLinks : null),
                     mangaKey: mangaKey || null, batchSize, isRetry, targetBatchIndex,
                     results: isRetry ? previous?.results || [] : [],
                     processedCount: 0, status: 'running', revision: (previous?.revision || 0) + 1, updatedAt: Date.now()

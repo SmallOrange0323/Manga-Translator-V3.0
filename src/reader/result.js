@@ -892,9 +892,38 @@ function updateNavUI(navLinks) {
 
     // 檢查下一話預翻狀態並更新徽章
     const pretransBadge = document.getElementById('nav-pretranslate-badge');
+    const retryPretransBtn = document.getElementById('nav-pretranslate-retry-btn');
+    const footerRetryPretransBtn = document.getElementById('footer-pretranslate-retry-btn');
+    const retryButtons = [retryPretransBtn, footerRetryPretransBtn].filter(Boolean);
+    const showRetryButtons = visible => retryButtons.forEach(button => {
+        button.style.display = visible ? 'inline-flex' : 'none';
+    });
+    let checkBadgeStatus = () => {};
+    showRetryButtons(false);
+    for (const button of retryButtons) {
+        button.disabled = false;
+        button.textContent = '重試預翻';
+        button.onclick = () => {
+            retryButtons.forEach(item => { item.disabled = true; item.textContent = '重試中…'; });
+            chrome.runtime.sendMessage({ action: 'RETRY_PRETRANSLATED_CHAPTER',
+                payload: { nextUrl: safeNext } }, (resp) => {
+                if (badgeGeneration !== pretranslateBadgeGeneration) return;
+                retryButtons.forEach(item => { item.textContent = '重試預翻'; });
+                if (chrome.runtime.lastError || resp?.status !== 'retrying') {
+                    retryButtons.forEach(item => { item.disabled = false; });
+                    pretransBadge.title = resp?.error || chrome.runtime.lastError?.message || '重試預翻失敗';
+                    return;
+                }
+                showRetryButtons(false);
+                pretransBadge.textContent = '⏳預翻準備中';
+                pretransBadge.style.background = '#ff9800';
+                setTimeout(checkBadgeStatus, 1000);
+            });
+        };
+    }
     if (safeNext && pretransBadge) {
         let checks = 0;
-        const checkBadgeStatus = () => {
+        checkBadgeStatus = () => {
             if (badgeGeneration !== pretranslateBadgeGeneration) return;
             chrome.runtime.sendMessage({
                 action: 'CHECK_PRETRANSLATED_CHAPTER',
@@ -904,15 +933,32 @@ function updateNavUI(navLinks) {
                 const retry = () => {
                     if (++checks < 100) setTimeout(checkBadgeStatus, 3000);
                 };
+                if (chrome.runtime.lastError || resp?.error && !resp.exists) {
+                    showRetryButtons(false);
+                    pretransBadge.style.display = 'inline-block';
+                    pretransBadge.textContent = '⚠狀態查詢失敗';
+                    pretransBadge.style.background = '#d9534f';
+                    pretransBadge.title = resp?.error || chrome.runtime.lastError?.message;
+                    retry();
+                    return;
+                }
                 if (resp && resp.exists) {
                     if (resp.isDone) {
+                        showRetryButtons(false);
                         pretransBadge.style.display = 'inline-block';
                         pretransBadge.textContent = '⚡已預翻';
                         pretransBadge.style.background = '#4CAF50';
                         if (footerNextBtn) footerNextBtn.title = `${safeNext} (已預翻完成，點擊秒開)`;
                     } else if (resp.inProgress) {
+                        showRetryButtons(false);
                         pretransBadge.style.display = 'inline-block';
                         pretransBadge.textContent = `⏳預翻中 (${resp.count}/${resp.total || '?'})`;
+                        pretransBadge.style.background = '#ff9800';
+                        retry();
+                    } else if (resp.status === 'running') {
+                        showRetryButtons(false);
+                        pretransBadge.style.display = 'inline-block';
+                        pretransBadge.textContent = '⏳預翻準備中';
                         pretransBadge.style.background = '#ff9800';
                         retry();
                     } else if (resp.error || resp.status === 'error') {
@@ -920,11 +966,13 @@ function updateNavUI(navLinks) {
                         pretransBadge.textContent = '⚠預翻失敗';
                         pretransBadge.style.background = '#d9534f';
                         pretransBadge.title = resp.error || '請查看擴充功能 Service Worker 訊息';
+                        showRetryButtons(true);
                     } else {
                         retry();
                     }
                 } else {
                     pretransBadge.style.display = 'none';
+                    showRetryButtons(false);
                     retry();
                 }
             });
@@ -1162,16 +1210,29 @@ function showRecoveryError(message) {
 
 function applyMangaSnapshot(job) {
     if (!job || job.revision <= lastMangaRevision) return;
+    const previousJob = activeMangaJob;
+    const previousRows = translatedData;
+    const sameChapterRetry = job.isRetry && previousJob &&
+        previousJob.sourceTabId === job.sourceTabId &&
+        previousJob.sourceUrl === job.sourceUrl;
     lastMangaRevision = job.revision;
     activeMangaJob = job;
     sourceTabId = job.sourceTabId || sourceTabId;
     activeMangaKey = job.mangaKey || activeMangaKey;
-    translatedData = job.results.map(item => {
-        const existing = translatedData.find(row => row.pageIndex === item.pageIndex);
+    const savedRows = job.results.map(item => {
+        const existing = previousRows.find(row => row.pageIndex === item.pageIndex);
         // Keep temporary image pixels in this live page only.
-        return !item.image && existing?.image && existing.pageIndex === item.pageIndex && job.id === existing._jobId
+        return !item.image && existing?.image && existing.pageIndex === item.pageIndex &&
+            (job.id === existing._jobId || sameChapterRetry)
             ? { ...item, image: existing.image, _jobId: job.id } : { ...item, _jobId: job.id };
     });
+    // A retry snapshot can contain only its selected batch (for example after a
+    // worker restart). Keep the other visible pages of the same chapter.
+    translatedData = sameChapterRetry
+        ? [...savedRows, ...previousRows.filter(row => !savedRows.some(saved =>
+            (row.pageIndex > 0 && saved.pageIndex === row.pageIndex) ||
+            (row.image && saved.image === row.image)))].sort((a, b) => a.pageIndex - b.pageIndex)
+        : savedRows;
     container.innerHTML = '';
     translatedData.forEach((item, index) => {
         const card = buildCard(item, index);
