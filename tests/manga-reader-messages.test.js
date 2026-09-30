@@ -62,6 +62,17 @@ describe('production reader recovery message listener', () => {
         expect(page.nodes.get('loading-overlay').classList.contains('hidden')).toBe(true);
     });
 
+    it('accepts a fresh job after storage eviction resets its revision and rejects late old results', () => {
+        const page = reader();
+        page.apply({ ...job(7, 'completed', 'old'), createdAt: 100 });
+        page.apply({ ...job(1, 'running', 'new chapter'), id: 'new', createdAt: 200 });
+        expect(page.read()[0].results[0].translation).toBe('new chapter');
+        page.apply({ ...job(9, 'completed', 'late old result'), createdAt: 100 });
+        expect(page.read()[0].results[0].translation).toBe('new chapter');
+        page.apply({ ...job(2, 'completed', 'finished'), id: 'new', createdAt: 200 });
+        expect(page.read()[0].results[0].translation).toBe('finished');
+    });
+
     it('keeps other batches visible when a retry snapshot contains only the selected batch', () => {
         const page = reader();
         const images = [1, 2, 3].map(n => `https://manga.test/${n}.jpg`);
@@ -86,6 +97,17 @@ describe('production reader recovery message listener', () => {
         expect(page.nodes.get('manga-recovery-notice').textContent).toBe('Checkpoint unavailable');
         expect(page.nodes.get('loading-overlay').classList.contains('hidden')).toBe(true);
         expect(page.resetNavButtons).toHaveBeenCalledOnce();
+    });
+
+    it('preserves another page with the same image URL when applying a partial retry snapshot', () => {
+        const page = reader();
+        const original = { ...job(1, 'completed'), sourceUrl: 'https://manga.test/ch1',
+            results: [1, 2].map(pageIndex => ({ ...job(1).results[0], pageIndex })) };
+        page.apply(original);
+        page.apply({ ...original, id: 'retry', revision: 2, isRetry: true,
+            results: [{ ...original.results[1], results: [{ translation: 'new page 2' }] }] });
+        expect(page.read().map(row => row.pageIndex)).toEqual([1, 2]);
+        expect(page.read()[1].results[0].translation).toBe('new page 2');
     });
 });
 

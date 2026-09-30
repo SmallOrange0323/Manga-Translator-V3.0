@@ -25,8 +25,9 @@ export function mapPretranslationBatchResults(currentBatch, base64List, validIte
     }));
 }
 
-export function getPretranslationCompletion({ isCancelled, resultCount, imageCount }) {
+export function getPretranslationCompletion({ isCancelled, resultCount, imageCount, errorCount = 0 }) {
     if (isCancelled) return { status: 'cancelled', isDone: false };
+    if (errorCount > 0) return { status: 'error', isDone: false, error: `${errorCount} 頁預翻失敗，可重試` };
     if (resultCount === imageCount) return { status: 'completed', isDone: true };
     return { status: 'error', isDone: false, error: '預翻結果不完整' };
 }

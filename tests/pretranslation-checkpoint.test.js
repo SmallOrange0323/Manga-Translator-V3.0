@@ -50,6 +50,16 @@ describe('Pretranslation Session Checkpoint & Recovery Tests', () => {
     });
 
     describe('Test 1: 嚴格白名單與資料極小化 (Security Whitelist Sanitizer)', () => {
+        it('split incognito never reads or changes regular session checkpoints', async () => {
+            chrome.extension = { inIncognitoContext: true };
+            const job = { url: 'https://private.test/ch2', images: ['https://private.test/page.jpg'], sourceTabId: 1 };
+            await savePretranslationCheckpoint(job);
+            expect(await getPretranslationCheckpoints()).toEqual({});
+            await removePretranslationCheckpoint(job.url);
+            await clearPretranslationCheckpointsForTabs(1);
+            expect(chrome.storage.session.get).not.toHaveBeenCalled();
+            expect(chrome.storage.session.set).not.toHaveBeenCalled();
+        });
         it('Checkpoint 僅保存純字串 URL 與白名單結果，絕對剔除 Base64、API Key、Blob 與未知大型欄位', () => {
             const contaminatedJobData = {
                 url: 'https://example.com/ch2',

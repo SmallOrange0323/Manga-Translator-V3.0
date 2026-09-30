@@ -25,6 +25,8 @@ describe('pretranslation completion', () => {
     const cases = [
         [{ isCancelled: true, resultCount: 3, imageCount: 3 }, { status: 'cancelled', isDone: false }],
         [{ isCancelled: false, resultCount: 3, imageCount: 3 }, { status: 'completed', isDone: true }],
+        [{ isCancelled: false, resultCount: 3, imageCount: 3, errorCount: 1 },
+            { status: 'error', isDone: false, error: '1 頁預翻失敗，可重試' }],
         [{ isCancelled: false, resultCount: 2, imageCount: 3 }, { status: 'error', isDone: false, error: '預翻結果不完整' }]
     ];
     for (const [input, expected] of cases) {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createPretranslationQueueStore, PRETRANSLATION_QUEUE_KEY } from '../src/background/pretranslation-queue-store.js';
 
 const source = readFileSync(new URL('../src/background/index.js', import.meta.url), 'utf8');
 const start = source.indexOf('function startPretranslateNextChapter(');
@@ -9,11 +10,12 @@ if (start < 0 || end < 0) throw new Error('Pretranslation coordinator boundary m
 function coordinator(run) {
     const chrome = { tabs: { get: vi.fn(async id => ({ id })) } };
     const statuses = [];
-    const startJob = new Function('chrome', 'runPretranslateNextChapter', 'setPretranslationStatus',
+    const pretranslationQueueStore = { add: vi.fn(async () => true), remove: vi.fn(async () => {}) };
+    const startJob = new Function('chrome', 'runPretranslateNextChapter', 'setPretranslationStatus', 'pretranslationQueueStore',
         'let pretranslationQueue = Promise.resolve(); const queuedPretranslationUrls = new Set();\n' +
         source.slice(start, end) + '\nreturn startPretranslateNextChapter;')(
-        chrome, run, async (...args) => { statuses.push(args); });
-    return { startJob, chrome, statuses };
+        chrome, run, async (...args) => { statuses.push(args); }, pretranslationQueueStore);
+    return { startJob, chrome, statuses, pretranslationQueueStore };
 }
 
 describe('pretranslation coordinator', () => {
@@ -68,5 +70,45 @@ describe('pretranslation status persistence', () => {
         const saved = values.get('status');
         saved['https://manga.test/ch2'].updatedAt -= 6 * 60 * 1000;
         expect(await getStatus('https://manga.test/ch2')).toMatchObject({ status: 'error', error: '背景預翻已中斷，可手動重試' });
+    });
+});
+
+describe('queued pretranslation persistence', () => {
+    it('restores pending regular jobs in order and never writes private jobs', async () => {
+        const values = new Map();
+        const state = { get: async (key, fallback) => values.get(key) || fallback,
+            update: async (key, updater) => values.set(key, await updater(values.get(key))) };
+        const chrome = { tabs: { get: async id => ({ id, incognito: id === 9 }) } };
+        const first = createPretranslationQueueStore(state, chrome);
+        expect(await first.add('chapter-2', 1, 2, false)).toBe(true);
+        expect(await first.add('private', 9, 10, false)).toBe(false);
+        expect(await first.add('chapter-3', 1, 2, true)).toBe(true);
+        const restarted = createPretranslationQueueStore(state, chrome);
+        expect((await restarted.pending()).map(item => item.url)).toEqual(['chapter-2', 'chapter-3']);
+        expect(values.get(PRETRANSLATION_QUEUE_KEY)).not.toHaveProperty('private');
+        await restarted.remove('chapter-2');
+        expect((await restarted.pending()).map(item => item.url)).toEqual(['chapter-3']);
+    });
+
+    it('replays unfinished queue records after a worker restart', async () => {
+        const first = source.indexOf('async function restoreQueuedPretranslations()');
+        const last = source.indexOf('async function restorePretranslationCheckpoints()', first);
+        if (first < 0 || last < 0) throw new Error('Queue restore boundary missing');
+        const remove = vi.fn(async () => {});
+        const startJob = vi.fn(async () => {});
+        const restore = new Function('pretranslationQueueStore', 'chrome', 'queuedPretranslationUrls',
+            'getPretranslatedChapterFromStorage', 'isSuccessfulPretranslation', 'startPretranslateNextChapter', 'log',
+            source.slice(first, last) + '\nreturn restoreQueuedPretranslations;')(
+            { pending: async () => [
+                { url: 'done', sourceTabId: 1 }, { url: 'pending', sourceTabId: 1 },
+                { url: 'closed', sourceTabId: 3 }
+            ], remove },
+            { tabs: { get: async id => id === 3 ? Promise.reject(new Error('closed')) : { id, incognito: false } } },
+            new Set(), async url => url === 'done' ? { isDone: true, images: ['a'], results: [{}] } : null,
+            data => !!data?.isDone, startJob, { warn: vi.fn() });
+        await restore();
+        expect(startJob).toHaveBeenCalledOnce();
+        expect(startJob.mock.calls[0][0]).toBe('pending');
+        expect(remove.mock.calls.map(call => call[0])).toEqual(['done', 'closed']);
     });
 });

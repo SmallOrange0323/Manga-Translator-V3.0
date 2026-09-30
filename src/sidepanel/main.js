@@ -296,22 +296,8 @@ state.onChanged((changes) => {
 
 // 監聽 batchComplete 訊息恢復 UI 狀態
 chrome.runtime.onMessage.addListener((request) => {
-    if (request.action === 'START_TRANSLATING_CARD') {
-        const stopBtn = document.getElementById('mt-stop-btn');
-        const startBtn = document.getElementById('mt-start-btn');
-        if (stopBtn) stopBtn.style.display = 'flex';
-        if (startBtn) startBtn.style.display = 'none';
-        showTranslatingCard(request.imgCount || 0);
-    }
-
-    if (request.action === 'TRANSLATION_DONE') {
-        const stopBtn = document.getElementById('mt-stop-btn');
-        const startBtn = document.getElementById('mt-start-btn');
-        const pauseBtn = document.getElementById('mt-pause-btn');
-        if (stopBtn) stopBtn.style.display = 'none';
-        if (startBtn) startBtn.style.display = 'flex';
-        if (pauseBtn) { pauseBtn.style.display = 'none'; pauseBtn.textContent = '⏸️ 暫停'; pauseBtn.classList.remove('is-paused'); }
-        hideTranslatingCard(); // 翻譯完成，移除跑步動畫卡片
+    if (request.action === 'START_TRANSLATING_CARD' || request.action === 'TRANSLATION_DONE') {
+        syncCurrentTabState();
     }
     // P1 移植：配額即時更新（對齊 v1.8.7 updateTokenDisplay）
     if (request.action === 'updateTokenDisplay') {
@@ -951,15 +937,12 @@ if (novelRetryAllBtn) {
 // 💡 分頁切換與即時狀態感知器 (Tab Switch Aware Sync)
 // 徹底解決：切換到其他漫畫分頁時，按鈕卡在「正在翻譯/停止」的 Bug
 // =====================================================
+let tabStateRequestId = 0;
 async function syncCurrentTabState() {
+    const requestId = ++tabStateRequestId;
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab || !tab.id) return;
-
-        // 若當前切換到擴充功能自身內部頁面（例如 result.html 或 options.html），不強制洗掉側邊欄狀態
-        if (tab.url && tab.url.startsWith('chrome-extension://')) {
-            return;
-        }
 
         // 1. 刷新該漫畫作品詞庫
         refreshGlossaryStatus();
@@ -969,29 +952,32 @@ async function syncCurrentTabState() {
             action: 'CHECK_TAB_TRANSLATION_STATUS',
             payload: { tabId: tab.id }
         }, (response) => {
-            if (chrome.runtime.lastError) return;
-            const isTranslating = response?.isTranslating || false;
-            const stopBtn = document.getElementById('mt-stop-btn');
-            const startBtn = document.getElementById('mt-start-btn');
-            const pauseBtn = document.getElementById('mt-pause-btn');
+            if (chrome.runtime.lastError || requestId !== tabStateRequestId) return;
+            chrome.tabs.query({ active: true, currentWindow: true }, ([current]) => {
+                if (requestId !== tabStateRequestId || current?.id !== tab.id) return;
+                const isTranslating = response?.isTranslating || false;
+                const stopBtn = document.getElementById('mt-stop-btn');
+                const startBtn = document.getElementById('mt-start-btn');
+                const pauseBtn = document.getElementById('mt-pause-btn');
 
-            if (isTranslating) {
-                // 當前分頁正在翻譯中：顯示停止按鈕與跑步卡片
-                if (stopBtn) stopBtn.style.display = 'flex';
-                if (startBtn) startBtn.style.display = 'none';
-                if (pauseBtn) pauseBtn.style.display = 'flex';
-                showTranslatingCard(response.jobInfo?.imgCount || 0);
-            } else {
-                // 當前分頁沒有正在進行的翻譯任務：恢復「開始翻譯」按鈕
-                if (stopBtn) stopBtn.style.display = 'none';
-                if (startBtn) startBtn.style.display = 'flex';
-                if (pauseBtn) {
-                    pauseBtn.style.display = 'none';
-                    pauseBtn.textContent = '⏸️ 暫停';
-                    pauseBtn.classList.remove('is-paused');
+                if (isTranslating) {
+                    // 當前分頁正在翻譯中：顯示停止按鈕與跑步卡片
+                    if (stopBtn) stopBtn.style.display = 'flex';
+                    if (startBtn) startBtn.style.display = 'none';
+                    if (pauseBtn) pauseBtn.style.display = 'flex';
+                    showTranslatingCard(response.jobInfo?.imgCount || 0);
+                } else {
+                    // 當前分頁沒有正在進行的翻譯任務：恢復「開始翻譯」按鈕
+                    if (stopBtn) stopBtn.style.display = 'none';
+                    if (startBtn) startBtn.style.display = 'flex';
+                    if (pauseBtn) {
+                        pauseBtn.style.display = 'none';
+                        pauseBtn.textContent = '⏸️ 暫停';
+                        pauseBtn.classList.remove('is-paused');
+                    }
+                    hideTranslatingCard();
                 }
-                hideTranslatingCard();
-            }
+            });
         });
     } catch (e) {
         console.warn('[Sidepanel] syncCurrentTabState error:', e);

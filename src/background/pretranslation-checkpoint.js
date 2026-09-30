@@ -59,7 +59,7 @@ export function sanitizePretranslationResultItem(item) {
  * @param {Object} jobData 
  * @returns {Object|null}
  */
-export function createPretranslationSnapshot(jobData) {
+export function createPretranslationSnapshot(jobData, { includeConsumer = false } = {}) {
     if (!jobData || typeof jobData !== 'object') return null;
 
     // 1. 圖片白名單：保證只存 string URL 陣列，絕無物件展開
@@ -105,6 +105,8 @@ export function createPretranslationSnapshot(jobData) {
         isCancelled: Boolean(jobData.isCancelled),
         sourceTabId: typeof jobData.sourceTabId === 'number' ? jobData.sourceTabId : null,
         associatedResultTabId: typeof jobData.associatedResultTabId === 'number' ? jobData.associatedResultTabId : null,
+        ...(includeConsumer && typeof jobData.consumedResultTabId === 'number'
+            ? { consumedResultTabId: jobData.consumedResultTabId } : {}),
         startTime: typeof jobData.startTime === 'number' ? jobData.startTime : Date.now(),
         updatedAt: Date.now(),
         processedCount
@@ -180,6 +182,7 @@ export function normalizeRestoredPretranslation(snapshot) {
         isCancelled,
         sourceTabId: snapshot.sourceTabId,
         associatedResultTabId: snapshot.associatedResultTabId,
+        consumedResultTabId: snapshot.consumedResultTabId,
         startTime: snapshot.startTime,
         updatedAt: snapshot.updatedAt,
         processedCount
@@ -225,8 +228,9 @@ export function selectLatestInterruptedCheckpoint(checkpointsMap) {
  */
 export async function savePretranslationCheckpoint(jobData) {
     if (typeof chrome === 'undefined' || !chrome.storage?.session) return;
+    if (chrome.extension?.inIncognitoContext) return;
     if (!jobData || !jobData.url) return;
-    const snapshot = createPretranslationSnapshot(jobData);
+    const snapshot = createPretranslationSnapshot(jobData, { includeConsumer: true });
     if (!snapshot) return;
 
     try {
@@ -243,6 +247,7 @@ export async function savePretranslationCheckpoint(jobData) {
  */
 export async function getPretranslationCheckpoints() {
     if (typeof chrome === 'undefined' || !chrome.storage?.session) return {};
+    if (chrome.extension?.inIncognitoContext) return {};
     try {
         const stored = await chrome.storage.session.get([PRETRANS_SESSION_CHECKPOINT_KEY]);
         return stored?.[PRETRANS_SESSION_CHECKPOINT_KEY] || {};
@@ -257,6 +262,7 @@ export async function getPretranslationCheckpoints() {
  */
 export async function removePretranslationCheckpoint(url) {
     if (typeof chrome === 'undefined' || !chrome.storage?.session) return;
+    if (chrome.extension?.inIncognitoContext) return;
     if (!url) return;
     try {
         const stored = await chrome.storage.session.get([PRETRANS_SESSION_CHECKPOINT_KEY]);
@@ -272,14 +278,16 @@ export async function removePretranslationCheckpoint(url) {
  * 當分頁關閉時，清除與指定 tabId 關聯的 Session Checkpoints
  * @param {number} tabId 
  */
-export async function clearPretranslationCheckpointsForTabs(tabId) {
+export async function clearPretranslationCheckpointsForTabs(tabId, preserveUrls = new Set()) {
     if (typeof chrome === 'undefined' || !chrome.storage?.session) return;
+    if (chrome.extension?.inIncognitoContext) return;
     if (!tabId) return;
     try {
         const stored = await chrome.storage.session.get([PRETRANS_SESSION_CHECKPOINT_KEY]);
         const map = stored?.[PRETRANS_SESSION_CHECKPOINT_KEY] || {};
         let modified = false;
         for (const [url, snapshot] of Object.entries(map)) {
+            if (preserveUrls.has(url)) continue;
             if (snapshot.sourceTabId === tabId || snapshot.associatedResultTabId === tabId) {
                 delete map[url];
                 modified = true;

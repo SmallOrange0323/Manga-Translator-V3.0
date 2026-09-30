@@ -60,6 +60,34 @@ describe('foreground manga recovery coordinator', () => {
         expect(await recovery.commit(job, 2, [{ ...item, pageIndex: 2 }])).toBeNull();
     });
 
+    it('keeps a consumed pretranslated chapter when its sleeping source tab changes or closes', async () => {
+        const f = fixture();
+        const recovery = createMangaRecovery(f.chrome);
+        const job = await recovery.begin({ ...options, sourceUrl: 'https://manga.test/ch2', isPretranslatedChapter: true });
+        await recovery.commit(job, 1, [item]);
+        await recovery.status(job, 'interrupted');
+        const restarted = createMangaRecovery(f.chrome);
+        const restored = await restarted.snapshot(2);
+        expect(restored).toMatchObject({ id: job.id, isPretranslatedChapter: true, status: 'interrupted' });
+        const retry = await restarted.begin({ ...options, images: [options.images[0]], isRetry: true,
+            retryPageIndices: [1] });
+        expect((await restarted.snapshot(2))).toMatchObject({ id: retry.id, isPretranslatedChapter: true });
+        f.tabs.delete(1);
+        await restarted.remove(1);
+        expect((await restarted.snapshot(2)).results).toHaveLength(1);
+    });
+
+    it('attaches cached pages if the source tab closes just before recovery begins', async () => {
+        const f = fixture();
+        const recovery = createMangaRecovery(f.chrome);
+        await recovery.ready;
+        f.tabs.delete(1);
+        const job = await recovery.begin({ ...options, sourceUrl: 'https://manga.test/ch2',
+            isPretranslatedChapter: true });
+        expect(job.sourceTabId).toBeNull();
+        expect((await recovery.commit(job, 1, [item])).results).toHaveLength(1);
+    });
+
     it('STOP fences late batch results and completion', async () => {
         const f = fixture();
         const recovery = createMangaRecovery(f.chrome);
@@ -89,8 +117,8 @@ describe('foreground manga recovery coordinator', () => {
         const job = await recovery.begin(options);
         await recovery.commit(job, 2, [item, { ...item, image: options.images[1], pageIndex: 2, batchIndex: 1 }]);
         await recovery.status(job, 'completed');
-        const retry = await recovery.begin({ ...options, images: [options.images[1]], isRetry: true });
-        await recovery.commit(retry, 1, [{ ...item, image: options.images[1], results: [{ original: 'B', translation: '乙' }] }]);
+        const retry = await recovery.begin({ ...options, images: [options.images[1]], isRetry: true, retryPageIndices: [2] });
+        await recovery.commit(retry, 1, [{ ...item, pageIndex: 2, image: options.images[1], results: [{ original: 'B', translation: '乙' }] }]);
         const rows = (await recovery.snapshot(2)).results;
         expect(rows).toHaveLength(2);
         expect(rows[0].results).toEqual(item.results);
@@ -103,6 +131,50 @@ describe('foreground manga recovery coordinator', () => {
         await expect(recovery.begin({ ...options, images: [options.images[1]], isRetry: true }))
             .rejects.toThrow('找不到原章節');
         expect(await recovery.snapshot(2)).toBeNull();
+    });
+
+    it('uses original page numbers for duplicate URLs and temporary data images', async () => {
+        const f = fixture();
+        const recovery = createMangaRecovery(f.chrome);
+        const duplicate = 'https://manga.test/same.jpg';
+        const temporary = 'data:image/jpeg;base64,AAAA';
+        const job = await recovery.begin({ ...options, images: [duplicate, duplicate, temporary], batchSize: 2 });
+        await recovery.commit(job, 3, [
+            { ...item, image: duplicate, pageIndex: 1, batchIndex: 0 },
+            { ...item, image: duplicate, pageIndex: 2, batchIndex: 0 },
+            { ...item, image: temporary, pageIndex: 3, batchIndex: 1 }
+        ]);
+        await recovery.status(job, 'completed');
+        const retry = await recovery.begin({ ...options, images: [duplicate, temporary], isRetry: true,
+            retryPageIndices: [2, 3] });
+        await recovery.commit(retry, 2, [
+            { ...item, image: duplicate, pageIndex: 2, results: [{ original: 'B', translation: '乙' }] },
+            { ...item, image: temporary, pageIndex: 3, results: [{ original: 'C', translation: '丙' }] }
+        ]);
+        const rows = (await recovery.snapshot(2)).results;
+        expect(rows.map(row => row.pageIndex)).toEqual([1, 2, 3]);
+        expect(rows.map(row => row.results[0].translation)).toEqual(['甲', '乙', '丙']);
+        await expect(recovery.commit(retry, 2, [{ ...item, pageIndex: 1 }]))
+            .rejects.toThrow('頁碼不屬於');
+    });
+
+    it('single-page retry updates the selected page when URLs repeat or are temporary', async () => {
+        const f = fixture();
+        const recovery = createMangaRecovery(f.chrome);
+        const duplicate = 'https://manga.test/same.jpg';
+        const temporary = 'data:image/jpeg;base64,AAAA';
+        const job = await recovery.begin({ ...options, images: [duplicate, duplicate, temporary] });
+        await recovery.commit(job, 3, [
+            { ...item, image: duplicate, pageIndex: 1 },
+            { ...item, image: duplicate, pageIndex: 2 },
+            { ...item, image: temporary, pageIndex: 3 }
+        ]);
+        await recovery.status(job, 'completed');
+        await recovery.replaceResult(2, job.id, 2, { results: [{ original: 'B', translation: '乙' }] });
+        await recovery.replaceResult(2, job.id, 3, { results: [{ original: 'C', translation: '丙' }] });
+        const rows = (await recovery.snapshot(2)).results;
+        expect(rows.map(row => row.results[0].translation)).toEqual(['甲', '乙', '丙']);
+        expect(rows.map(row => row.pageIndex)).toEqual([1, 2, 3]);
     });
 
     it('pretranslation cache serialization excludes foreground ownership and readiness promises', () => {

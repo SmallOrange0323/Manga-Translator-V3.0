@@ -22,7 +22,7 @@ export function createMangaRecovery(chromeApi) {
         await ready;
         const store = await storeFor(tabId);
         const job = await store.get(tabId);
-        if (job?.sourceTabId && job.sourceUrl) {
+        if (job?.sourceTabId && job.sourceUrl && !job.isPretranslatedChapter) {
             const source = await chromeApi.tabs.get(job.sourceTabId).catch(() => null);
             if (!source || (source.pendingUrl || source.url) !== job.sourceUrl) {
                 return { ...job, status: 'source-changed' };
@@ -42,8 +42,12 @@ export function createMangaRecovery(chromeApi) {
     async function begin(options) {
         await ready;
         const store = await storeFor(options.resultTabId);
-        const source = options.sourceTabId ? await chromeApi.tabs.get(options.sourceTabId) : null;
-        const job = await store.begin({ ...options, sourceUrl: options.sourceUrl || source?.pendingUrl || source?.url || '' });
+        const source = options.sourceTabId ? await chromeApi.tabs.get(options.sourceTabId).catch(err => {
+            if (!options.isPretranslatedChapter) throw err;
+            return null;
+        }) : null;
+        const job = await store.begin({ ...options, sourceTabId: source ? options.sourceTabId : null,
+            sourceUrl: options.sourceUrl || source?.pendingUrl || source?.url || '' });
         await publish(job);
         return job;
     }
@@ -67,11 +71,11 @@ export function createMangaRecovery(chromeApi) {
         const store = await storeFor(tabId);
         return store.resume(tabId, id);
     }
-    async function replaceResult(tabId, id, image, result) {
+    async function replaceResult(tabId, id, pageIndex, result) {
         const store = await storeFor(tabId);
         const current = await snapshot(tabId);
         if (current?.status === 'source-changed') return null;
-        const saved = await store.replaceResult(tabId, id, image, result);
+        const saved = await store.replaceResult(tabId, id, pageIndex, result);
         await publish(saved);
         return saved;
     }

@@ -137,6 +137,8 @@ describe('actual foreground manga and consume flows', () => {
         f.chrome.tabs.update.mockImplementation(async (id, change) => { await navigation.promise; f.tabs.get(id).pendingUrl = change.url; return f.tabs.get(id); });
         const reply = deferred();
         const dependencies = { chrome: f.chrome, mangaRecovery: recovery, log,
+            savePretranslationCheckpoint: vi.fn(async () => {}),
+            isSuccessfulPretranslation: data => Boolean(data?.isDone && data.results?.length === data.images?.length && !data.results.some(result => result.error)),
             pretranslatedChaptersMap: new Map([['https://manga.test/ch2', data]]) };
         const start = source.indexOf("  if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER')");
         const end = source.indexOf("  if (message.action === 'START_MANGA_BATCH_PC_MODE')", start);
@@ -159,6 +161,80 @@ describe('actual foreground manga and consume flows', () => {
         expect(data.consumedResultTabId).toBe(2);
     });
 
+    it('attaches completed pretranslation while a discarded source tab still reports its old URL', async () => {
+        const f = fixture();
+        f.tabs.get(1).discarded = true;
+        f.chrome.tabs.update.mockImplementation(async id => f.tabs.get(id));
+        const recovery = createMangaRecovery(f.chrome);
+        const nextUrl = 'https://manga.test/ch2';
+        const data = { images, results: images.map(image => ({ image, results: [] })),
+            isDone: true, inProgress: false, batchSize: 1 };
+        const reply = deferred();
+        const dependencies = { chrome: f.chrome, mangaRecovery: recovery, log,
+            isSuccessfulPretranslation: value => Boolean(value?.isDone &&
+                value.results?.length === value.images?.length && !value.results.some(result => result.error)),
+            pretranslatedChaptersMap: new Map([[nextUrl, data]]) };
+        const start = source.indexOf("  if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER')");
+        const end = source.indexOf("  if (message.action === 'START_MANGA_BATCH_PC_MODE')", start);
+        const handler = new Function(...Object.keys(dependencies), 'message', 'sender', 'sendResponse', source.slice(start, end));
+        handler(...Object.values(dependencies), { action: 'CONSUME_PRETRANSLATED_CHAPTER',
+            payload: { nextUrl, sourceTabId: 1 } }, { tab: { id: 2 } }, reply.resolve);
+        const result = await reply.promise;
+        expect(result.success).toBe(true);
+        expect(result.job).toMatchObject({ status: 'completed', sourceTabId: 1,
+            isPretranslatedChapter: true, sourceUrl: nextUrl });
+        expect(result.job.results).toHaveLength(2);
+        expect(f.tabs.get(1).url).toBe('https://manga.test/ch1');
+    });
+
+    it('attaches two readers to one in-flight chapter without replacing the first consumer', async () => {
+        const f = fixture();
+        f.tabs.set(3, { id: 3, url: f.tabs.get(2).url });
+        const recovery = createMangaRecovery(f.chrome);
+        const nextUrl = 'https://manga.test/ch2';
+        const data = { images, results: [{ image: images[0], results: [] }],
+            isDone: false, inProgress: true, batchSize: 1 };
+        const dependencies = { chrome: f.chrome, mangaRecovery: recovery, log,
+            savePretranslationCheckpoint: vi.fn(async () => {}),
+            isSuccessfulPretranslation: () => false, pretranslatedChaptersMap: new Map([[nextUrl, data]]) };
+        const start = source.indexOf("  if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER')");
+        const end = source.indexOf("  if (message.action === 'START_MANGA_BATCH_PC_MODE')", start);
+        const handler = new Function(...Object.keys(dependencies), 'message', 'sender', 'sendResponse', source.slice(start, end));
+        const replies = [deferred(), deferred()];
+        [2, 3].forEach((tabId, index) => handler(...Object.values(dependencies),
+            { action: 'CONSUME_PRETRANSLATED_CHAPTER', payload: { nextUrl, sourceTabId: 1 } },
+            { tab: { id: tabId } }, replies[index].resolve));
+        const responses = await Promise.all(replies.map(reply => reply.promise));
+        expect(responses.every(response => response.success)).toBe(true);
+        expect(data.foregroundConsumers.size).toBe(2);
+        expect(data.foregroundConsumers.get(2).job.resultTabId).toBe(2);
+        expect(data.foregroundConsumers.get(3).job.resultTabId).toBe(3);
+        responses.forEach(response => expect(() => structuredClone(response)).not.toThrow());
+    });
+
+    it('keeps the pretranslated chapter when updating the sleeping source tab fails', async () => {
+        const f = fixture();
+        f.chrome.tabs.update.mockRejectedValueOnce(new Error('tab discarded'));
+        const recovery = createMangaRecovery(f.chrome);
+        const nextUrl = 'https://manga.test/ch2';
+        const data = { images, results: images.map(image => ({ image, results: [] })),
+            isDone: true, inProgress: false, batchSize: 1 };
+        const reply = deferred();
+        const dependencies = { chrome: f.chrome, mangaRecovery: recovery, log,
+            isSuccessfulPretranslation: value => Boolean(value?.isDone &&
+                value.results?.length === value.images?.length && !value.results.some(result => result.error)),
+            pretranslatedChaptersMap: new Map([[nextUrl, data]]) };
+        const start = source.indexOf("  if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER')");
+        const end = source.indexOf("  if (message.action === 'START_MANGA_BATCH_PC_MODE')", start);
+        const handler = new Function(...Object.keys(dependencies), 'message', 'sender', 'sendResponse', source.slice(start, end));
+        handler(...Object.values(dependencies), { action: 'CONSUME_PRETRANSLATED_CHAPTER',
+            payload: { nextUrl, sourceTabId: 1 } }, { tab: { id: 2 } }, reply.resolve);
+        const result = await reply.promise;
+        expect(result).toMatchObject({ success: true, job: {
+            status: 'completed', sourceTabId: null, isPretranslatedChapter: true } });
+        expect(result.job.results).toHaveLength(2);
+    });
+
     it('actual completed-pretranslation writer stores only serializable snapshot and skips private sources', async () => {
         let privateSource = false;
         let cache = {};
@@ -178,6 +254,16 @@ describe('actual foreground manga and consume flows', () => {
         await save(data.url, data);
         expect(update).toHaveBeenCalledTimes(1);
     });
+    it('reports a cache write failure so the caller can preserve its checkpoint', async () => {
+        const save = productionFunction('savePretranslatedChapterToStorage', 'async function getPretranslatedChapterFromStorage', {
+            state: { update: async () => { throw new Error('quota exceeded'); } },
+            pretranslationStorageKey: () => 'cache', createPretranslationSnapshot,
+            isTabIncognito: async () => false, log
+        });
+        await expect(save('https://manga.test/ch2', { url: 'https://manga.test/ch2', sourceTabId: 1,
+            images, results: [], isDone: true })).rejects.toMatchObject({ cacheWriteFailed: true,
+            message: 'quota exceeded' });
+    });
     it('consume reports failure rather than marking an empty snapshot complete when navigation belongs to another chapter', async () => {
         const f = fixture();
         const recovery = createMangaRecovery(f.chrome);
@@ -189,6 +275,7 @@ describe('actual foreground manga and consume flows', () => {
         });
         const reply = deferred();
         const dependencies = { chrome: f.chrome, mangaRecovery: recovery, log,
+            isSuccessfulPretranslation: data => Boolean(data?.isDone && data.results?.length === data.images?.length && !data.results.some(result => result.error)),
             pretranslatedChaptersMap: new Map([[nextUrl, data]]) };
         const start = source.indexOf("  if (message.action === 'CONSUME_PRETRANSLATED_CHAPTER')");
         const end = source.indexOf("  if (message.action === 'START_MANGA_BATCH_PC_MODE')", start);
@@ -196,10 +283,7 @@ describe('actual foreground manga and consume flows', () => {
         handler(...Object.values(dependencies), { action: 'CONSUME_PRETRANSLATED_CHAPTER', payload: { nextUrl, sourceTabId: 1 } }, { tab: { id: 2 } }, reply.resolve);
         const result = await reply.promise;
         expect(result.success).toBe(false);
-        const saved = await recovery.snapshot(2);
-        expect(saved.status).toBe('source-changed');
-        expect(saved.results).toEqual([]);
-        expect(saved.processedCount).toBe(0);
+        expect(await recovery.snapshot(2)).toBeNull();
     });
 
 });

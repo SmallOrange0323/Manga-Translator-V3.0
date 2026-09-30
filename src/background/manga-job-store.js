@@ -39,13 +39,28 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
     const get = async (tabId) => { await queue; return (await readAll())[tabId] || null; };
     return {
         get,
-        async begin({ sourceTabId, resultTabId, sourceUrl = '', images, navLinks, mangaKey, batchSize, isRetry = false, targetBatchIndex = null }) {
+        async begin({ sourceTabId, resultTabId, sourceUrl = '', images, navLinks, mangaKey, batchSize, isRetry = false, targetBatchIndex = null, retryPageIndices = null, isPretranslatedChapter = false }) {
             return mutate(jobs => {
                 const previous = jobs[resultTabId];
                 if (images.length > 800) throw new Error('每個漫畫任務最多支援 800 頁');
                 if (!previous && Object.keys(jobs).length >= 8) throw new Error('最多保留 8 個漫畫結果頁，請先關閉舊結果頁');
                 if (isRetry && (!previous || previous.results.length === 0)) {
                     throw new Error('找不到原章節的翻譯結果，請從原網頁重新翻譯');
+                }
+                if (isRetry) {
+                    if (!Array.isArray(retryPageIndices) || retryPageIndices.length !== images.length ||
+                        new Set(retryPageIndices).size !== retryPageIndices.length) {
+                        throw new Error('重翻缺少原始頁碼，請重新載入結果頁');
+                    }
+                    retryPageIndices.forEach((pageIndex, index) => {
+                        const original = previous.results.find(row => row.pageIndex === pageIndex);
+                        const candidate = imageRef(images[index]);
+                        if (!Number.isInteger(pageIndex) || pageIndex <= 0 || !original ||
+                            (targetBatchIndex !== null && original.batchIndex !== targetBatchIndex) ||
+                            (original.image && original.image !== candidate)) {
+                            throw new Error('重翻圖片與原始頁碼不一致，請重新載入結果頁');
+                        }
+                    });
                 }
                 const job = {
                     id: crypto.randomUUID(), sourceTabId, resultTabId, sourceUrl: isRetry ? previous.sourceUrl : sourceUrl,
@@ -56,8 +71,11 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
                             .filter(item => item.url)
                     } : (isRetry ? previous.navLinks : null),
                     mangaKey: mangaKey || null, batchSize, isRetry, targetBatchIndex,
+                    isPretranslatedChapter: isRetry ? Boolean(previous.isPretranslatedChapter) : Boolean(isPretranslatedChapter),
+                    retryPageIndices: isRetry ? retryPageIndices : null,
                     results: isRetry ? previous?.results || [] : [],
-                    processedCount: 0, status: 'running', revision: (previous?.revision || 0) + 1, updatedAt: Date.now()
+                    processedCount: 0, status: 'running', revision: (previous?.revision || 0) + 1,
+                    createdAt: Math.max(Date.now(), (previous?.createdAt || 0) + 1), updatedAt: Date.now()
                 };
                 jobs[resultTabId] = job;
                 return job;
@@ -81,9 +99,10 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
                 if (!job || job.id !== id || job.status !== 'running' || !canCommit()) return null;
                 for (const raw of items) {
                     const item = resultItem(raw);
-                    const index = job.isRetry && item.image
-                        ? job.results.findIndex(row => row.image === item.image)
-                        : job.results.findIndex(row => row.pageIndex === item.pageIndex);
+                    const index = job.results.findIndex(row => row.pageIndex === item.pageIndex);
+                    if (job.isRetry && (!job.retryPageIndices?.includes(item.pageIndex) || index < 0)) {
+                        throw new Error('重翻結果頁碼不屬於目前任務');
+                    }
                     if (index >= 0) {
                         job.results[index] = { ...item, pageIndex: job.results[index].pageIndex, batchIndex: job.results[index].batchIndex };
                     } else job.results.push(item);
@@ -94,13 +113,13 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
                 return job;
             });
         },
-        async replaceResult(tabId, id, image, result) {
+        async replaceResult(tabId, id, pageIndex, result) {
             return mutate(jobs => {
                 const job = jobs[tabId];
                 if (!job || job.id !== id) return null;
-                const index = job.results.findIndex(item => item.image === image);
+                const index = job.results.findIndex(item => item.pageIndex === pageIndex);
                 if (index < 0) return null;
-                job.results[index] = resultItem({ ...job.results[index], ...result, image, error: '', isProhibited: false, isBatchFirstProhibited: false });
+                job.results[index] = resultItem({ ...job.results[index], ...result, error: '', isProhibited: false, isBatchFirstProhibited: false });
                 job.revision++;
                 return job;
             });
@@ -130,7 +149,7 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
         async removeForTab(tabId) {
             return mutate(jobs => {
                 for (const [id, job] of Object.entries(jobs)) {
-                    if (job.resultTabId === tabId || job.sourceTabId === tabId) delete jobs[id];
+                    if (job.resultTabId === tabId || (job.sourceTabId === tabId && !job.isPretranslatedChapter)) delete jobs[id];
                 }
             });
         },
@@ -140,7 +159,8 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
                 for (const [id, job] of Object.entries(jobs)) {
                     const result = live.get(job.resultTabId);
                     const source = live.get(job.sourceTabId);
-                    if (!result?.url?.startsWith(readerUrl) || (job.sourceTabId && (!source || (job.sourceUrl && (source.pendingUrl || source.url) !== job.sourceUrl)))) {
+                    if (!result?.url?.startsWith(readerUrl) || (!job.isPretranslatedChapter && job.sourceTabId &&
+                        (!source || (job.sourceUrl && (source.pendingUrl || source.url) !== job.sourceUrl)))) {
                         delete jobs[id];
                     } else if (job.status === 'running') {
                         job.status = 'interrupted'; job.revision++;
