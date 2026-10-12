@@ -1,5 +1,6 @@
 // src/options/main.js
 import { state } from '../utils/state.js';
+import { initWnacgSettings } from './wnacg-settings.js';
 import { loadGlossary, getGlossarySnapshot } from '../background/glossary-manager.js';
 import * as Constants from '../utils/constants.js';
 import { getAuthToken } from '../utils/sync.js';
@@ -37,6 +38,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // 2. Tab 切換邏輯
         setupTabs();
+        await initWnacgSettings({
+            toggle: document.getElementById('wnacgAccelerationEnabled'),
+            status: document.getElementById('wnacgAccelerationStatus'),
+            sendAction: sendBackgroundAction
+        });
 
         // 3. 載入並初始化各項設定
         await initGeneralSettings();

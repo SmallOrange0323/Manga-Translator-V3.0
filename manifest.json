@@ -14,7 +14,8 @@
     "contextMenus",
     "identity",
     "downloads",
-    "alarms"
+    "alarms",
+    "declarativeNetRequestWithHostAccess"
   ],
   "oauth2": {
     "client_id": "892014744898-61cck565ped868ht31jjqc8apsvpm6gf.apps.googleusercontent.com",
@@ -28,6 +29,15 @@
   "background": {
     "service_worker": "src/background/index.js",
     "type": "module"
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "wnacg_local_jquery",
+        "enabled": true,
+        "path": "rules/wnacg.json"
+      }
+    ]
   },
   "content_scripts": [
     {
@@ -43,6 +53,14 @@
     "open_in_tab": true
   },
   "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/jquery-1.10.2.min.js",
+        "vendor/jquery-1.6.2.min.js",
+        "vendor/jquery-ui-1.8.24.min.js"
+      ],
+      "matches": ["*://*.wnacg.com/*"]
+    },
     {
       "resources": [
         "icon.svg",

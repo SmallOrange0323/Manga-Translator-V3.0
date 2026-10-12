@@ -299,6 +299,17 @@
                     </div>
                 </div>
 
+                <div style="margin: 18px 0; padding: 14px; border: 1px solid var(--border-color); border-radius: 8px;">
+                    <label style="display: flex; align-items: center; gap: 8px; margin-top: 0;">
+                        <input type="checkbox" id="wnacgAccelerationEnabled" role="switch" aria-describedby="wnacgAccelerationHelp" checked disabled>
+                        WNACG 加速
+                    </label>
+                    <p id="wnacgAccelerationHelp" style="font-size: 13px; color: var(--text-muted); margin: 8px 0;">
+                        加快紳士漫畫首頁與搜尋頁載入。網站顯示或操作異常時可關閉。切換立即儲存，重新整理網站後生效。
+                    </p>
+                    <p id="wnacgAccelerationStatus" role="status" aria-live="polite" style="font-size: 13px; margin: 8px 0 0;">正在讀取設定…</p>
+                </div>
+
                 <div style="display: flex; justify-content: space-between; align-items: flex-end;">
                     <label>Gemini API Key（支援多組輪替）:</label>
                     <a href="https://aistudio.google.com/app/apikey" target="_blank" style="font-size: 12px; color: var(--accent-color); text-decoration: none; margin-bottom: 4px; font-weight: bold;">[ 獲取 API 金鑰 (Google AI Studio) ]</a>

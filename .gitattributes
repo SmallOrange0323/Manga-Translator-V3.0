@@ -1,0 +1,2 @@
+# Preserve the official vendored script byte-for-byte across Windows checkouts.
+public/vendor/*.min.js -text

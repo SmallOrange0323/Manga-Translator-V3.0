@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "extensionPath": "/vendor/jquery-1.10.2.min.js" }
+    },
+    "condition": {
+      "regexFilter": "^https?://upcdn\\.b0\\.upaiyun\\.com/libs/jquery/jquery-1\\.10\\.2\\.min\\.js([?].*)?$",
+      "isUrlFilterCaseSensitive": true,
+      "initiatorDomains": ["wnacg.com"],
+      "resourceTypes": ["script"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "extensionPath": "/vendor/jquery-1.6.2.min.js" }
+    },
+    "condition": {
+      "regexFilter": "^https?://upcdn\\.b0\\.upaiyun\\.com/libs/jquery/jquery-1\\.6\\.2\\.min\\.js([?].*)?$",
+      "isUrlFilterCaseSensitive": true,
+      "initiatorDomains": ["wnacg.com"],
+      "resourceTypes": ["script"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": { "extensionPath": "/vendor/jquery-ui-1.8.24.min.js" }
+    },
+    "condition": {
+      "regexFilter": "^https?://upcdn\\.b0\\.upaiyun\\.com/libs/jqueryui/jquery\\.ui-1\\.8\\.24\\.min\\.js([?].*)?$",
+      "isUrlFilterCaseSensitive": true,
+      "initiatorDomains": ["wnacg.com"],
+      "resourceTypes": ["script"]
+    }
+  }
+]

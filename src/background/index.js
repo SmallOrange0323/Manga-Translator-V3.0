@@ -1,4 +1,5 @@
 import { createMangaRecovery } from './manga-recovery.js';
+import { installWnacgAcceleration } from './wnacg-acceleration.js';
 import { parseChapterHtml } from '../utils/chapter-parser.js';
 import { crawlJestfulChapterInTab } from './jestful-prefetch.js';
 import { createPretranslationQueueStore } from './pretranslation-queue-store.js';
@@ -51,6 +52,7 @@ const pendingMangaJobs = new Map();
 
 
 log.info('Background', '漫譯 V3 背景服務程式已啟動');
+installWnacgAcceleration(chrome, error => log.warn('WNACG', `套用加速設定失敗: ${error.message}`));
 
 // 檢查是否處於無痕模式背景實例中 (用於 split 模式分流)
 const isIncognitoProcess = chrome.extension ? chrome.extension.inIncognitoContext : false;
