@@ -1,4 +1,5 @@
 import { LOADING_GIF_FILENAME, RUNNING_ANIMS } from '../utils/constants.js';
+import { createMangaImageReceiver } from '../utils/manga-image-messages.js';
 
 let translatedData = [];
 let lastMangaRevision = -1;
@@ -1133,7 +1134,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-function getOrCreateBatchSection(batchIndex) {
+function getOrCreateBatchSection(batchIndex, skipDropdownRefresh = false) {
     if (batchIndex === undefined || batchIndex === null || isNaN(batchIndex)) batchIndex = 0;
     let section = container.querySelector(`.mt-batch-section[data-batch="${batchIndex}"]`);
     if (!section) {
@@ -1201,7 +1202,9 @@ function getOrCreateBatchSection(batchIndex) {
             container.appendChild(section);
         }
 
-        updateBatchDropdownMenu();
+        if (!skipDropdownRefresh) {
+            updateBatchDropdownMenu();
+        }
     }
     return section.querySelector('.mt-batch-grid');
 }
@@ -1238,8 +1241,14 @@ function applyMangaSnapshot(job) {
     activeMangaJob = job;
     sourceTabId = job.sourceTabId || sourceTabId;
     activeMangaKey = job.mangaKey || activeMangaKey;
+    const previousByPageIndex = new Map();
+    for (const row of previousRows) {
+        if (row && Number.isInteger(row.pageIndex)) {
+            previousByPageIndex.set(row.pageIndex, row);
+        }
+    }
     const savedRows = job.results.map(item => {
-        const existing = previousRows.find(row => row.pageIndex === item.pageIndex);
+        const existing = previousByPageIndex.get(item.pageIndex);
         // Keep temporary image pixels in this live page only.
         return !item.image && existing?.image && existing.pageIndex === item.pageIndex &&
             (job.id === existing._jobId || sameChapterRetry)
@@ -1247,17 +1256,30 @@ function applyMangaSnapshot(job) {
     });
     // A retry snapshot can contain only its selected batch (for example after a
     // worker restart). Keep the other visible pages of the same chapter.
-    translatedData = sameChapterRetry
-        ? [...savedRows, ...previousRows.filter(row => !savedRows.some(saved =>
-            (row.pageIndex > 0 && saved.pageIndex === row.pageIndex) ||
-            (!(row.pageIndex > 0) && row.image && saved.image === row.image)))].sort((a, b) => a.pageIndex - b.pageIndex)
-        : savedRows;
+    if (sameChapterRetry) {
+        const savedPageIndices = new Set();
+        const savedImages = new Set();
+        for (const saved of savedRows) {
+            if (saved.pageIndex > 0) savedPageIndices.add(saved.pageIndex);
+            else if (saved.image) savedImages.add(saved.image);
+        }
+        translatedData = [
+            ...savedRows,
+            ...previousRows.filter(row => !(
+                (row.pageIndex > 0 && savedPageIndices.has(row.pageIndex)) ||
+                (!(row.pageIndex > 0) && row.image && savedImages.has(row.image))
+            ))
+        ].sort((a, b) => a.pageIndex - b.pageIndex);
+    } else {
+        translatedData = savedRows;
+    }
     container.innerHTML = '';
     translatedData.forEach((item, index) => {
         const card = buildCard(item, index);
-        getOrCreateBatchSection(item.batchIndex || 0).appendChild(card);
+        getOrCreateBatchSection(item.batchIndex || 0, true).appendChild(card);
         if (window._bindMobileCard) window._bindMobileCard(card);
     });
+    if (typeof updateBatchDropdownMenu === 'function') updateBatchDropdownMenu();
     placeholdersCreated = true;
     if (job.navLinks) updateNavUI(job.navLinks);
     document.getElementById('progress-text').innerText = job.processedCount + ' / ' + job.images.length;
@@ -1282,7 +1304,7 @@ function applyMangaSnapshot(job) {
         }
     } else if (job.status === 'source-changed') {
         showRecoveryError('來源章節已變更。已保存的譯文仍可閱讀；請從原網頁開始新的翻譯。');
-    } else if (job.results.some(item => !item.image)) {
+    } else if (translatedData.some(item => !item.image)) {
         const notice = document.createElement('p');
         notice.id = 'manga-recovery-notice';
         notice.textContent = '部分暫存圖片已失效，已保存的譯文仍可閱讀；圖片需回原網頁重新擷取。';
@@ -1292,7 +1314,25 @@ function applyMangaSnapshot(job) {
     updateRetryAllBtn();
 }
 
+const receiveMangaImage = createMangaImageReceiver(() => activeMangaJob, (pageIndex, image) => {
+    const row = translatedData.find(item => item.pageIndex === pageIndex);
+    if (!row) return;
+    row.image = image;
+    const saved = activeMangaJob.results.find(item => item.pageIndex === pageIndex);
+    if (saved) saved.image = image;
+    const card = container.querySelector(`.result-card[data-page-index="${pageIndex}"]`);
+    const img = card?.querySelector('.card-image-wrapper img');
+    if (img) img.src = image;
+    if (card) card.dataset.retryUrl = image;
+    if (translatedData.every(item => item.image)) document.getElementById('manga-recovery-notice')?.remove();
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'mangaImageChunk') {
+        receiveMangaImage(request);
+        sendResponse({ status: 'success' });
+        return false;
+    }
     if (request.action === 'mangaSnapshot') {
         applyMangaSnapshot(request.job);
         sendResponse({ status: 'success' });
@@ -1558,7 +1598,7 @@ function buildCard(item, index) {
                     // 重新渲染對話區域
                     const dialoguesContainer = document.createElement('div');
                     dialoguesContainer.className = 'dialogues-container';
-                    renderDialogueItems(dialoguesContainer, item.results);
+                    renderDialogueItems(dialoguesContainer, item.results, item);
                     textWrapper.appendChild(dialoguesContainer);
 
                     textWrapper.appendChild(createSuccessActionGroup(item, dialoguesContainer));
@@ -1622,7 +1662,7 @@ function buildCard(item, index) {
 
 function renderDialogueItems(container, results, item) {
     container.innerHTML = '';
-    results.forEach((res) => {
+    results.forEach((res, lineIndex) => {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'dialogue-item';
         itemDiv.draggable = true;
@@ -1700,10 +1740,16 @@ function renderDialogueItems(container, results, item) {
             chrome.runtime.sendMessage({ 
                 action: "retranslateText", 
                 text: newText,
-                mangaKey: activeMangaKey
+                mangaKey: activeMangaKey,
+                tabId: sourceTabId,
+                pageIndex: item?.pageIndex,
+                lineIndex
             }, (response) => {
                 if (response && response.results && response.results.length > 0) { 
-                    transText.textContent = sanitizeTranslationText(response.results[0].translation); 
+                    const cleaned = sanitizeTranslationText(response.results[0].translation);
+                    transText.textContent = cleaned;
+                    res.original = newText;
+                    res.translation = cleaned;
                 }
                 else { 
                     alert("重譯失敗: " + (response?.error || 'Unknown')); 
@@ -1769,7 +1815,9 @@ function createSuccessActionGroup(item, dialoguesContainer) {
         chrome.runtime.sendMessage({ 
             action: "retranslateText", 
             text: combinedText,
-            mangaKey: activeMangaKey
+            mangaKey: activeMangaKey,
+            tabId: sourceTabId,
+            pageIndex: item?.pageIndex
         }, (response) => {
             textBtn.disabled = false;
             textBtn.innerHTML = oldHtml;
@@ -1777,10 +1825,15 @@ function createSuccessActionGroup(item, dialoguesContainer) {
                 const newResults = response.results;
                 const transElements = dialoguesContainer.querySelectorAll('.translated-text');
                 
-                // 逐行填回，避免越界
+                // 逐行填回，避免越界，並同步更新本地 item.results
                 transElements.forEach((el, i) => {
                     if (newResults[i]) {
-                        el.textContent = sanitizeTranslationText(newResults[i].translation);
+                        const cleaned = sanitizeTranslationText(newResults[i].translation);
+                        el.textContent = cleaned;
+                        if (Array.isArray(item?.results) && item.results[i]) {
+                            item.results[i].original = originalTexts[i] || item.results[i].original;
+                            item.results[i].translation = cleaned;
+                        }
                     }
                 });
             } else {

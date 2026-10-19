@@ -1,4 +1,7 @@
 import { createMangaRecovery } from './manga-recovery.js';
+import { createMangaResultUpdate } from './manga-result-update.js';
+import { createLocalMangaUploads } from './local-manga-uploads.js';
+import { mangaWireSnapshot } from '../utils/manga-image-messages.js';
 import { installWnacgAcceleration } from './wnacg-acceleration.js';
 import { parseChapterHtml } from '../utils/chapter-parser.js';
 import { crawlJestfulChapterInTab } from './jestful-prefetch.js';
@@ -48,6 +51,7 @@ const activeMangaTranslationRuns = new Set();
 const withMangaStartLock = createMangaStartLock();
 const mangaRecovery = createMangaRecovery(chrome);
 const pendingMangaJobs = new Map();
+const localMangaUploads = createLocalMangaUploads();
 
 
 
@@ -1156,7 +1160,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               
               let glossarySnippet = '';
               const tabId = sender.tab?.id;
-              if (tabId) {
+              const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
+              if (isGlossaryEnabled && tabId) {
                   const navCtx = await state.get('navigationContext', {});
                   const mangaKey = navCtx[tabId];
                   if (mangaKey) {
@@ -1364,13 +1369,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
   }
 
-  if (message.action === 'START_MANGA_BATCH_PC_MODE') {
-      const { images, mobile, navLinks, mangaKey, windowId } = message.payload;
-      const tabId = message.payload.tabId || sender.tab?.id;
-      openNewResultPage(tabId, images, navLinks, mangaKey, mobile, windowId)
-          .catch(err => log.error('Background', err.message));
-      sendResponse({ status: 'ok' });
+  if (['BEGIN_LOCAL_MANGA_UPLOAD', 'APPEND_LOCAL_MANGA_UPLOAD', 'CANCEL_LOCAL_MANGA_UPLOAD'].includes(message.action)) {
+      try {
+          if (sender.url !== chrome.runtime.getURL('src/sidepanel/index.html')) throw new Error('請從擴充套件側邊欄上傳圖片');
+          let uploadId;
+          if (message.action === 'BEGIN_LOCAL_MANGA_UPLOAD') uploadId = localMangaUploads.begin(message.images);
+          else if (message.action === 'APPEND_LOCAL_MANGA_UPLOAD') localMangaUploads.append(message.uploadId, message.index, message.offset, message.data);
+          else localMangaUploads.cancel(message.uploadId);
+          sendResponse({ status: 'ok', ...(uploadId ? { uploadId } : {}) });
+      } catch (error) { sendResponse({ status: 'error', error: error.message }); }
       return false;
+  }
+
+  if (message.action === 'START_MANGA_BATCH_PC_MODE') {
+      (async () => {
+          const { uploadId, mobile, navLinks, mangaKey, windowId, openerTabId } = message.payload || {};
+          if (uploadId && sender.url !== chrome.runtime.getURL('src/sidepanel/index.html')) throw new Error('請從擴充套件側邊欄啟動本地翻譯');
+          const images = uploadId ? localMangaUploads.take(uploadId) : message.payload?.images;
+          if (!Array.isArray(images) || !images.length) throw new Error('請至少選取一張圖片');
+          const isLocal = images.every(image => (typeof image === 'string' ? image : image?.src)?.startsWith('data:image/'));
+          const tabId = isLocal ? null : (message.payload.tabId || sender.tab?.id);
+          const resultTabId = await openNewResultPage(tabId, images, navLinks, mangaKey, mobile, windowId,
+              openerTabId || message.payload.tabId || sender.tab?.id);
+          sendResponse({ status: 'ok', resultTabId });
+      })().catch(err => {
+          log.error('Background', err.message);
+          sendResponse({ status: 'error', error: err.message });
+      });
+      return true;
   }
 
   // 查詢特定分頁是否正在進行漫畫翻譯長任務
@@ -1427,7 +1453,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               startNewMangaBatchProcessing(pending.sourceTabId, resultTabId, pending.images, pending.navLinks, false, null, pending.mangaKey)
                   .catch(err => log.error('Background', err.message));
           }
-          sendResponse({ status: 'ok', job: await mangaRecovery.snapshot(resultTabId) });
+          const job = await mangaRecovery.snapshot(resultTabId);
+          sendResponse({ status: 'ok', job: mangaWireSnapshot(job) });
+          await mangaRecovery.publish(job);
       })().catch(err => sendResponse({ success: false, error: err.message }));
       return true;
   }
@@ -1597,13 +1625,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { url, pageIndex, tabId, mangaKey } = message;
       (async () => {
           try {
-              const initialJob = sender.tab?.id ? await mangaRecovery.snapshot(sender.tab.id) : null;
+              const resultTabId = sender.tab?.id;
+              const initialJob = resultTabId ? await mangaRecovery.snapshot(resultTabId) : null;
+              const fallbackMemImg = (resultTabId && Number.isInteger(pageIndex))
+                  ? (mangaRecovery.getMemoryImage?.(resultTabId, pageIndex, initialJob?.id) || initialJob?.results?.find(r => r.pageIndex === pageIndex)?.image || '')
+                  : '';
+              const effectiveUrl = url || fallbackMemImg;
+
               let base64 = null;
-              if (url && url.startsWith('data:image')) {
-                  base64 = url.split(',')[1];
-              } else if (url) {
+              if (effectiveUrl && effectiveUrl.startsWith('data:image')) {
+                  base64 = effectiveUrl.split(',')[1];
+              } else if (effectiveUrl) {
                   const maxDim = await state.get('imageMaxDimension', 1024);
-                  const res = await fetch(url);
+                  const res = await fetch(effectiveUrl);
                   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
                   const blob = await res.blob();
                   base64 = await resizeImageBlobToBase64(blob, maxDim);
@@ -1611,16 +1645,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (!base64) throw new Error('無法取得圖片 Base64');
               const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
               const fallbackModelName = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
-              let finalPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
+              const savedPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
               
               // 救援行動強制使用備援模型
               const usedModel = fallbackModelName || modelName;
-              if (usedModel.toLowerCase().includes('gemma')) {
-                  finalPrompt = Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP;
-              }
+              const finalPrompt = Constants.resolveMangaOneStepPrompt(savedPrompt, usedModel);
               
               let glossarySnippet = '';
-              if (mangaKey) {
+              const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
+              if (isGlossaryEnabled && mangaKey) {
                   const gl = await loadGlossary(mangaKey);
                   if (gl?.terms) glossarySnippet = buildGlossaryPromptSnippet(gl.terms);
               }
@@ -1648,11 +1681,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   }
               });
               if (result?.results) {
-                  // 修復 Bug #3：優先採用 translateTexts 回傳的 usedModelName（已由 translate-api.js 注入），
-                  // 若為舊版未含該欄位則 fallback 至本次實際使用的 usedModel
+                  // 優先採用 translateTexts 回傳的 usedModelName，並同步持久化寫回 mangaRecovery
                   if (initialJob && Number.isInteger(pageIndex) && pageIndex > 0) {
-                      await mangaRecovery.replaceResult(sender.tab.id, initialJob.id, pageIndex,
-                          { results: result.results, usedModelName: result.usedModelName || usedModel });
+                      const expectedRow = initialJob.results?.find(r => r.pageIndex === pageIndex);
+                      const update = createMangaResultUpdate(expectedRow,
+                          { image: effectiveUrl, results: result.results, usedModelName: result.usedModelName || usedModel });
+                      const saved = await mangaRecovery.replaceResult(resultTabId, initialJob.id, pageIndex, update);
+                      if (!saved) throw new Error('頁面或任務已更新，請重新發起重譯');
                   }
                   sendResponse({ results: result.results, usedModelName: result.usedModelName || usedModel });
               } else {
@@ -1667,21 +1702,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'retranslateText') {
-      const { text, mangaKey } = message;
+      const { text, mangaKey, pageIndex, lineIndex } = message;
       (async () => {
           try {
+              const resultTabId = sender.tab?.id;
+              const initialJob = (resultTabId && Number.isInteger(pageIndex) && pageIndex > 0)
+                  ? await mangaRecovery.snapshot(resultTabId)
+                  : null;
               const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
               const fallbackModelName = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
-              let prompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_TWO_STEP);
               
-              // 救援行動強制使用備援模型
+              // 救援行動強制使用備援模型，且純文字重譯固定使用純文字專用 Prompt
               const usedModel = fallbackModelName || modelName;
-              if (usedModel.toLowerCase().includes('gemma')) {
-                  prompt = Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP;
-              }
+              const prompt = usedModel.toLowerCase().includes('gemma')
+                  ? Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP
+                  : Constants.DEFAULT_PROMPT_TWO_STEP;
               
               let glossarySnippet = '';
-              if (mangaKey) {
+              const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
+              if (isGlossaryEnabled && mangaKey) {
                   const gl = await loadGlossary(mangaKey);
                   if (gl?.terms) glossarySnippet = buildGlossaryPromptSnippet(gl.terms);
               }
@@ -1709,7 +1748,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   }
               });
               if (result?.results) {
-                  sendResponse({ results: result.results });
+                  if (!Array.isArray(result.results) || result.results.length !== texts.length || !texts.length) {
+                      throw new Error('重譯回應行數不完整，請重試');
+                  }
+                  if (initialJob && Number.isInteger(pageIndex) && pageIndex > 0) {
+                      const expectedRow = initialJob.results?.find(r => r.pageIndex === pageIndex);
+                      const results = lineIndex !== undefined
+                          ? [{ ...result.results[0], original: texts[0] }]
+                          : result.results;
+                      const update = createMangaResultUpdate(expectedRow,
+                          { results, usedModelName: result.usedModelName || usedModel }, lineIndex ?? null);
+                      const saved = await mangaRecovery.replaceResult(resultTabId, initialJob.id, pageIndex, update);
+                      if (!saved) throw new Error('頁面或任務已更新，請重新發起重譯');
+                  }
+                  sendResponse({ results: result.results, usedModelName: result.usedModelName || usedModel });
               } else {
                   throw new Error('API 回應格式異常');
               }
@@ -2046,25 +2098,14 @@ async function resizeImageBlobToBase64(blob, maxDim) {
 
     try {
         const bitmap = await createImageBitmap(blob);
-        let width = bitmap.width;
-        let height = bitmap.height;
-
-        if (width > maxDim || height > maxDim) {
-            if (width > height) {
-                height = Math.round((height * maxDim) / width);
-                width = maxDim;
-            } else {
-                width = Math.round((width * maxDim) / height);
-                height = maxDim;
-            }
-        }
+        const { width, height } = Constants.computeMangaTargetDimensions(bitmap.width, bitmap.height, maxDim);
 
         const canvas = new OffscreenCanvas(width, height);
         const ctx = canvas.getContext('2d');
         ctx.drawImage(bitmap, 0, 0, width, height);
         
-        // 匯出為壓縮度與辨識度最佳平衡的 jpeg (品質設為 0.82，Payload 體積減少 ~35%，日文對白字體依然銳利)
-        const compressedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.82 });
+        // 匯出為壓縮度與辨識度最佳平衡的 jpeg (品質提升為 0.90，確保密集日文漢字與濁音點銳利清晰)
+        const compressedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.90 });
         const arrayBuffer = await compressedBlob.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
         let binary = '';
@@ -2299,12 +2340,14 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
 
         const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
         const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
-        const finalPrompt = modelName.toLowerCase().includes('gemma')
-            ? Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP : customPrompt;
+        const finalPrompt = typeof Constants.resolveMangaOneStepPrompt === 'function'
+            ? Constants.resolveMangaOneStepPrompt(customPrompt, modelName)
+            : (customPrompt && customPrompt.trim()) ? customPrompt : Constants.DEFAULT_PROMPT_ONE_STEP;
         const navCtx = await state.get('navigationContext', {});
         const mangaKey = navCtx[sourceTabId] || navCtx[resultTabId];
         let glossarySnippet = '';
-        if (mangaKey) {
+        const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
+        if (isGlossaryEnabled && mangaKey) {
             const glossary = await loadGlossary(mangaKey);
             if (glossary?.terms?.length) glossarySnippet = buildGlossaryPromptSnippet(glossary.terms);
         }
@@ -2481,23 +2524,20 @@ async function handleProcessScreenshot(rect, tabId) {
         
         // 2. 獲取翻譯設定與詞庫
         const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
-        const customPrompt = await state.get('customPrompt', 'Translate to Traditional Chinese.');
+        const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
         const navCtx = await state.get('navigationContext', {});
         const mangaKey = navCtx[tabId];
         let glossarySnippet = '';
-        if (mangaKey) {
+        const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
+        if (isGlossaryEnabled && mangaKey) {
             const currentGlossary = await loadGlossary(mangaKey);
             if (currentGlossary && currentGlossary.terms) {
                 glossarySnippet = buildGlossaryPromptSnippet(currentGlossary.terms);
             }
         }
 
-        // 3. 呼叫翻譯 (一條龍 Vison 模式)
-        // 關鍵修正：對齊黃金 Prompt 格式要求
-        let finalPrompt = customPrompt;
-        if (modelName.toLowerCase().includes('gemma')) {
-            finalPrompt = Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP;
-        }
+        // 3. 呼叫翻譯 (一條龍 Vision 模式)
+        const finalPrompt = Constants.resolveMangaOneStepPrompt(customPrompt, modelName);
 
         const result = await translateTexts([], {
             model: modelName,
@@ -2538,16 +2578,32 @@ async function handleProcessScreenshot(rect, tabId) {
  * openNewResultPage — 開一個新的結果頁並儲存 pendingBatchJobs
  * 供 navigateAndTranslate 的 fallback（結果頁已關閉時）使用
  */
-async function openNewResultPage(sourceTabId, images, navLinks, mangaKey, mobile, windowId) {
+async function openNewResultPage(sourceTabId, images, navLinks, mangaKey, mobile, windowId, openerTabId = sourceTabId) {
     const source = sourceTabId ? await chrome.tabs.get(sourceTabId).catch(() => null) : null;
+    // Local images use this tab only for placement, without binding their job to its URL.
+    const opener = openerTabId && openerTabId !== sourceTabId
+        ? await chrome.tabs.get(openerTabId).catch(() => null) : source;
     const options = { url: 'about:blank' };
-    if (windowId || source?.windowId) options.windowId = windowId || source.windowId;
+    const targetWindowId = windowId ?? opener?.windowId ?? source?.windowId;
+    if (targetWindowId !== undefined) options.windowId = targetWindowId;
+    if (opener && Number.isInteger(opener.index) && opener.windowId === targetWindowId) {
+        options.index = opener.index + 1;
+    }
     const tab = await chrome.tabs.create(options).catch(() => chrome.tabs.create({ url: 'about:blank' }));
-    await mangaRecovery.begin({ sourceTabId, resultTabId: tab.id, images, navLinks, mangaKey, batchSize: Math.max(1, parseInt(await state.get('ocrBatchSize', 5)) || 1) });
-    pendingMangaJobs.set(tab.id, { sourceTabId, images, navLinks, mangaKey });
-    if (mangaKey) await state.update('navigationContext', (ctx = {}) => ({ ...ctx, [sourceTabId]: mangaKey }));
-    if (navLinks) await state.update('navLinksStore', (ctx = {}) => ({ ...ctx, [sourceTabId]: navLinks }));
-    await chrome.tabs.update(tab.id, { url: chrome.runtime.getURL('src/reader/result.html') + '?tabId=' + sourceTabId + (mobile ? '&mobile=1' : '') });
+    try {
+        await mangaRecovery.begin({ sourceTabId, resultTabId: tab.id, images, navLinks, mangaKey, batchSize: Math.max(1, parseInt(await state.get('ocrBatchSize', 5)) || 1) });
+        pendingMangaJobs.set(tab.id, { sourceTabId, images, navLinks, mangaKey });
+        const contextTabId = sourceTabId || tab.id;
+        if (mangaKey) await state.update('navigationContext', (ctx = {}) => ({ ...ctx, [contextTabId]: mangaKey }));
+        if (navLinks) await state.update('navLinksStore', (ctx = {}) => ({ ...ctx, [contextTabId]: navLinks }));
+        await chrome.tabs.update(tab.id, { url: chrome.runtime.getURL('src/reader/result.html') + '?tabId=' + (sourceTabId || '') + (mobile ? '&mobile=1' : '') });
+        return tab.id;
+    } catch (error) {
+        pendingMangaJobs.delete(tab.id);
+        await mangaRecovery.remove(tab.id).catch(() => {});
+        await chrome.tabs.remove(tab.id).catch(() => {});
+        throw error;
+    }
 }
 
 /**
@@ -2627,8 +2683,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
         fallbackModelName = await state.get('fallbackModelName', null);
         const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
-        finalPrompt = modelName.toLowerCase().includes('gemma')
-            ? Constants.DEFAULT_PROMPT_GEMMA_ONE_STEP : customPrompt;
+        finalPrompt = typeof Constants.resolveMangaOneStepPrompt === 'function'
+            ? Constants.resolveMangaOneStepPrompt(customPrompt, modelName)
+            : (customPrompt && customPrompt.trim()) ? customPrompt : Constants.DEFAULT_PROMPT_ONE_STEP;
         navCtx = await state.get('navigationContext', {});
         currentMangaKey = customMangaKey || navCtx[sourceTabId] || navCtx[resultTabId];
         currentDisplayName = currentMangaKey;
@@ -2637,7 +2694,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         throw err;
     }
 
+    let isGlossaryEnabled = true;
     try {
+        isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
         if (!currentMangaKey && sourceTabId && sourceTabId !== 'current') {
             const tabInfo = await chrome.tabs.get(sourceTabId);
             const titleResult = extractMangaTitle(tabInfo.title || '');
@@ -2650,10 +2709,13 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             }
         }
 
-        const isIncognitoBatch = await isTabIncognito(sourceTabId);
+        const isIncognitoBatch = await isTabIncognito(sourceTabId || resultTabId);
         const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
 
-        if (currentMangaKey) {
+        if (!isGlossaryEnabled) {
+            glossarySnippet = '';
+            log.info('Glossary', `ℹ️ [詞庫狀態] 詞彙庫總開關已關閉，本次翻譯不套用專屬詞庫`);
+        } else if (currentMangaKey) {
             const entry = await loadGlossary(currentMangaKey);
             if (!entry) {
                 if (isIncognitoBatch && incognitoPrivacySetting) {
@@ -2725,6 +2787,19 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
 
         let completedCount = durableJob.processedCount;
         let allBatchResults = [];
+        let recentDialoguePairs = [];
+        if (Array.isArray(durableJob.results) && durableJob.results.length > 0) {
+            for (const row of durableJob.results) {
+                if (Array.isArray(row?.results)) {
+                    for (const line of row.results) {
+                        if (line?.original && line?.translation) {
+                            recentDialoguePairs.push({ original: line.original, translation: line.translation });
+                        }
+                    }
+                }
+            }
+            recentDialoguePairs = recentDialoguePairs.slice(-5);
+        }
         let wasStopped = false;
         let wasAborted = false;
 
@@ -2820,6 +2895,9 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 let batchSuccess = false;
                 let batchWasStopped = false;
                 const mangaSignal = getMangaAbortSignal();
+                const previousContextSnippet = recentDialoguePairs.length > 0
+                    ? recentDialoguePairs.map(p => `${p.original} -> ${p.translation}`).join('\n')
+                    : '';
 
                 if (batchSize > 1) {
                     if (i > 0 && effectiveDelay > 0) {
@@ -2841,7 +2919,7 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                     if (!await checkContinue()) {
                                         throw new HybridRequestAbortedError();
                                     }
-                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal);
+                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal, previousContextSnippet);
                                     if (!await checkContinue()) {
                                         throw new HybridRequestAbortedError();
                                     }
@@ -2951,11 +3029,23 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             const committed = await mangaRecovery.commit(durableJob, i + currentBatch.length, items, () => !runSignal.aborted);
             if (!committed) { wasStopped = true; break; }
             completedCount = committed.processedCount;
+
+            const usageCountsByModel = new Map();
             for (const item of items) {
                 if (!item.error) {
-                    await incrementDailyUsage(item.usedModelName);
+                    const mName = item.usedModelName || batchModel;
+                    usageCountsByModel.set(mName, (usageCountsByModel.get(mName) || 0) + 1);
                     allBatchResults.push(...item.results);
+                    for (const line of item.results) {
+                        if (line?.original && line?.translation) {
+                            recentDialoguePairs.push({ original: line.original, translation: line.translation });
+                        }
+                    }
                 }
+            }
+            recentDialoguePairs = recentDialoguePairs.slice(-5);
+            for (const [mName, count] of usageCountsByModel) {
+                await incrementDailyUsage(mName, count);
             }
 
             // 批次間延遲 (Hybrid 模式下可安全減半加速)
@@ -2993,11 +3083,13 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             log.warn('Background', '[跨話連續追漫] 當前話沒有下一話網址，略過預翻');
         }
 
-        // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護) ──
-        const isIncognitoBatch = await isTabIncognito(sourceTabId);
+        // ── 異步術語萃取 (遵循 V1.8.6 / 無痕模式隱私保護 與 globalGlossaryEnabled 開關) ──
+        const isIncognitoBatch = await isTabIncognito(sourceTabId || resultTabId);
         const incognitoPrivacySetting = await state.get('incognitoPrivacyMode', true);
 
-        if (isIncognitoBatch && incognitoPrivacySetting) {
+        if (!isGlossaryEnabled) {
+            log.info('Background', 'ℹ️ [詞庫狀態] 詞彙庫總開關已關閉，已跳過漫畫術語自動萃取與儲存');
+        } else if (isIncognitoBatch && incognitoPrivacySetting) {
             log.info('Background', '🔒 [隱私保護] 偵測到無痕視窗翻譯，已自動跳過漫畫術語萃取與詞庫儲存');
         } else if (currentMangaKey && allBatchResults.length > 0) {
             log.info('Background', `[術語萃取] 開始分析漫畫譯文，共 ${allBatchResults.length} 組對話...`);
@@ -3449,26 +3541,29 @@ async function ensureContentScriptInjected(tabId) {
 
 /**
  * 更新每日翻譯次數統計（用於 getDailyTokenCount 配額顯示）
- * 在每張圖片翻譯完成後呼叫此函式
+ * 支援單張或整批圖片完成後一次累加，減少 storage.local I/O 次數
  * @param {string} modelName - 當前使用的模型名稱
+ * @param {number} delta - 本次累加張數（預設 1）
  */
-async function incrementDailyUsage(modelName = '') {
+async function incrementDailyUsage(modelName = '', delta = 1) {
     try {
+        const increment = Math.max(1, Number(delta) || 1);
         if (modelName && modelName.toLowerCase().includes('gemma')) {
             log.info('Background', `使用 Gemma 模型 (${modelName})，不記入每日額度`);
             return;
         }
         const today = new Date().toISOString().split('T')[0];
         const savedDate = await state.get('usageDate', '');
+        let newCount = increment;
         if (savedDate !== today) {
             await state.set('usageDate', today);
-            await state.set('usageCount', 1);
+            await state.set('usageCount', newCount);
         } else {
             const count = await state.get('usageCount', 0);
-            await state.set('usageCount', count + 1);
+            newCount = count + increment;
+            await state.set('usageCount', newCount);
         }
         // 廣播更新給 Sidepanel
-        const newCount = await state.get('usageCount', 0);
         chrome.runtime.sendMessage({ action: 'updateTokenDisplay', count: newCount }).catch(() => {});
     } catch { /* 統計失敗不影響主要功能 */ }
 }

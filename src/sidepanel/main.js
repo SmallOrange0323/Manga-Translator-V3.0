@@ -2,6 +2,9 @@ import { state } from '../utils/state.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import { LOADING_GIF_FILENAME, RUNNING_ANIMS, STANDING_ASSETS, PRICONNE_LOADING_SPRITES } from '../utils/constants.js';
 import { getGlossarySnapshot } from '../background/glossary-manager.js';
+import { uploadLocalMangaImages } from '../utils/local-manga-upload.js';
+
+document.getElementById('mt-extension-title').textContent = `漫譯 V${chrome.runtime.getManifest().version}`;
 
 console.log('[Manga Translator V3] Classic Sidepanel Initialized');
 
@@ -479,9 +482,11 @@ function handleFiles(files) {
     
     const fileArray = Array.from(files);
     const readPromises = fileArray.map(file => {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = (ev) => resolve({ src: ev.target.result, name: file.name });
+            reader.onerror = () => reject(new Error(`無法讀取圖片：${file.name}`));
+            reader.onabort = () => reject(new Error(`圖片讀取已取消：${file.name}`));
             reader.readAsDataURL(file);
         });
     });
@@ -490,11 +495,14 @@ function handleFiles(files) {
         if (loadingOverlay) loadingOverlay.style.display = 'none';
         
         // 將讀取的 base64 圖片加入候選清單
-        candidateImages = results.map(r => r.src);
+        candidateImages = results.map(r => ({ ...r, id: crypto.randomUUID() }));
         candidateNavLinks = { prev: null, next: null }; // 本地上傳無導航
         
         renderPreviewList();
         // 清空 input 讓同一個檔案可以重複選取
+        fileInput.value = '';
+    }).catch(error => alert(error.message)).finally(() => {
+        if (loadingOverlay) loadingOverlay.style.display = 'none';
         fileInput.value = '';
     });
 }
@@ -529,32 +537,42 @@ document.getElementById('mt-select-all-btn').onclick = () => {
     updateBatchCount();
 };
 
-document.getElementById('mt-batch-trans-btn').onclick = () => {
-    const selectedCheckboxes = resultsContainer.querySelectorAll('.mt-preview-checkbox:checked');
-    const selectedIds = Array.from(selectedCheckboxes).map(cb => cb.dataset.index);
-    const selectedUrls = selectedIds.map(idx => ({
-        id: candidateImages[idx].id || Date.now() + idx,
-        src: candidateImages[idx].src || candidateImages[idx]
-    }));
-
-    if (selectedUrls.length === 0) {
-        alert("請至少選取一張圖片！");
-        return;
-    }
-
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs[0]?.id || 'current';
-        // 發送給背景以啟動新分頁
-        chrome.runtime.sendMessage({
-            action: 'START_MANGA_BATCH_PC_MODE',
-            payload: {
-                tabId: tabId,
-                windowId: tabs[0]?.windowId,
-                images: selectedUrls,
-                navLinks: candidateNavLinks, // 傳入導航連結，供結果頁顯示上下一話按鈕
-                mangaKey: currentMangaKey    // 傳入選擇的詞庫 key
-            }
+let isStartingBatch = false;
+document.getElementById('mt-batch-trans-btn').onclick = async () => {
+    if (isStartingBatch) return;
+    const button = document.getElementById('mt-batch-trans-btn');
+    isStartingBatch = true;
+    button.disabled = true;
+    try {
+        const selectedCheckboxes = resultsContainer.querySelectorAll('.mt-preview-checkbox:checked');
+        const selectedIds = Array.from(selectedCheckboxes).map(cb => cb.dataset.index);
+        const selectedUrls = selectedIds.map(idx => {
+            const image = candidateImages[idx];
+            const src = typeof image === 'string' ? image : image?.src;
+            if (!src) throw new Error('選圖清單已變更，請重新選取圖片');
+            return { id: image.id || crypto.randomUUID(), src };
         });
+
+        if (selectedUrls.length === 0) {
+            alert("請至少選取一張圖片！");
+            return;
+        }
+
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const isLocal = selectedUrls.every(image => image.src.startsWith('data:image/'));
+        if (!isLocal && !tab?.id) throw new Error('找不到來源分頁，請重新開啟漫畫網頁');
+        const options = { tabId: isLocal ? null : tab.id, openerTabId: tab?.id, windowId: tab?.windowId,
+            navLinks: candidateNavLinks, mangaKey: currentMangaKey };
+        button.textContent = '正在準備圖片…';
+        const response = isLocal
+            ? await uploadLocalMangaImages(chrome, selectedUrls, options, (current, total) => {
+                button.textContent = `正在傳送圖片 (${current}/${total})…`;
+            })
+            : await chrome.runtime.sendMessage({
+                action: 'START_MANGA_BATCH_PC_MODE',
+                payload: { ...options, images: selectedUrls }
+            });
+        if (response?.status !== 'ok') throw new Error(response?.error || '無法啟動翻譯，請重新載入擴充套件');
         
         // 顯示停止按鈕
         document.getElementById('mt-stop-btn').style.display = 'flex';
@@ -564,7 +582,13 @@ document.getElementById('mt-batch-trans-btn').onclick = () => {
         document.querySelector('.mt-batch-controls').style.display = 'none';
         document.querySelector('.mt-main-actions').style.display = 'flex';
         showTranslatingCard(selectedUrls.length);
-    });
+    } catch (error) {
+        alert(`無法開始翻譯：${error.message}`);
+    } finally {
+        isStartingBatch = false;
+        button.disabled = false;
+        updateBatchCount();
+    }
 };
 
 function clearPreviewList() {
@@ -685,8 +709,8 @@ function renderPreviewList() {
         info.className = 'mt-preview-info';
         info.style.cssText = 'font-size: 11px; padding-left: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;';
         // 【缺口I改善】顯示真實檔名（從 URL 解析）
-        let filename = `圖片 ${index + 1}`;
-        try {
+        let filename = imgObj.name || `圖片 ${index + 1}`;
+        if (!imgObj.name && !src.startsWith('data:')) try {
             const urlObj = new URL(src);
             const pathName = urlObj.pathname.split('/').pop();
             if (pathName && pathName.length > 1) filename = decodeURIComponent(pathName);
@@ -939,6 +963,8 @@ if (novelRetryAllBtn) {
 // =====================================================
 let tabStateRequestId = 0;
 async function syncCurrentTabState() {
+    // Opening the result tab must not discard selected local images during upload/startup.
+    if (isStartingBatch) return;
     const requestId = ++tabStateRequestId;
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -952,9 +978,9 @@ async function syncCurrentTabState() {
             action: 'CHECK_TAB_TRANSLATION_STATUS',
             payload: { tabId: tab.id }
         }, (response) => {
-            if (chrome.runtime.lastError || requestId !== tabStateRequestId) return;
+            if (chrome.runtime.lastError || requestId !== tabStateRequestId || isStartingBatch) return;
             chrome.tabs.query({ active: true, currentWindow: true }, ([current]) => {
-                if (requestId !== tabStateRequestId || current?.id !== tab.id) return;
+                if (requestId !== tabStateRequestId || current?.id !== tab.id || isStartingBatch) return;
                 const isTranslating = response?.isTranslating || false;
                 const stopBtn = document.getElementById('mt-stop-btn');
                 const startBtn = document.getElementById('mt-start-btn');
