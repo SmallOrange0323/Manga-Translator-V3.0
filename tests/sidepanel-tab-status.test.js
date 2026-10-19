@@ -24,8 +24,8 @@ describe('sidepanel active-tab translation state', () => {
         const show = vi.fn();
         const hide = vi.fn();
         const sync = new Function('chrome', 'document', 'refreshGlossaryStatus', 'showTranslatingCard',
-            'hideTranslatingCard', source.slice(start, end) + '\nreturn syncCurrentTabState;')(
-            chrome, { getElementById: id => elements.get(id) }, vi.fn(), show, hide);
+            'hideTranslatingCard', 'isStartingBatch', source.slice(start, end) + '\nreturn syncCurrentTabState;')(
+            chrome, { getElementById: id => elements.get(id) }, vi.fn(), show, hide, false);
         await sync();
         activeId = 2;
         await sync();

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createMangaImageReceiver, mangaImageMessages, mangaWireSnapshot } from '../src/utils/manga-image-messages.js';
 
 // Capture the actual reader listener and snapshot renderer without booting unrelated reader controls.
 const source = readFileSync(new URL('../src/reader/result.js', import.meta.url), 'utf8');
@@ -19,12 +20,13 @@ function reader() {
     }
     nodes.set('loading-overlay', element());
     nodes.set('progress-text', element());
-    const container = { before: node => nodes.set(node.id, node), set innerHTML(_value) { cards.length = 0; } };
+    const container = { before: node => nodes.set(node.id, node), querySelector: () => null,
+        set innerHTML(_value) { cards.length = 0; } };
     let listener;
     const dependencies = {
         chrome: { runtime: { onMessage: { addListener: callback => { listener = callback; } } } },
         document: { getElementById: id => nodes.get(id) || null, createElement: element },
-        container, window: {},
+        container, window: {}, createMangaImageReceiver,
         buildCard: (item, index) => ({ item, index }),
         getOrCreateBatchSection: () => ({ appendChild: card => cards.push(card) }),
         updateNavUI: vi.fn(), resetNavButtons: vi.fn(), updateRetryAllBtn: vi.fn()
@@ -41,6 +43,22 @@ function job(revision, status = 'running', text = 'translated') {
 }
 
 describe('production reader recovery message listener', () => {
+    it('receives local image chunks, retains images after status updates and rejects old chunks', () => {
+        const page = reader();
+        const image = 'data:image/jpeg;base64,' + 'A'.repeat(3 * 1024 * 1024);
+        const local = { ...job(1), images: [''], results: [{ ...job(1).results[0], image }] };
+        page.deliver({ action: 'mangaSnapshot', job: mangaWireSnapshot(local) });
+        for (const message of mangaImageMessages(local)) page.deliver(message);
+        expect(page.read()[0].image).toBe(image);
+        page.deliver({ action: 'mangaSnapshot', job: { ...mangaWireSnapshot(local), revision: 2, status: 'completed' } });
+        expect(page.read()[0].image).toBe(image);
+        expect(page.nodes.has('manga-recovery-notice')).toBe(false);
+        for (const message of mangaImageMessages({ ...local, results: [{ ...local.results[0], image: 'data:image/png;base64,OLD' }] })) page.deliver(message);
+        expect(page.read()[0].image).toBe(image);
+        page.deliver({ action: 'mangaSnapshot', job: { ...mangaWireSnapshot(local), id: 'new', createdAt: 200, revision: 1 } });
+        for (const message of mangaImageMessages(local)) page.deliver(message);
+        expect(page.read()[0].image).toBe('');
+    });
     it('renders live saved batches and reflects live completion without reload', () => {
         const page = reader();
         expect(page.deliver({ action: 'mangaSnapshot', job: job(1) })).toBe(false);

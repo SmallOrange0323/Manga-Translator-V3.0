@@ -119,8 +119,12 @@ export function createMangaJobStore(storage, key = MANGA_JOBS_KEY) {
                 if (!job || job.id !== id) return null;
                 const index = job.results.findIndex(item => item.pageIndex === pageIndex);
                 if (index < 0) return null;
-                job.results[index] = resultItem({ ...job.results[index], ...result, error: '', isProhibited: false, isBatchFirstProhibited: false });
+                // Compute line patches against the latest saved page inside the writer queue.
+                const patch = typeof result === 'function' ? result(structuredClone(job.results[index])) : result;
+                if (!patch) return null;
+                job.results[index] = resultItem({ ...job.results[index], ...patch, error: '', isProhibited: false, isBatchFirstProhibited: false });
                 job.revision++;
+                job.updatedAt = Date.now();
                 return job;
             });
         },

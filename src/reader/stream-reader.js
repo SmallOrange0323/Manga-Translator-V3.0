@@ -495,13 +495,30 @@ function showErrorPage(index, errorMsg) {
     loadedImagesMap.delete(index);
     const overlay = document.getElementById(`overlay-${index}`);
     if (overlay) {
-        overlay.innerHTML = `
-            <div class="error-container">
-                <p>❌ 第 ${index + 1} 頁載入失敗</p>
-                <small style="color: #ff8b8b; opacity: 0.9;">${errorMsg}</small>
-                <button class="retry-btn" onclick="retryLoadPage(${index})">重試</button>
-            </div>
-        `;
+        overlay.innerHTML = '';
+        const errBox = document.createElement('div');
+        errBox.className = 'error-container';
+
+        const p = document.createElement('p');
+        p.textContent = `❌ 第 ${index + 1} 頁載入失敗`;
+
+        const small = document.createElement('small');
+        small.style.cssText = 'color: #ff8b8b; opacity: 0.9;';
+        small.textContent = errorMsg || '未知錯誤';
+
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'retry-btn';
+        retryBtn.type = 'button';
+        retryBtn.textContent = '重試';
+        retryBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            window.retryLoadPage(index);
+        });
+
+        errBox.appendChild(p);
+        errBox.appendChild(small);
+        errBox.appendChild(retryBtn);
+        overlay.appendChild(errBox);
     }
 }
 
@@ -577,23 +594,58 @@ function renderDialogueResults(index, results) {
 
     const title = document.createElement('div');
     title.style.cssText = 'font-weight: bold; margin-bottom: 10px; color: var(--accent-color); display: flex; justify-content: space-between; align-items: center;';
-    title.innerHTML = `
-        <span>💬 譯文對照結果 (P. ${index + 1})</span>
-        <button style="background: none; border: none; color: #ff3b30; cursor: pointer;" onclick="this.parentNode.parentNode.remove()">關閉</button>
-    `;
+    const titleSpan = document.createElement('span');
+    titleSpan.textContent = `💬 譯文對照結果 (P. ${index + 1})`;
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.style.cssText = 'background: none; border: none; color: #ff3b30; cursor: pointer;';
+    closeBtn.textContent = '關閉';
+    closeBtn.addEventListener('click', () => resultsDiv.remove());
+    title.appendChild(titleSpan);
+    title.appendChild(closeBtn);
     resultsDiv.appendChild(title);
 
     results.forEach(res => {
         const row = document.createElement('div');
         row.style.cssText = 'padding: 8px 0; border-bottom: 1px solid var(--border-color);';
-        row.innerHTML = `
-            <div style="font-weight: 500; color: var(--accent-color); margin-bottom: 3px;">${res.translation}</div>
-            <div style="opacity: 0.6; font-size: 11px;">🇯🇵 ${res.original}</div>
-        `;
+        const transLine = document.createElement('div');
+        transLine.style.cssText = 'font-weight: 500; color: var(--accent-color); margin-bottom: 3px;';
+        transLine.textContent = res.translation || '';
+        const origLine = document.createElement('div');
+        origLine.style.cssText = 'opacity: 0.6; font-size: 11px;';
+        origLine.textContent = `🇯🇵 ${res.original || ''}`;
+        row.appendChild(transLine);
+        row.appendChild(origLine);
         resultsDiv.appendChild(row);
     });
 
     wrapper.appendChild(resultsDiv);
+}
+
+// 解析單一分頁的真實圖片 URL（供 translateAllPages 在尚未預載完成時補齊）
+async function resolvePageDirectImageUrl(index) {
+    const existing = loadedImagesMap.get(index);
+    if (existing && existing !== 'loading') return existing;
+    const pageObj = mangaData?.pages?.[index];
+    if (!pageObj) return null;
+    if (pageObj.directUrl) return pageObj.directUrl;
+    if (!pageObj.url) return null;
+    try {
+        const response = await new Promise(resolve => {
+            chrome.runtime.sendMessage({ action: 'FETCH_HTML', url: pageObj.url }, resolve);
+        });
+        if (response && response.success && response.html) {
+            const imgUrl = extractImgUrl(response.html, pageObj.url);
+            if (imgUrl) {
+                pageObj.directUrl = imgUrl;
+                loadedImagesMap.set(index, imgUrl);
+                return imgUrl;
+            }
+        }
+    } catch (e) {
+        console.warn(`[StreamReader] 解析第 ${index + 1} 頁真實圖片網址失敗:`, e);
+    }
+    return null;
 }
 
 // 翻譯所有頁面：開啟獨立的 result.html 圖文對照翻譯分頁
@@ -602,17 +654,27 @@ async function translateAllPages() {
     const oldText = btnTransAll.innerHTML;
     btnTransAll.innerHTML = '⏳ 準備翻譯資料中...';
 
-    // 收集所有頁面的圖片 URL 清單
+    // 收集所有頁面的真實圖片 URL 清單（避免把 HTML 分頁網址當作圖片送出）
     const imagesToTranslate = [];
+    const missingPages = [];
     for (let i = 0; i < totalPages; i++) {
         let imgUrl = loadedImagesMap.get(i);
         if (!imgUrl || imgUrl === 'loading') {
-            const pageObj = mangaData.pages[i];
-            if (pageObj && pageObj.url) imgUrl = pageObj.url;
+            btnTransAll.innerHTML = `⏳ 正在解析圖片連結 (${i + 1}/${totalPages})...`;
+            imgUrl = await resolvePageDirectImageUrl(i);
         }
         if (imgUrl && imgUrl !== 'loading') {
             imagesToTranslate.push(imgUrl);
+        } else {
+            missingPages.push(i + 1);
         }
+    }
+
+    if (missingPages.length) {
+        alert(`第 ${missingPages.join('、')} 頁圖片尚未取得，已暫停整本翻譯。請重試，確認所有頁面完整後再翻譯。`);
+        btnTransAll.disabled = false;
+        btnTransAll.innerHTML = oldText;
+        return;
     }
 
     if (imagesToTranslate.length === 0) {
