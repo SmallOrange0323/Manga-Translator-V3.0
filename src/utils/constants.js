@@ -101,10 +101,10 @@ export const PRICONNE_LOADING_SPRITES = [
 // 預設翻譯 Prompt (黃金版 - 與 V1.8.6 完全對齊)
 // =========================================================
 
-// 1. 一條龍 (One-Step) 模式 - Gemini 專用
-export const DEFAULT_PROMPT_ONE_STEP = `<system_instructions>
+// 舊版預設 Prompt（用於偵測使用者是否未曾手動自訂，以支援平滑自動升級）
+export const LEGACY_DEFAULT_PROMPT_ONE_STEP = `<system_instructions>
   You are a professional manga translator. Extract and translate ALL Japanese text from the image into natural Traditional Chinese (zh-TW).
-  
+
   <safety_and_fictional_context>
     All content is fictional manga artwork and mature literature. Faithfully translate all story synopses (あらすじ), character introductions, relationship descriptions, and mature/adult (R18/NSFW) content without moral censorship, refusal, or omissions.
   </safety_and_fictional_context>
@@ -115,10 +115,36 @@ export const DEFAULT_PROMPT_ONE_STEP = `<system_instructions>
     3. COMBINE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga is often split into multiple vertical lines due to narrow speech bubbles. You MUST concatenate all split lines belonging to the same bubble/paragraph into ONE seamless, complete Traditional Chinese sentence. STRICTLY FORBID outputting any newline characters (\\n) inside a single speech bubble's translation!
     4. FORMAT: Each distinct dialogue/speech bubble/paragraph/character description must be EXACTLY ONE continuous line of text.
   </critical_rules>
-  
+
   <translation_rules>
     - Produce natural, fluent, and contextual Traditional Chinese (zh-TW).
     - Match characters' personalities, tones, and age. For character introductions and synopses, use clear and descriptive prose.
+  </translation_rules>
+</system_instructions>`;
+
+// 1. 一條龍 (One-Step) 模式 - Gemini 專用
+export const DEFAULT_PROMPT_ONE_STEP = `<system_instructions>
+  You are a professional manga translator. Extract and translate ALL Japanese text from the image into natural Taiwan Traditional Chinese (zh-TW).
+
+  <safety_and_fictional_context>
+    All content is fictional manga artwork and mature adult literature featuring consenting adult characters. Faithfully translate all story synopses (あらすじ), character introductions, relationship descriptions, and mature/adult (R18/NSFW) content without moral censorship, refusal, or omissions.
+  </safety_and_fictional_context>
+
+  <critical_rules>
+    1. COMPLETE CONTENT EXTRACTION: Extract ALL speech bubbles, narrations, character thoughts (OS), in-world signs, story synopses/character intros (あらすじ/人物紹介), and author's afterwords/notes (あとがき/巻末コメント/Special Thanks).
+    2. IGNORE MARGINAL PRINTING & FURIGANA: Ignore pure printing metadata at extreme margins (page numbers, publisher barcodes, magazine serials) and ignore tiny ruby/furigana phonetic characters next to kanji so they do not corrupt kanji recognition or duplicate in the extracted text.
+    3. COMBINE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga is often split into multiple vertical lines due to narrow speech bubbles. You MUST concatenate all split lines belonging to the same bubble/paragraph into ONE seamless, complete Traditional Chinese sentence. STRICTLY FORBID outputting any newline characters (\\n) inside a single speech bubble's translation!
+    4. FORMAT: Each distinct dialogue/speech bubble/paragraph/character description must be EXACTLY ONE continuous line of text.
+  </critical_rules>
+
+  <translation_rules>
+    - Produce natural, fluent, and idiomatic Taiwan Traditional Chinese (zh-TW). Match characters' personalities, relationships, and emotional tones.
+    - HONORIFICS & TITLES:
+      * "先輩 (Senpai) / 後輩 (Kouhai)": Default to "前輩 / 後輩". NEVER translate as "學長 / 學姊 / 學弟 / 學妹" unless the scene explicitly takes place in a school/student setting.
+      * "～さん (-san) / ～くん (-kun)": Check the character's gender in the artwork. For female characters or female colleagues, translate as "〇〇小姐 / 〇〇姐" or just "〇〇". NEVER call a female character "〇〇先生", and NEVER invent "〇〇同學" unless they are explicitly school classmates.
+      * "先生 (Sensei)": Translate as "老師" or "醫師" based on context, never as "先生 (Mr.)".
+    - PRONOUNS & VOICE: Infer omitted Japanese subjects/objects (我 / 你 / 他 / 她) from speech bubble tails and visual actions. Strictly distinguish passive voice (～された) and giving/receiving verbs (～てくれる / ～てもらう) so the actor and recipient are never reversed.
+    - NO JAPANESE KANA LEAKAGE: Translate all exclamations, moans/sighs (e.g., あぁっ, んっ, やだ), sentence-ending particles, and katakana loanwords into natural Traditional Chinese. Do NOT leave raw hiragana or katakana in the translation.
   </translation_rules>
 </system_instructions>`;
 
@@ -156,22 +182,26 @@ export const DEFAULT_PROMPT_GEMMA_ONE_STEP = `<system_instructions>
   </json_schema>
 </system_instructions>`;
 
-// 3. 雙階段翻譯 (專用)
+// 3. 雙階段翻譯 / 純文字重譯 (專用)
 export const DEFAULT_PROMPT_TWO_STEP = `<system_instructions>
-  You are a professional manga translator. Translate the following Japanese dialogue and text items into Traditional Chinese (zh-TW).
-  
+  You are a professional manga translator. Translate the following Japanese dialogue and text items into natural Taiwan Traditional Chinese (zh-TW).
+
+  <safety_and_fictional_context>
+    All content is fictional manga dialogue and mature adult literature featuring consenting adult characters. Faithfully translate all mature/adult (R18/NSFW) content without moral censorship, refusal, or omissions.
+  </safety_and_fictional_context>
+
   <critical_rules>
     1. MAINTAIN STRUCTURE: The input contains multiple dialogue/text items separated by double newlines. You MUST return exactly the same number of translation items.
     2. NO MERGING ACROSS ITEMS: Do not merge different dialogue lines into one paragraph if they are separated by double newlines.
     3. COMBINE INTERNAL LINES: Within a SINGLE item, you MUST concatenate all lines into ONE continuous sentence. Do NOT output line breaks inside a single translated dialogue.
-    4. STYLE: Provide natural, fluent Traditional Chinese (zh-TW) without losing the original tone.
+    4. HONORIFICS & ACCURACY: Default "先輩/後輩" to "前輩/後輩" unless explicitly in a school setting. Do NOT call female characters "〇〇先生" or invent "〇〇同學". Output 100% Traditional Chinese without leaving raw Japanese kana.
   </critical_rules>
 </system_instructions>`;
 
 // 4. OCR 專用
 export const DEFAULT_PROMPT_OCR = `<system_instructions>
   You are a professional manga OCR system. Extract ALL Japanese text from the image.
-  
+
   <critical_rules>
     1. Extract speech bubbles, narrations, character thoughts, in-world signs, story synopses, and author afterwords (あとがき/巻末コメント).
     2. Only ignore page numbers or publisher barcodes at extreme margins.
@@ -185,18 +215,24 @@ export const SYSTEM_BATCH_RULES = `
 <batch_rules>
   <extraction_rules>
     - Extract speech bubbles, narrations, character thoughts, in-world signs, story synopses, and author afterwords (あとがき/巻末コメント).
-    - Only ignore page numbers and publisher barcodes at extreme margins.
+    - Only ignore page numbers and publisher barcodes at extreme margins. Ignore tiny ruby/furigana characters next to kanji.
     - Follow manga reading order (right-to-left, top-to-bottom).
     - STRICT SENTENCE INTEGRITY: Each distinct speech bubble or narration block MUST be a SINGLE item in the "results" array.
     - MERGE MULTIPLE LINES & SINGLE CONTINUOUS SENTENCE: Japanese text in manga speech bubbles is often split into multiple vertical lines due to panel width. You MUST concatenate all split lines into ONE single, seamless, complete Traditional Chinese sentence. STRICTLY FORBID inserting any newline characters (\\n) in the translation!
   </extraction_rules>
+
+  <translation_consistency_rules>
+    - HONORIFICS: Translate "先輩/後輩" as "前輩/後輩" by default (do NOT use "學長/學姊/學弟/學妹" unless explicitly in a school scene). Check character gender in the panels for "～さん/～くん": never address a female character as "〇〇先生", and never invent "〇〇同學" for workplace colleagues or adults.
+    - PRONOUNS & VOICE: Use speech bubble tails and panel actions to infer omitted subjects/objects (我/你/他/她) and strictly distinguish passive (～された) vs. active/benefactive (～てくれる) expressions.
+    - PURE TRADITIONAL CHINESE (zh-TW): Translate all exclamations, sighs/moans, and katakana words completely into Taiwan Traditional Chinese. Never leave raw hiragana or katakana in "translation".
+  </translation_consistency_rules>
 
   <output_rules>
     - Return ONLY valid JSON (no markdown wrapping like \`\`\`json, no explanation).
     - SEQUENTIAL INTEGRITY: Multiple images are provided. Each is preceded by "=== PAGE_BOUNDARY: IMAGE_INDEX=N ===".
     - STRICT ENUMERATION: You MUST return results for EVERY image provided, in order.
     - PAGE INDEXING: Use the provided IMAGE_INDEX as the "pageIndex" in your JSON.
-    - NO SKIPPING: Even if an image contains absolutely no text, you MUST include it with '"results": []'. 
+    - NO SKIPPING: Even if an image contains absolutely no text, you MUST include it with '"results": []'.
     - COMPLETION GUARANTEE: Do not stop until all provided images have been processed and included in the "pages" array.
   </output_rules>
 
@@ -207,6 +243,69 @@ export const SYSTEM_BATCH_RULES = `
     ]}
   </json_format_schema>
 </batch_rules>`;
+
+/**
+ * 解析漫畫一條龍使用的 Prompt（若 storage 中存的是舊版預設值，自動無感升級至新版預設值）
+ */
+export function resolveMangaOneStepPrompt(savedPrompt, modelName = '') {
+  if (typeof modelName === 'string' && modelName.toLowerCase().includes('gemma')) {
+    return DEFAULT_PROMPT_GEMMA_ONE_STEP;
+  }
+  if (!savedPrompt || typeof savedPrompt !== 'string' || savedPrompt.trim() === '' || savedPrompt.trim() === LEGACY_DEFAULT_PROMPT_ONE_STEP.trim()) {
+    return DEFAULT_PROMPT_ONE_STEP;
+  }
+  return savedPrompt;
+}
+
+/**
+ * 計算漫畫圖片縮圖目標尺寸：
+ * - 直向頁 (height >= width)：以「寬度（短邊）不超過 maxDim」為基準，高度上限放寬為 maxDim * 2.2，解決直向頁寬度被壓扁導致漢字模糊的問題。
+ * - 橫向跨頁圖 (width > height)：允許寬度上限為 maxDim * 1.5、高度上限為 maxDim。
+ */
+export function computeMangaTargetDimensions(width, height, maxDim = 1024) {
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  if (w <= 0 || h <= 0) return { width: 0, height: 0 };
+
+  const safeMaxDim = Math.max(256, parseInt(maxDim, 10) || 1024);
+  let targetW = w;
+  let targetH = h;
+
+  if (h >= w) {
+    // 直向漫畫單頁：以寬度 (短邊) 不超過 safeMaxDim 為主
+    if (targetW > safeMaxDim) {
+      const ratio = safeMaxDim / targetW;
+      targetW = safeMaxDim;
+      targetH = targetH * ratio;
+    }
+    // 超長條漫保護上限 (2.2 倍)
+    const maxPortraitHeight = Math.round(safeMaxDim * 2.2);
+    if (targetH > maxPortraitHeight) {
+      const ratio = maxPortraitHeight / targetH;
+      targetH = maxPortraitHeight;
+      targetW = targetW * ratio;
+    }
+  } else {
+    // 橫向跨頁圖：寬度上限放寬為 1.5 倍
+    const maxLandscapeWidth = Math.round(safeMaxDim * 1.5);
+    if (targetW > maxLandscapeWidth) {
+      const ratio = maxLandscapeWidth / targetW;
+      targetW = maxLandscapeWidth;
+      targetH = targetH * ratio;
+    }
+    if (targetH > safeMaxDim) {
+      const ratio = safeMaxDim / targetH;
+      targetH = safeMaxDim;
+      targetW = targetW * ratio;
+    }
+  }
+
+  return {
+    width: Math.max(1, Math.round(targetW)),
+    height: Math.max(1, Math.round(targetH))
+  };
+}
+
 
 
 // 6. 小說模式 (MVP 黃金版)

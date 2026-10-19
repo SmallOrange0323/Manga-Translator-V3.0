@@ -1,6 +1,6 @@
 import { state } from '../utils/state.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
-import { toggleSelectionMode, crawlImagesForRequest } from './manga-engine.js';
+import { toggleSelectionMode, crawlImagesForRequest, fetchImageAsBase64 } from './manga-engine.js';
 import { log } from '../utils/logger.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
 import { createNovelRehydrateController } from './novel-rehydrate-client.js';
@@ -103,14 +103,14 @@ export function initDesktopMode() {
     }
 
     if (request.action === 'fetchBase64') {
-        handleBase64Fetch(request.url, request.maxDim || 0, sendResponse);
+        fetchImageAsBase64(request.url, request.maxDim || 0, sendResponse);
         return true; 
     }
 
     if (request.action === 'toggleSelectionMode') {
         chrome.runtime.sendMessage({ action: 'PRE_CAPTURE_FOR_SELECTION' }, (response) => {
             log.info('Content-Desktop', 'Pre-capture response received', response);
-            toggleSelectionMode();
+            toggleSelectionMode(true);
         });
         sendResponse({ started: true });
     }
@@ -145,54 +145,6 @@ export function initDesktopMode() {
           window.mt_currentNovelSessionId = null;
       }
   });
-}
-
-function handleBase64Fetch(url, maxDim, sendResponse) {
-    if (!/^(https?:|blob:|data:)/i.test(url)) {
-        sendResponse({ error: "Blocked: unsupported URL protocol" });
-        return;
-    }
-    fetch(url)
-        .then(res => res.blob())
-        .then(blob => {
-            if (!maxDim || maxDim <= 0) {
-                const reader = new FileReader();
-                reader.onloadend = () => sendResponse({ base64: reader.result.split(',')[1] });
-                reader.onerror = () => sendResponse({ error: "FileReader failed" });
-                reader.readAsDataURL(blob);
-                return;
-            }
-            
-            // 縮圖邏輯
-            createImageBitmap(blob).then(bitmap => {
-                let width = bitmap.width;
-                let height = bitmap.height;
-                if (width > maxDim || height > maxDim) {
-                    if (width > height) {
-                        height = Math.round((height * maxDim) / width);
-                        width = maxDim;
-                    } else {
-                        width = Math.round((width * maxDim) / height);
-                        height = maxDim;
-                    }
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(bitmap, 0, 0, width, height);
-                
-                const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-                sendResponse({ base64: dataUrl.split(',')[1] });
-                bitmap.close();
-            }).catch(err => {
-                // 備援：原圖轉 base64
-                const reader = new FileReader();
-                reader.onloadend = () => sendResponse({ base64: reader.result.split(',')[1] });
-                reader.readAsDataURL(blob);
-            });
-        })
-        .catch(err => sendResponse({ error: err.message }));
 }
 
 function startNovelTranslation() {

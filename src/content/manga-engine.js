@@ -1,6 +1,7 @@
 // src/content/manga-engine.js
 import { detectNavigationLinks } from '../utils/nav-detector.js';
 import { parseWnacgPageUrls } from '../utils/wnacg-parser.js';
+import { computeMangaTargetDimensions } from '../utils/constants.js';
 
 let overlay = null;
 let selectionBox = null;
@@ -9,17 +10,68 @@ let isSelecting = false;
 let mangaImages = [];
 
 /**
- * 初始化並切換選取遮罩
+ * 將圖片 URL 轉為 Base64（支援直向漫畫短邊基準高解析縮圖）
  */
-export function toggleSelectionMode() {
+export function fetchImageAsBase64(url, maxDim, sendResponse) {
+    if (!/^(https?:|blob:|data:)/i.test(url)) {
+        sendResponse({ error: 'Blocked: unsupported URL protocol' });
+        return;
+    }
+    fetch(url)
+        .then(res => res.blob())
+        .then(blob => {
+            if (!maxDim || maxDim <= 0) {
+                const reader = new FileReader();
+                reader.onloadend = () => sendResponse({ base64: reader.result.split(',')[1] });
+                reader.onerror = () => sendResponse({ error: 'FileReader failed' });
+                reader.readAsDataURL(blob);
+                return;
+            }
+
+            createImageBitmap(blob).then(bitmap => {
+                const { width, height } = computeMangaTargetDimensions(bitmap.width, bitmap.height, maxDim);
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(bitmap, 0, 0, width, height);
+
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.90);
+                sendResponse({ base64: dataUrl.split(',')[1] });
+                bitmap.close();
+            }).catch(() => {
+                const reader = new FileReader();
+                reader.onloadend = () => sendResponse({ base64: reader.result.split(',')[1] });
+                reader.onerror = () => sendResponse({ error: 'FileReader failed' });
+                reader.readAsDataURL(blob);
+            });
+        })
+        .catch(err => sendResponse({ error: err.message }));
+}
+
+/**
+ * 初始化並切換選取遮罩（保證在遮罩蓋上畫面之前先完成乾淨螢幕截圖）
+ */
+export function toggleSelectionMode(preCaptured = false) {
     if (overlay) {
         removeOverlay();
-    } else {
+        return;
+    }
+    if (preCaptured) {
+        createOverlay();
+        return;
+    }
+    try {
+        chrome.runtime.sendMessage({ action: 'PRE_CAPTURE_FOR_SELECTION' }, () => {
+            createOverlay();
+        });
+    } catch (_) {
         createOverlay();
     }
 }
 
 function createOverlay() {
+    if (overlay) return;
     overlay = document.createElement('div');
     overlay.id = 'mt-manga-overlay';
     // 樣式利用注入或寫死
@@ -73,9 +125,7 @@ function onMouseDown(e) {
     selectionBox.style.width = '0px';
     selectionBox.style.height = '0px';
     selectionBox.style.display = 'block';
-    
-    // 預先觸發 Edge 截圖黑屏 Workaround
-    chrome.runtime.sendMessage({ action: "PRE_CAPTURE_FOR_SELECTION" });
+    // 注意：不可在遮罩已顯示時再次發送 PRE_CAPTURE_FOR_SELECTION，否則會把黑色半透明遮罩一起拍進截圖
 }
 
 function onMouseMove(e) {
@@ -471,7 +521,7 @@ export function crawlImages() {
     // ── 3. 廣用 DOM 與 Canvas 閱讀器容器掃描 (全方位 Lazy 屬性大滿貫) ──
     const imgs = Array.from(document.querySelectorAll('img, canvas, svg image, div[style*="background"], div[class*="page"]'));
     
-    // 生肉網站與日本電子漫畫閱讀器常見核心容器
+    // 生肉網站與日本電子漫畫閱讀器常見核心容器（複合選擇器優先，並相容手寫單一選擇器 Mock）
     const MANGA_CONTAINERS = [
         '#list-imga', '#readerarea', '.reading-content', '.ts-main-image', 
         '.manga-image', '.page-break', '.blocks-gallery-item', '.js-page-image', 
@@ -479,6 +529,16 @@ export function crawlImages() {
         '.chap-content', '.viewer-cnt', '#reader', '.readerarea',
         '[data-image-data]'
     ];
+    const MANGA_CONTAINER_SELECTOR = MANGA_CONTAINERS.join(', ');
+
+    const JUNK_BOX_SELECTOR =
+        '.modal, #login, #register, #forgot_password, #modal_baoloi, .modal-dialog, ' +
+        '.form-signin, .captcha, .chance-captcha, .breadcrumb, ol.breadcrumb, ' +
+        'nav, #header, #header_menu, .navbar, .headroom, .rd_sidebar, ' +
+        '.headpost, .thumb, .series-thumb, .thumb-series, .post-thumb, .infox, .bdr, ' +
+        '.entry-header, .cover, .series-cover, .sidebar, .widget, .manga-info, .series-info, ' +
+        '.anime-info, .series-profile, .reactions, .wp-reactions, .post-ratings, .comment-reactions, ' +
+        '.emotion-box, .votes, .social-share, .footer-widgets';
 
     imgs.forEach(img => {
         let width = img.naturalWidth || img.width || img.offsetWidth || 0;
@@ -546,43 +606,38 @@ export function crawlImages() {
             } catch(e) {}
         }
         
-        // 判斷是否在漫畫主閱讀容器內
-        const isInMangaContainer = MANGA_CONTAINERS.some(selector => img.closest(selector)) || (img.classList && img.classList.contains('chapter-img'));
+        // 判斷是否在漫畫主閱讀容器內（先嘗試複合選擇器快速命中，並向下相容手寫單一選擇器 Mock）
+        const isInMangaContainer = Boolean(
+            (img && img.closest && (
+                img.closest(MANGA_CONTAINER_SELECTOR) ||
+                MANGA_CONTAINERS.some(selector => img.closest(selector))
+            )) ||
+            (img.classList && img.classList.contains('chapter-img'))
+        );
 
         // 徹底排除無效雜項容器 (驗證碼、模態框、登入框、麵包屑、導航列、頂部封面、側邊欄)
-        const isInJunkBox = !!(img && img.closest && img.closest(
-            '.modal, #login, #register, #forgot_password, #modal_baoloi, .modal-dialog, ' +
-            '.form-signin, .captcha, .chance-captcha, .breadcrumb, ol.breadcrumb, ' +
-            'nav, #header, #header_menu, .navbar, .headroom, .rd_sidebar, ' +
-            '.headpost, .thumb, .series-thumb, .thumb-series, .post-thumb, .infox, .bdr, ' +
-            '.entry-header, .cover, .series-cover, .sidebar, .widget, .manga-info, .series-info, ' +
-            '.anime-info, .series-profile, .reactions, .wp-reactions, .post-ratings, .comment-reactions, ' +
-            '.emotion-box, .votes, .social-share, .footer-widgets'
-        ));
+        const isInJunkBox = !!(img && img.closest && img.closest(JUNK_BOX_SELECTOR));
 
         // 排除被 CSS 隱藏或 class="hide" 的非閱讀區圖片
         const isHidden = (img.classList && (img.classList.contains('hide') || img.classList.contains('hidden'))) ||
                          (img.style && (img.style.display === 'none' || img.style.visibility === 'hidden'));
 
-        // 獲取畫面上的實際渲染尺寸
-        let renderedWidth = 0;
-        let renderedHeight = 0;
-        if (img && typeof img.getBoundingClientRect === 'function') {
-            const rect = img.getBoundingClientRect();
-            renderedWidth = rect.width || 0;
-            renderedHeight = rect.height || 0;
-        }
-
         // 嚴格尺寸門檻 (漫畫頁面高度普遍 >= 350px, 寬度 >= 250px)
         let isTooSmall = false;
         if (isInMangaContainer) {
-            // 漫畫閱讀容器內：排除小於 250x350 的小圖示
+            // 漫畫閱讀容器內：排除小於 250x350 的小圖示（不需觸發 getBoundingClientRect）
             isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
         } else {
-            // 容器外：嚴格限制
+            // 容器外：先檢查輕量條件，必要時才觸發 getBoundingClientRect
             const isNaturalSmall = (width > 0 && width < 500) || (height > 0 && height < 400);
-            const isRenderedSmall = (renderedWidth > 0 && renderedWidth < 300) || (renderedHeight > 0 && renderedHeight < 350);
-            isTooSmall = isNaturalSmall || isRenderedSmall || isInJunkBox || isHidden;
+            if (isNaturalSmall || isInJunkBox || isHidden) {
+                isTooSmall = true;
+            } else if (img && typeof img.getBoundingClientRect === 'function') {
+                const rect = img.getBoundingClientRect();
+                const renderedWidth = rect.width || 0;
+                const renderedHeight = rect.height || 0;
+                isTooSmall = (renderedWidth > 0 && renderedWidth < 300) || (renderedHeight > 0 && renderedHeight < 350);
+            }
         }
 
         const isUnloadedJunk = (width === 0 || height === 0) && !isInMangaContainer && !dataSrc;

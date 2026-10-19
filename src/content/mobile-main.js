@@ -1,6 +1,6 @@
 import { log } from '../utils/logger.js';
 import { state } from '../utils/state.js';
-import { crawlImagesForRequest } from './manga-engine.js';
+import { crawlImagesForRequest, fetchImageAsBase64 } from './manga-engine.js';
 import { getNovelParagraphs, insertPlaceholders, injectNovelBatchResult, translateUIElements, collectFailures, getParagraphText } from './novel-engine.js';
 import { extractMangaMetadata } from './n-e-extractor.js';
 import { createNovelSessionId } from '../utils/novel-session-id.js';
@@ -659,6 +659,16 @@ export function initMobileMode() {
             });
         }).catch(error => sendResponse({ images: [], error: error.message }));
         return true; // 非同步
+    }
+
+    if (request.action === 'fetchBase64') {
+        fetchImageAsBase64(request.url, request.maxDim || 0, sendResponse);
+        return true; // 非同步
+    }
+
+    if (request.action === 'ping') {
+        sendResponse({ pong: true });
+        return false;
     }
 
     // [新增] 接收背景廣播的 API 狀態訊息，顯示在行動端日誌面板

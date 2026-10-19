@@ -3,78 +3,7 @@ import { log } from '../utils/logger.js';
 import { SYSTEM_BATCH_RULES } from '../utils/constants.js';
 import { sanitizeJsonForParsing } from '../utils/json-utils.js';
 import { isModelRefusalError } from './novel-refusal.js';
-
-/**
- * 將簡體字與大陸常用詞彙轉換為台灣繁體慣用詞彙
- */
-function convertCnToTwLocal(text) {
-    if (typeof text !== 'string' || !text) return text;
-    
-    // 1. 簡體字基礎對照轉換 (針對 Gemini 偶爾吐出簡體字的防禦性機制)
-    const CN_TO_TW_CHARS = {
-        '个': '個', '这': '這', '国': '國', '时': '時', '样': '樣', '说': '說',
-        '会': '會', '对': '對', '机': '機', '开': '開', '关': '關', '动': '動',
-        '发': '發', '问': '問', '么': '麼', '无': '無', '线': '線', '处': '處',
-        '经': '經', '给': '給', '后': '後', '点': '點', '见': '見', '两': '兩',
-        '业': '業', '进': '進', '头': '頭', '战': '戰', '书': '書', '门': '門',
-        '体': '體', '风': '風', '乐': '樂', '东': '東', '车': '車', '儿': '兒',
-        '长': '長', '万': '萬', '问': '問', '间': '間', '义': '義', '与': '與',
-        '写': '寫', '马': '馬', '么': '麼', '么': '麼', '响': '響', '声': '聲',
-        '听': '聽', '脸': '臉', '变': '變', '轻': '輕', '细': '細', '红': '紅',
-        '绿': '綠', '蓝': '藍', '气': '氣', '记': '記', '认': '認', '让': '讓',
-        '边': '邊', '过': '過', '还': '還', '进': '進', '运': '運', '选': '選',
-        '题': '題', '样': '樣', '头': '頭', '买': '買', '卖': '賣', '东': '東',
-        '西': '西', '爱': '愛', '热': '熱', '写': '寫', '画': '畫', '话': '話',
-        '语': '語', '双': '雙', '体': '體', '办': '辦', '当': '當', '县': '縣',
-        '号': '號', '处': '處', '备': '備', '图': '圖', '团': '團', '园': '園',
-        '场': '場', '声': '聲', '报': '報', '极': '極', '样': '樣', '标': '標',
-        '检': '檢', '压': '壓', '类': '類', '质': '質', '脑': '腦', '齿': '齒',
-        '农': '農', '师': '師', '专': '專', '术': '術', '应': '應', '志': '志'
-    };
-    
-    let result = '';
-    for (let i = 0; i < text.length; i++) {
-        const char = text[i];
-        result += CN_TO_TW_CHARS[char] || char;
-    }
-    
-    // 2. 台灣常用詞彙替換
-    const TW_LOCALIZATION_MAP = {
-        '屏幕': '螢幕',
-        '视频': '影片',
-        '視頻': '影片',
-        '音频': '音訊',
-        '音頻': '音訊',
-        '硬盤': '硬碟',
-        '硬盘': '硬碟',
-        '光盤': '光碟',
-        '光盘': '光碟',
-        '鼠標': '滑鼠',
-        '鼠标': '滑鼠',
-        '默認': '預設',
-        '默认': '預設',
-        '用戶': '使用者',
-        '用户': '使用者',
-        '網絡': '網路',
-        '网络': '網路',
-        '菜單': '選單',
-        '菜单': '選單',
-        '二進制': '二進位',
-        '二进制': '二進位',
-        '複制': '複製',
-        '复制': '複製',
-        '激活': '啟用',
-        '充值': '儲值',
-        '程序': '程式',
-        '信息': '訊息'
-    };
-
-    for (const [key, value] of Object.entries(TW_LOCALIZATION_MAP)) {
-        result = result.replaceAll(key, value);
-    }
-    
-    return result;
-}
+import { convertCnToTwLocal } from '../utils/zh-tw-localizer.js';
 
 /**
  * 遞迴遍歷 JSON 物件，將所有譯文欄位進行台灣用語在地化轉換
@@ -207,6 +136,7 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
         },
         contents: [{ role: 'user', parts: userParts }],
         generationConfig: {
+            temperature: 0.3,
             response_mime_type: 'application/json',
             ...(schema ? { response_schema: schema } : {})
         },
@@ -526,7 +456,7 @@ ${inputText}`;
  * @param {string} glossarySnippet - 術語注入片段
  * @returns {Array} 長度固定等於 base64Array.length 的結果陣列
  */
-export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null, signal = null) {
+export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null, signal = null, previousContextSnippet = '') {
     if (signal?.aborted) {
         const cancelErr = new Error('Request aborted by user STOP');
         cancelErr.name = 'AbortError';
@@ -548,7 +478,7 @@ export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnip
 ${customPrompt || 'You are a professional manga translator.'}
 ${SYSTEM_BATCH_RULES}
 </system_instructions>
-${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
+${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previousContextSnippet ? `\n<previous_dialogue_reference>\nFor character name, gender, and honorific consistency across batches, here are the most recent translated lines from the preceding pages:\n${previousContextSnippet}\n</previous_dialogue_reference>` : ''}`;
 
     // 建立 User Parts (支援單圖損毀防禦，避免空圖片觸發 API 400 錯誤)
     const userParts = [];
@@ -569,6 +499,7 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
         },
         contents: [{ role: 'user', parts: userParts }],
         generationConfig: {
+            temperature: 0.3,
             response_mime_type: 'application/json',
             response_schema: {
                 type: 'OBJECT',
@@ -654,15 +585,18 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
         const finishReason = candidate?.finishReason;
         const rawText = candidate?.content?.parts?.[0]?.text || '';
 
-        if (!rawText && (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT')) {
-            log.warn('TranslateAPI', `[批次] 觸發模型安全審查過濾 (finishReason: ${finishReason})`);
-            const err = new Error(`觸發 Google AI 安全性審查過濾 (finishReason: ${finishReason})，模型拒絕翻譯 (Prohibited Content)`);
-            err.isProhibited = true;
-            err.finishReason = finishReason;
-            throw err;
+        if (!rawText) {
+            if (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT') {
+                log.warn('TranslateAPI', `[批次] 觸發模型安全審查過濾 (finishReason: ${finishReason})`);
+                const err = new Error(`觸發 Google AI 安全性審查過濾 (finishReason: ${finishReason})，模型拒絕翻譯 (Prohibited Content)`);
+                err.isProhibited = true;
+                err.finishReason = finishReason;
+                throw err;
+            }
+            throw new Error(`批次 API 回傳為空 (finishReason: ${finishReason || 'UNKNOWN'})`);
         }
 
-        const cleanStr = sanitizeJsonForParsing(rawText || '{}');
+        const cleanStr = sanitizeJsonForParsing(rawText);
         let data;
         try {
             data = JSON.parse(cleanStr);
@@ -672,8 +606,8 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
                 localizeObjectStrings(data);
             }
         } catch (parseErr) {
-            log.warn('TranslateAPI', `[批次解析] JSON 解析失敗，回傳空結果。原始文字前 200 字: ${cleanStr.slice(0, 200)}`);
-            data = { pages: [] };
+            log.warn('TranslateAPI', `[批次解析] JSON 解析失敗，拋出錯誤以觸發備援重試。原始文字前 200 字: ${cleanStr.slice(0, 200)}`);
+            throw new Error(`批次 JSON 解析失敗 (finishReason: ${finishReason || 'UNKNOWN'}): ${parseErr.message}`);
         }
 
         log.api('TranslateAPI', `批次翻譯成功 (${n} 張)`, { model, latencyMs, keyAlias, status: 'OK' });

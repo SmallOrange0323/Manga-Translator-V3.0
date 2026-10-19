@@ -7,6 +7,8 @@ import { getAuthToken } from '../utils/sync.js';
 import { saveApiKeyPoolIfChanged } from '../utils/sync-policy.js';
 import { createGlossaryRefreshGate, createGlossaryTermRow, setGlossaryHeaderFields } from './glossary-dom.js';
 
+document.title = `漫譯 V${chrome.runtime.getManifest().version} - 設定`;
+
 let currentSelectedMangaKey = null;
 const MAX_KEYS = 10;
 const glossaryRefreshGate = createGlossaryRefreshGate({

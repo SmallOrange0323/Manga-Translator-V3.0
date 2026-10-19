@@ -2,6 +2,8 @@
  * 漫譯 V3 - 純淨版彈出視窗邏輯
  */
 
+document.getElementById('mt-extension-title').textContent = `漫譯 V${chrome.runtime.getManifest().version}`;
+
 const btnPanel    = document.getElementById('btn-open-panel');
 const btnSettings = document.getElementById('btn-open-settings');
 const statusMsg   = document.getElementById('status-msg');
