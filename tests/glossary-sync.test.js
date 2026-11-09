@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mergeGlossaryData } from '../src/utils/glossary-data.js';
+import { mergeGlossaryData, sanitizeCollidingAiTerms } from '../src/utils/glossary-data.js';
 import {
   saveGlossary, upsertGlossaryTerm, deleteGlossaryTerm, deleteGlossary,
-  mergeRemoteGlossaries, getGlossarySnapshot, GLOSSARY_MAX_TERMS
+  mergeRemoteGlossaries, getGlossarySnapshot, GLOSSARY_MAX_TERMS,
+  mergeGlossaryTerms, loadGlossary, buildGlossaryPromptSnippet
 } from '../src/background/glossary-manager.js';
 import { performBiDirectionalSync } from '../src/utils/sync.js';
 import { syncEngine } from '../src/utils/sync-engine.js';
@@ -248,5 +249,71 @@ describe('glossary conflict handling', () => {
     await performBiDirectionalSync('test-token');
     expect(store.requestDelay).toBe(9);
     expect(store.settingsLastModified).toBe(200);
+  });
+});
+
+
+describe('glossary durable sync', () => {
+  it('blocks AI terms mapping new katakana to an already occupied Chinese translation (bidirectional uniqueness lock) while preserving note', () => {
+    const existing = [
+      { ori: 'エルザ', trans: '艾爾莎', note: '女主角', source: 'user', createdAt: 100, updatedAt: 100 }
+    ];
+    const incoming = [
+      // 試圖把不同原文 (ori: 'カノン') 也對應到相同的 trans: '艾爾莎' (source: 'ai')
+      { ori: 'カノン', trans: '艾爾莎', note: '新角色', source: 'ai' },
+      // 另一個未衝突的合法新 AI 詞條，有 note
+      { ori: 'ロイド', trans: '洛伊德', note: '男主角', source: 'ai' }
+    ];
+
+    const result = mergeGlossaryTerms(existing, incoming);
+    expect(result.addedCount).toBe(1);
+    expect(result.terms).toHaveLength(2);
+    expect(result.terms.find(t => t.ori === 'カノン')).toBeUndefined();
+    const loid = result.terms.find(t => t.ori === 'ロイド');
+    expect(loid).toBeDefined();
+    expect(loid.trans).toBe('洛伊德');
+    expect(loid.note).toBe('男主角');
+  });
+
+  it('automatically purges legacy polluted glossary upon loadGlossary and buildGlossaryPromptSnippet', async () => {
+    // 既存歷史污染詞庫：角色 A (createdAt: 100) 與誤配角色 B (createdAt: 200) 皆為 AI 詞條且譯名相同
+    store.mangaGlossaries = {
+      frieren: {
+        displayName: '葬送的芙莉蓮',
+        romanKey: 'frieren',
+        termTombstones: {},
+        terms: [
+          { ori: 'ヒンメル', trans: '辛美爾', note: '勇者', source: 'ai', createdAt: 100, updatedAt: 100 },
+          { ori: 'ハイター', trans: '辛美爾', note: '神父誤配', source: 'ai', createdAt: 200, updatedAt: 200 },
+          { ori: 'フリーレン', trans: '芙莉蓮', note: '魔法使', source: 'user', createdAt: 50, updatedAt: 50 }
+        ]
+      }
+    };
+
+    // 1. 驗證 loadGlossary 自動排毒：保留最早建立的辛美爾（ヒンメル），剔除晚進的誤配（ハイター）
+    const loaded = await loadGlossary('frieren');
+    expect(loaded).toBeDefined();
+    expect(loaded.terms.map(t => t.ori)).toEqual(['ヒンメル', 'フリーレン']);
+    expect(loaded.termTombstones['ハイター'.toLowerCase()]).toBeGreaterThan(0);
+
+    // 2. 驗證 buildGlossaryPromptSnippet 會輸出 note 與防張冠李戴警告
+    const snippet = buildGlossaryPromptSnippet(loaded.terms);
+    expect(snippet).toContain('• 原文: "ヒンメル" ➔ 強制譯名: "辛美爾" (勇者)');
+    expect(snippet).toContain('• 原文: "フリーレン" ➔ 強制譯名: "芙莉蓮" (魔法使)');
+    expect(snippet).not.toContain('ハイター');
+    expect(snippet).toContain('⚠️ 嚴格匹配原則：僅當日文原文「逐字完全吻合」上方列出的原文時，才可套用對應的強制譯名');
+    expect(snippet).toContain('絕對禁止套用上表既有角色的中文譯名！');
+  });
+
+  it('evicts colliding AI terms when a user manual term occupies the same translation', () => {
+    const dirty = [
+      { ori: 'アーニャ', trans: '安妮亞', note: '讀心超能力者', source: 'user', createdAt: 200, updatedAt: 200 },
+      { ori: 'ボンド', trans: '安妮亞', note: '預知狗誤配', source: 'ai', createdAt: 100, updatedAt: 100 }
+    ];
+    const tombstones = {};
+    const sanitized = sanitizeCollidingAiTerms(dirty, tombstones);
+    expect(sanitized).toHaveLength(1);
+    expect(sanitized[0].ori).toBe('アーニャ');
+    expect(tombstones['ボンド'.toLowerCase()]).toBeGreaterThan(0);
   });
 });

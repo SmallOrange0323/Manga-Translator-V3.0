@@ -1,16 +1,29 @@
-# 漫譯 Manga-Translator V3.2.1 🎌
+# 漫譯 Manga-Translator V3.2.2 🎌
 
-![Version](https://img.shields.io/badge/version-3.2.1-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.2.2-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.2.1** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
+**漫譯 V3.2.2** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
 支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**一條龍看圖翻譯、2D 二維交錯輪替調度（Key × Model 負載分配）、核心狀態隊列鎖防護、跨話自動連續預翻、集中閱讀、左右/上下對話框對照、4 大經典字型切換與 Google Drive 雙向雲端同步**。
 
 ---
 
-## 🚀 V3.2.1 / V3.2.0 近期更新重點 (Recent Highlights)
+## 🚀 V3.2.2 近期更新重點 (Recent Highlights)
+
+* **詞庫防污染與撞名自動排毒引擎 (Glossary Anti-Pollution & Bi-directional Uniqueness)**：
+  * **雙向唯一鎖**：嚴格杜絕不同日文原名被誤對應到相同中文譯名（攔截 AI 多對一譯名撞車與人物張冠李戴）。
+  * **歷史污染詞條自動排毒**：自動偵測並清理既有詞庫中的重複或被污染譯名，保障詞庫純淨度。
+  * **角色性別與關係備註 (`note`)**：支援標註角色性別、職稱與社會關係，防止代名詞（他／她）混淆。
+* **可開關式視覺情境錨點 (`enableSceneContext`)**：
+  * **前置情境判別**：每批次翻譯前自動辨識當前場景場所、登場角色男女性別與上下級關係，並在跨批次翻譯時順暢交接。
+  * **雙向開關與側邊欄快捷控制**：側邊欄新增「情境」即時切換開關，設定頁提供全域配置，雙向即時同步。
+  * **安全審查自癒降級**：翻譯 R18 或特殊題材本子時若觸發 AI 安全過濾器，自動提示關閉情境錨點或無痛降級重試。
+
+---
+
+## 🚀 V3.2.1 / V3.2.0 歷史更新重點 (Previous Highlights)
 
 * **全面收斂為一階段極速模式 (Unified One-Step Pipeline)**：退役繁瑣易錯的兩階段 OCR 流程，以高傳真端到端視覺語言模型全面驅動，翻譯速度與穩定度倍增。
 * **結構化 Schema 對話類型 (`type`) 與單行語境 (`context`)**：精準標註對話氣泡、內心獨白 (OS)、狀聲詞與背景說明，並透過單行 context 確保句子流暢不換行撕裂。

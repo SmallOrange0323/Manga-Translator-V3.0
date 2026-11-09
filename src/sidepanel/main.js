@@ -283,6 +283,13 @@ state.onChanged((changes) => {
         updateNovelModeToggleForCurrentTab();
     }
 
+    if (changes.enableSceneContext) {
+        const sceneContextToggle = document.getElementById('mt-scene-context-toggle');
+        if (sceneContextToggle) {
+            sceneContextToggle.checked = changes.enableSceneContext.newValue !== false;
+        }
+    }
+
         if (changes.isStopping) {
             const stopBtn = document.getElementById('mt-stop-btn');
             const startBtn = document.getElementById('mt-start-btn');
@@ -952,6 +959,23 @@ if (autoPretranslateBatchChk) {
     });
 }
 
+// ── 視覺情境錨點 (sceneContext) 開關綁定 ──
+const sceneContextToggle = document.getElementById('mt-scene-context-toggle');
+
+async function syncSceneContextUI() {
+    const isEnabled = await state.get('enableSceneContext', true);
+    if (sceneContextToggle) sceneContextToggle.checked = (isEnabled !== false);
+}
+
+if (sceneContextToggle) {
+    syncSceneContextUI();
+    sceneContextToggle.addEventListener('change', async () => {
+        const val = sceneContextToggle.checked;
+        await state.set('enableSceneContext', val);
+        console.log('[Sidepanel] 視覺情境錨點 (sceneContext):', val ? '啟用' : '停用');
+    });
+}
+
 if (novelRetryAllBtn) {
     novelRetryAllBtn.onclick = () => {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -976,8 +1000,9 @@ async function syncCurrentTabState() {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab || !tab.id) return;
 
-        // 1. 刷新該漫畫作品詞庫
+        // 1. 刷新該漫畫作品詞庫與情境設定
         refreshGlossaryStatus();
+        if (typeof syncSceneContextUI === 'function') syncSceneContextUI();
 
         // 2. 查詢當前分頁是否正在進行翻譯長任務
         chrome.runtime.sendMessage({

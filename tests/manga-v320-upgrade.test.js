@@ -9,7 +9,7 @@ import {
     computeMangaTargetDimensions,
     resolveMangaOneStepPrompt
 } from '../src/utils/constants.js';
-import { callGeminiAPIBatch } from '../src/background/translate-api.js';
+import { callGeminiAPIBatch, extractTermsFromTranslation } from '../src/background/translate-api.js';
 import { createMangaRecovery } from '../src/background/manga-recovery.js';
 
 describe('V3.2.0 台灣正體中文與慣用語在地化引擎 (zh-tw-localizer)', () => {
@@ -209,5 +209,236 @@ describe('V3.2.0 暫存圖片 (Canvas / data:image) 跨批次記憶體快取保�
         // 確認 storage.local 絕對不包含暫存圖片 bytes
         expect(JSON.stringify(storageData)).not.toContain('PAGE1_BYTES');
         expect(JSON.stringify(storageData)).not.toContain('PAGE2_BYTES');
+    });
+});
+
+
+describe('V3.2.2 視覺情境錨點 (sceneContext)、安全審查降級與防撞名術語萃取', () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        globalThis.chrome = {
+            storage: {
+                local: {
+                    get: vi.fn((_keys, cb) => {
+                        if (typeof cb === 'function') cb({});
+                        return Promise.resolve({});
+                    }),
+                    set: vi.fn((_val, cb) => {
+                        if (typeof cb === 'function') cb();
+                        return Promise.resolve();
+                    })
+                },
+                onChanged: { addListener: vi.fn() }
+            },
+            runtime: {
+                sendMessage: vi.fn(() => Promise.resolve())
+            }
+        };
+    });
+
+    it('callGeminiAPIBatch 預設啟用 sceneContext (Schema 含 sceneContext 且回傳帶有 res.sceneContext)；options.enableSceneContext = false 時完全不包含', async () => {
+        let capturedBodyWithScene = null;
+        vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+            capturedBodyWithScene = JSON.parse(init.body);
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{
+                        finishReason: 'STOP',
+                        content: {
+                            parts: [{
+                                text: JSON.stringify({
+                                    sceneContext: '办公室职场，女前辈与男后辈',
+                                    pages: [
+                                        { pageIndex: 0, results: [{ original: '先輩', translation: '前輩' }] }
+                                    ]
+                                })
+                            }]
+                        }
+                    }]
+                })
+            };
+        }));
+
+        // 預設情況 (開啟 sceneContext)
+        const res = await callGeminiAPIBatch(
+            ['AAAA'],
+            DEFAULT_PROMPT_ONE_STEP,
+            '',
+            'TEST_KEY',
+            'gemini-2.5-flash'
+        );
+
+        expect(Array.isArray(res)).toBe(true);
+        expect(res.sceneContext).toBe('辦公室職場，女前輩與男後輩');
+        expect(capturedBodyWithScene.generationConfig.response_schema.properties.sceneContext).toBeDefined();
+        expect(capturedBodyWithScene.generationConfig.response_schema.required).toContain('sceneContext');
+        expect(capturedBodyWithScene.system_instruction.parts[0].text).toContain('[SCENE & CHARACTER ANCHOR]');
+
+        // 關閉 sceneContext 情況
+        let capturedBodyWithoutScene = null;
+        vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+            capturedBodyWithoutScene = JSON.parse(init.body);
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{
+                        finishReason: 'STOP',
+                        content: {
+                            parts: [{
+                                text: JSON.stringify({
+                                    pages: [
+                                        { pageIndex: 0, results: [{ original: '先輩', translation: '前輩' }] }
+                                    ]
+                                })
+                            }]
+                        }
+                    }]
+                })
+            };
+        }));
+
+        const resDisabled = await callGeminiAPIBatch(
+            ['AAAA'],
+            DEFAULT_PROMPT_ONE_STEP,
+            '',
+            'TEST_KEY',
+            'gemini-2.5-flash',
+            null,
+            '',
+            { enableSceneContext: false }
+        );
+
+        expect(Array.isArray(resDisabled)).toBe(true);
+        expect(resDisabled.sceneContext).toBe('');
+        expect(capturedBodyWithoutScene.generationConfig.response_schema.properties.sceneContext).toBeUndefined();
+        expect(capturedBodyWithoutScene.generationConfig.response_schema.required).toEqual(['pages']);
+        expect(capturedBodyWithoutScene.system_instruction.parts[0].text).not.toContain('[SCENE & CHARACTER ANCHOR]');
+    });
+
+    it('當 callGeminiAPIBatch 在開啟 sceneContext 時遇到 PROHIBITED_CONTENT 或 SAFETY，會自動降級拔除 sceneContext 並原地重試成功', async () => {
+        let callCount = 0;
+        const capturedBodies = [];
+        vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+            callCount++;
+            capturedBodies.push(JSON.parse(init.body));
+            if (callCount === 1) {
+                // 第 1 次觸發安全過濾
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        candidates: [{
+                            finishReason: 'PROHIBITED_CONTENT'
+                        }]
+                    })
+                };
+            }
+            // 第 2 次降級重試成功
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{
+                        finishReason: 'STOP',
+                        content: {
+                            parts: [{
+                                text: JSON.stringify({
+                                    pages: [
+                                        { pageIndex: 0, results: [{ original: '先輩、大丈夫？', translation: '前輩，沒事吧？' }] }
+                                    ]
+                                })
+                            }]
+                        }
+                    }]
+                })
+            };
+        }));
+
+        const res = await callGeminiAPIBatch(
+            ['AAAA'],
+            DEFAULT_PROMPT_ONE_STEP,
+            '',
+            'TEST_KEY',
+            'gemini-2.5-flash',
+            null,
+            '',
+            { enableSceneContext: true }
+        );
+
+        expect(callCount).toBe(2);
+        // 第 1 次請求包含 sceneContext
+        expect(capturedBodies[0].generationConfig.response_schema.properties.sceneContext).toBeDefined();
+        expect(capturedBodies[0].system_instruction.parts[0].text).toContain('[SCENE & CHARACTER ANCHOR]');
+        // 第 2 次請求降級拔除 sceneContext
+        expect(capturedBodies[1].generationConfig.response_schema.properties.sceneContext).toBeUndefined();
+        expect(capturedBodies[1].system_instruction.parts[0].text).not.toContain('[SCENE & CHARACTER ANCHOR]');
+        // 最終翻譯結果正確回傳，且 sceneContext 降級後為空
+        expect(res[0].results[0].translation).toBe('前輩，沒事吧？');
+        expect(res.sceneContext).toBe('');
+    });
+
+    it('extractTermsFromTranslation 會攔截與 existingTerms 撞名的詞條，以及剔除同批次內「兩個不同日文原名指向同一中文譯名」的張冠李戴詞條', async () => {
+        let capturedExtractBody = null;
+        vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+            capturedExtractBody = JSON.parse(init.body);
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    candidates: [{
+                        finishReason: 'STOP',
+                        content: {
+                            parts: [{
+                                text: JSON.stringify([
+                                    // 1. 既有原文相同 -> 應跳過
+                                    { ori: 'フリーレン', trans: '芙莉蓮' },
+                                    // 2. 既有譯名被不同片假名佔用 (張冠李戴) -> 應被剔除
+                                    { ori: 'ヒンメル', trans: '芙莉蓮' },
+                                    // 3. 正常新詞條 (帶 note) -> 應保留
+                                    { ori: 'フェルン', trans: '費倫', note: '女/前輩' },
+                                    // 4. 同批次多對一衝突 (シュタルク 與 アイゼン 指向同一修塔爾克) -> 整組應剔除
+                                    { ori: 'シュタルク', trans: '修塔爾克' },
+                                    { ori: 'アイゼン', trans: '修塔爾克' },
+                                    // 5. 另一個正常新詞條 -> 應保留
+                                    { ori: 'ハイター', trans: '海塔' }
+                                ])
+                            }]
+                        }
+                    }]
+                })
+            };
+        }));
+
+        const existingTerms = [
+            { ori: 'フリーレン', trans: '芙莉蓮' }
+        ];
+
+        const pairs = [
+            { original: 'フェルン、行きましょう', translation: '費倫，我們走吧' },
+            { original: 'ハイター様、ありがとうございます', translation: '海塔大人，謝謝你' }
+        ];
+
+        const terms = await extractTermsFromTranslation(pairs, {
+            apiKey: 'TEST_KEY',
+            modelName: 'gemini-2.5-flash',
+            existingTerms,
+            sceneContext: '奇幻魔法冒險隊伍'
+        });
+
+        // 檢查 prompt 注入
+        const promptText = capturedExtractBody.contents[0].parts[0].text;
+        expect(promptText).toContain('<existing_glossary>');
+        expect(promptText).toContain('フリーレン');
+        expect(promptText).toContain('<scene_context>\n奇幻魔法冒險隊伍\n</scene_context>');
+
+        // 檢查過濾結果：僅保留 フェルン 與 ハイター
+        expect(terms).toHaveLength(2);
+        expect(terms).toEqual([
+            { ori: 'フェルン', trans: '費倫', note: '女/前輩' },
+            { ori: 'ハイター', trans: '海塔' }
+        ]);
     });
 });

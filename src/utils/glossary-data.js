@@ -20,6 +20,111 @@ export function findMatchingGlossaryKey(collection, requestedKey) {
   return null;
 }
 export const termKey = term => String(term?.ori || term?.original || '').trim().toLowerCase();
+
+export function normalizeTerm(term = {}, fallbackAt = 0) {
+  const ori = String(term?.ori || term?.original || '').trim();
+  const trans = String(term?.trans || term?.translation || '').trim();
+  const note = String(term?.note || term?.role || '').trim();
+  const fallback = Number(fallbackAt) || 0;
+  const createdAt = Number(term?.createdAt) || fallback || 0;
+  const updatedAt = Number(term?.updatedAt) || createdAt || fallback || 0;
+  return {
+    ori,
+    trans,
+    ...(note ? { note } : {}),
+    source: term?.source === 'user' ? 'user' : 'ai',
+    createdAt,
+    updatedAt
+  };
+}
+
+export function transKey(term) {
+  return String(typeof term === 'string' ? term : term?.trans || term?.translation || '').trim().toLowerCase();
+}
+
+/**
+ * 自動排毒：當多個不同日文原文 (ori) 卻指向同一個非空中文譯名 (trans) 時：
+ * - 手動詞條 (source === 'user') 永遠保留，不受限制。
+ * - 若該譯名已有手動詞條佔用，或有多筆 AI 詞條撞名，AI 詞條僅在「沒有手動詞條佔用」時保留最早建立 (createdAt 最小) 的第一筆本尊，其餘撞名的 AI 詞條一律剔除。
+ * - 若傳入 termTombstones 物件，被剔除的撞名 AI 詞條會自動寫入 tombstone (Math.max(Number(termTombstones[key]) || 0, Number(term.updatedAt) || 0, at))，防止從雲端或舊快照死灰復燃。
+ */
+export function sanitizeCollidingAiTerms(terms = [], termTombstones = null, at = Date.now()) {
+  const normalized = (Array.isArray(terms) ? terms : [])
+    .map(t => normalizeTerm(t))
+    .filter(t => t.ori && t.trans);
+
+  // 按脫敏譯名分組
+  const byTrans = new Map();
+  for (const term of normalized) {
+    const tk = transKey(term);
+    if (!tk) continue;
+    if (!byTrans.has(tk)) byTrans.set(tk, []);
+    byTrans.get(tk).push(term);
+  }
+
+  const evictedOriKeys = new Set();
+  for (const [, group] of byTrans.entries()) {
+    if (group.length <= 1) continue;
+    // 檢查是否包含不同 oriKey
+    const uniqueOris = new Set(group.map(t => termKey(t)));
+    if (uniqueOris.size <= 1) continue;
+
+    const userTerms = group.filter(t => t.source === 'user');
+    const aiTerms = group.filter(t => t.source !== 'user');
+    if (aiTerms.length === 0) continue;
+
+    if (userTerms.length > 0) {
+      // 已有使用者手動指定該譯名 -> 所有撞名的 AI 詞條皆視為誤配剔除
+      for (const bad of aiTerms) {
+        const ok = termKey(bad);
+        evictedOriKeys.add(ok);
+        if (termTombstones && typeof termTombstones === 'object') {
+          termTombstones[ok] = Math.max(Number(termTombstones[ok]) || 0, Number(bad.updatedAt) || 0, at);
+        }
+      }
+    } else {
+      // 全部都是 AI 詞條撞同一個譯名 -> 按 createdAt 升序（若相同則 updatedAt 升序），只留最早登場的第一筆本尊
+      const sortedAi = [...aiTerms].sort((a, b) => (a.createdAt - b.createdAt) || (a.updatedAt - b.updatedAt));
+      for (let i = 1; i < sortedAi.length; i++) {
+        const bad = sortedAi[i];
+        const ok = termKey(bad);
+        evictedOriKeys.add(ok);
+        if (termTombstones && typeof termTombstones === 'object') {
+          termTombstones[ok] = Math.max(Number(termTombstones[ok]) || 0, Number(bad.updatedAt) || 0, at);
+        }
+      }
+    }
+  }
+
+  if (evictedOriKeys.size === 0) return normalized;
+  return normalized.filter(t => !evictedOriKeys.has(termKey(t)));
+}
+
+export function normalizeGlossaryEntry(entry = {}, fallbackKey = '') {
+  const raw = isRecord(entry) ? entry : {};
+  const key = String(fallbackKey || raw.romanKey || raw.displayName || '').trim();
+  const termTombstones = { ...record(raw.termTombstones) };
+  const rawTerms = Array.isArray(raw.terms) ? raw.terms : [];
+  const filteredTerms = rawTerms
+    .map(t => normalizeTerm(t))
+    .filter(t => {
+      const k = termKey(t);
+      if (!k || !t.trans) return false;
+      const deleted = stamp(termTombstones[k]);
+      return !deleted || (t.source === 'user' && termTime(t) > deleted);
+    });
+  const sanitizedTerms = sanitizeCollidingAiTerms(filteredTerms, termTombstones);
+  return {
+    ...raw,
+    displayName: raw.displayName || key,
+    rawJapanese: raw.rawJapanese || null,
+    romanKey: raw.romanKey || key,
+    terms: sanitizedTerms,
+    termTombstones,
+    updatedAt: stamp(raw.updatedAt),
+    lastUsed: stamp(raw.lastUsed)
+  };
+}
 const stamp = value => Number(value) || 0;
 const termTime = term => Math.max(stamp(term?.updatedAt), stamp(term?.createdAt));
 const workTime = work => stamp(work?.updatedAt) || stamp(work?.lastUsed);
@@ -42,12 +147,13 @@ export function mergeTermLists(localTerms = [], cloudTerms = [], tombstones = {}
   for (const term of [...(Array.isArray(localTerms) ? localTerms : []), ...(Array.isArray(cloudTerms) ? cloudTerms : [])]) {
     const key = termKey(term);
     if (!key) continue;
-    terms.set(key, chooseTerm(terms.get(key), term));
+    terms.set(key, chooseTerm(terms.get(key), normalizeTerm(term)));
   }
   const deleted = record(tombstones);
-  return [...terms.entries()]
+  const remaining = [...terms.entries()]
     .filter(([key, term]) => !stamp(deleted[key]) || (term.source === 'user' && termTime(term) > stamp(deleted[key])))
     .map(([, term]) => term);
+  return sanitizeCollidingAiTerms(remaining, tombstones);
 }
 
 export function mergeGlossaryData(localGlossaries = {}, cloudGlossaries = {}, localDeletes = {}, cloudDeletes = {}) {

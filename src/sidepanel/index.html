@@ -13,7 +13,7 @@
                     <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>
                     <path d="M8 7h6M8 11h8"/>
                 </svg>
-                <span id="mt-extension-title">漫譯</span>
+                <span id="mt-extension-title">漫譯 V3.2.2</span>
                 <span id="mt-model-badge"></span>
                 <span id="mt-novel-status" style="display: none; font-size: 10px; color: #ff78a4; margin-left: 8px; font-weight: bold;">(翻譯中...)</span>
             </div>
@@ -77,7 +77,7 @@
             <input type="file" id="mt-file-input" multiple accept="image/*" style="display: none;">
         </div>
         
-        <div class="mt-mode-controls" style="display: flex; gap: 12px; padding: 12px 10px; border-top: 1px solid rgba(0,0,0,0.05); background: rgba(0,0,0,0.015); align-items: center; border-bottom: 2px solid var(--theme-bg-secondary); overflow-x: auto; white-space: nowrap;">
+        <div class="mt-mode-controls" style="display: flex; gap: 8px; padding: 6px 8px; border-top: 1px solid rgba(0,0,0,0.05); background: rgba(0,0,0,0.015); align-items: center; border-bottom: 2px solid var(--theme-bg-secondary); overflow-x: auto; white-space: nowrap;">
             <div style="display: flex; align-items: center; gap: 5px;">
                 <span style="font-size: 11px; font-weight: 700; color: #444;">小說</span>
                 <label class="mt-switch">
@@ -92,11 +92,18 @@
                     <span class="mt-slider"></span>
                 </label>
             </div>
-            <div style="display: flex; align-items: center; gap: 5px;" title="連續追漫：看當前話時，自動在背景提前預翻下一話">
+            <div style="display: flex; align-items: center; gap: 4px;" title="連續追漫：看當前話時，自動在背景提前預翻下一話">
                 <span style="font-size: 11px; font-weight: 700; color: #444;">連漫</span>
                 <label class="mt-switch">
                     <input type="checkbox" id="mt-auto-pretranslate-toggle" checked>
                     <span class="mt-slider"></span>
+                </label>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px;" title="視覺情境錨點：先判別男女與職場/校園關係以提升翻譯精準度（翻譯 R18 本子時建議關閉以避免觸發安全審查）">
+                <span class="mt-toggle-text" style="font-size: 11px; font-weight: 700; color: #444;">情境</span>
+                <label class="mt-switch mt-toggle-label" title="視覺情境錨點：先判別男女與職場/校園關係以提升翻譯精準度（翻譯 R18 本子時建議關閉以避免觸發安全審查）">
+                    <input type="checkbox" id="mt-scene-context-toggle" checked>
+                    <span class="mt-slider mt-toggle-slider"></span>
                 </label>
             </div>
             <button id="mt-novel-retry-all-btn" style="display: none; background: #fff0f5; border: 1px solid #ffb6c1; color: #ff1493; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold; margin-left: auto;">

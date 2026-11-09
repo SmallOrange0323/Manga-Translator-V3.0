@@ -111,6 +111,7 @@ async function initGeneralSettings() {
         ['imageMaxDimension', 1024],
         ['enableTaiwanLocalization', true],
         ['autoPretranslateNextChapter', true],
+        ['enableSceneContext', true],
         ['incognitoPrivacyMode', true],
         ['hybridModeEnabled', true],
         ['secondaryModelName', 'gemini-3.5-flash-lite']
@@ -279,6 +280,9 @@ function setupEventHandlers() {
 
             const autoPretrans = document.getElementById('autoPretranslateNextChapter');
             if(autoPretrans) await state.set('autoPretranslateNextChapter', autoPretrans.checked);
+
+            const enableSceneContextCheckbox = document.getElementById('enableSceneContext');
+            if (enableSceneContextCheckbox) await state.set('enableSceneContext', enableSceneContextCheckbox.checked);
 
             const hybridModeEl = document.getElementById('hybridModeEnabled');
             if(hybridModeEl) await state.set('hybridModeEnabled', hybridModeEl.checked);

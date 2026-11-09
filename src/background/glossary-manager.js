@@ -1,5 +1,5 @@
 import { log } from '../utils/logger.js';
-import { GLOSSARY_STORAGE_KEY, GLOSSARY_TOMBSTONES_KEY, termKey, mergeGlossaryData, normalizeGlossaryKey, findMatchingGlossaryKey } from '../utils/glossary-data.js';
+import { GLOSSARY_STORAGE_KEY, GLOSSARY_TOMBSTONES_KEY, termKey, transKey, sanitizeCollidingAiTerms, normalizeGlossaryEntry, mergeGlossaryData, normalizeGlossaryKey, findMatchingGlossaryKey } from '../utils/glossary-data.js';
 
 export { GLOSSARY_STORAGE_KEY, GLOSSARY_TOMBSTONES_KEY };
 export const GLOSSARY_MAX_TERMS = 500;
@@ -129,7 +129,7 @@ export async function loadGlossary(mangaKey) {
   try {
     const { glossaries } = await readData();
     const key = findExistingGlossaryKey(glossaries, mangaKey);
-    return key ? glossaries[key] : null;
+    return key ? normalizeGlossaryEntry(glossaries[key], key) : null;
   } catch (error) {
     log.warn('Glossary', `讀取失敗: ${error.message}`);
     return null;
@@ -164,20 +164,29 @@ export async function saveGlossary(mangaKey, glossaryEntry) {
     if (deletedAt && timestamp(all[key]?.recreatedAt) <= deletedAt) return { changed: false, suppressed: true };
     const old = all[key] || {};
     const termTombstones = { ...(old.termTombstones || {}) };
-    const existing = new Map((old.terms || []).map(term => [termKey(term), term]));
-    let terms = [...(old.terms || [])];
+    const now = Date.now();
+    const cleanExistingTerms = sanitizeCollidingAiTerms(old.terms || [], termTombstones, now);
+    const existing = new Map(cleanExistingTerms.map(term => [termKey(term), term]));
+    const seenTrans = new Set(cleanExistingTerms.map(term => transKey(term)).filter(Boolean));
+    let terms = [...cleanExistingTerms];
     let added = false;
     for (const input of glossaryEntry.terms || []) {
       const keyName = termKey(input);
       const trans = String(input?.trans || input?.translation || '').trim();
       if (!keyName || !trans || existing.has(keyName) || termTombstones[keyName]) continue;
+      const tk = transKey(trans);
+      const isUser = input?.source === 'user';
+      if (!isUser && tk && seenTrans.has(tk)) continue;
       const at = nextTime(old.updatedAt);
-      const term = { ...input, ori: String(input.ori || input.original).trim(), trans, source: input.source || 'ai', createdAt: timestamp(input.createdAt) || at, updatedAt: at };
+      const note = String(input?.note || input?.role || '').trim();
+      const term = { ...input, ori: String(input.ori || input.original).trim(), trans, ...(note ? { note } : {}), source: isUser ? 'user' : 'ai', createdAt: timestamp(input.createdAt) || at, updatedAt: at };
       terms.push(term);
       existing.set(keyName, term);
+      if (tk) seenTrans.add(tk);
       added = true;
     }
-    if (!added && all[key] && old.displayName && old.romanKey && (old.rawJapanese || !glossaryEntry.rawJapanese)) {
+    const sanitizedAny = cleanExistingTerms.length !== (old.terms || []).length;
+    if (!added && !sanitizedAny && all[key] && old.displayName && old.romanKey && (old.rawJapanese || !glossaryEntry.rawJapanese)) {
       return { changed: false, key, success: true, termCount: terms.length };
     }
     const at = nextTime(old.updatedAt);
@@ -187,24 +196,34 @@ export async function saveGlossary(mangaKey, glossaryEntry) {
       rawJapanese: old.rawJapanese || glossaryEntry.rawJapanese || null,
       romanKey: old.romanKey || glossaryEntry.romanKey || key,
       terms: trimAndMark(terms, termTombstones, at), termTombstones,
-      updatedAt: added || !all[key] ? at : (old.updatedAt || at),
+      updatedAt: (added || sanitizedAny || !all[key]) ? at : (old.updatedAt || at),
       lastUsed: at
     };
     return { changed: true, key, success: true, termCount: all[key].terms.length };
   });
 }
 
-export function mergeGlossaryTerms(existingTerms, newTerms) {
-  const existing = Array.isArray(existingTerms) ? existingTerms : [];
-  const seen = new Set(existing.map(termKey));
-  const terms = [...existing];
+export function mergeGlossaryTerms(existingTerms = [], newTerms = []) {
+  const cleanExisting = sanitizeCollidingAiTerms(Array.isArray(existingTerms) ? existingTerms : []);
+  const seenOri = new Set(cleanExisting.map(termKey));
+  const seenTrans = new Set(cleanExisting.map(transKey).filter(Boolean));
+  const terms = [...cleanExisting];
   let addedCount = 0;
   for (const input of newTerms || []) {
     const key = termKey(input);
     const trans = String(input?.trans || input?.translation || '').trim();
-    if (!key || !trans || seen.has(key)) continue;
-    terms.push({ ...input, ori: String(input.ori || input.original).trim(), trans, source: input.source || 'ai' });
-    seen.add(key);
+    const tk = transKey(trans);
+    const isUser = input?.source === 'user';
+    if (!key || !trans) continue;
+    if (!isUser) {
+      if (seenOri.has(key) || (tk && seenTrans.has(tk))) continue;
+    } else {
+      if (seenOri.has(key)) continue;
+    }
+    const note = String(input?.note || input?.role || '').trim();
+    terms.push({ ...input, ori: String(input.ori || input.original).trim(), trans, ...(note ? { note } : {}), source: isUser ? 'user' : 'ai' });
+    seenOri.add(key);
+    if (tk) seenTrans.add(tk);
     addedCount++;
   }
   return { terms, addedCount };
@@ -230,7 +249,8 @@ export async function upsertGlossaryTerm(mangaKey, term, oldOri) {
       tombstones[previousKey] = at;
     } else if (index >= 0) terms.splice(index, 1);
     delete tombstones[newKey];
-    terms.push({ ...previous, ...term, ori: term.ori.trim(), trans: term.trans.trim(), source: 'user', createdAt: timestamp(previous?.createdAt) || at, updatedAt: at });
+    const note = String(term?.note || term?.role || previous?.note || '').trim();
+    terms.push({ ...previous, ...term, ori: term.ori.trim(), trans: term.trans.trim(), ...(note ? { note } : {}), source: 'user', createdAt: timestamp(previous?.createdAt) || at, updatedAt: at });
     all[key] = { ...old, displayName: old.displayName || key, romanKey: old.romanKey || key, terms: trimAndMark(terms, tombstones, at), termTombstones: tombstones, updatedAt: at, recreatedAt: at, lastUsed: at };
     return { changed: true, key, success: true, termCount: all[key].terms.length };
   });
@@ -302,7 +322,8 @@ export async function importGlossaryTerms(mangaKey, incoming) {
       at = nextTime(at);
       if (index >= 0) terms.splice(index, 1);
       else addedCount++;
-      terms.push({ ...previous, ori, trans, source: 'user', createdAt: timestamp(previous?.createdAt) || at, updatedAt: at });
+      const note = String(item?.note || item?.role || previous?.note || '').trim();
+      terms.push({ ...previous, ori, trans, ...(note ? { note } : {}), source: 'user', createdAt: timestamp(previous?.createdAt) || at, updatedAt: at });
       delete tombstones[keyName];
     }
     all[key] = { ...old, displayName: old.displayName || key, romanKey: old.romanKey || key, terms: trimAndMark(terms, tombstones, at), termTombstones: tombstones, updatedAt: at, recreatedAt: at, lastUsed: at };
@@ -311,7 +332,16 @@ export async function importGlossaryTerms(mangaKey, incoming) {
 }
 
 export function buildGlossaryPromptSnippet(terms) {
-  if (!terms?.length) return '';
-  const list = terms.filter(term => term?.ori && term?.trans).map(term => `• 原文: "${term.ori}" ➔ 強制譯名: "${term.trans}"`).join('\n');
-  return `\n【最高優先級 - 專屬名詞與人名強制定名表 (CRITICAL GLOSSARY OVERRIDE)】\n遇到以下日文詞彙/人名時，你【必須 100% 強制使用】指定的繁體中文譯名，嚴禁擅自意譯、音譯或替換為其他名稱：\n${list}\n`;
+  const safeTerms = sanitizeCollidingAiTerms(terms);
+  if (!safeTerms || safeTerms.length === 0) return '';
+  const list = safeTerms
+    .filter(t => t?.ori && t?.trans)
+    .map(t => {
+      const note = String(t?.note || t?.role || '').trim();
+      return note
+        ? `• 原文: "${t.ori}" ➔ 強制譯名: "${t.trans}" (${note})`
+        : `• 原文: "${t.ori}" ➔ 強制譯名: "${t.trans}"`;
+    })
+    .join('\n');
+  return `\n【最高優先級 - 專屬名詞與人名強制定名表 (CRITICAL GLOSSARY OVERRIDE)】\n遇到以下日文詞彙/人名時，你【必須 100% 強制使用】指定的繁體中文譯名，嚴禁擅自意譯、音譯或替換為其他名稱：\n${list}\n⚠️ 嚴格匹配原則：僅當日文原文「逐字完全吻合」上方列出的原文時，才可套用對應的強制譯名。若畫面中出現不在上表內的新角色片假名或新專有名詞，必須根據其自身日文發音獨立翻譯，絕對禁止套用上表既有角色的中文譯名！\n`;
 }

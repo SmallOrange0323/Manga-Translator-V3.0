@@ -322,9 +322,12 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}`;
  * 從翻譯結果中非同步萃取術語 (強化版：支援分片處理與重試)
  */
 export async function extractTermsFromTranslation(pairs, options = {}) {
-    const { model = 'gemini-3.1-flash-lite' } = options;
-    const apiKey = state.getNextApiKey();
-    if (!apiKey || pairs.length === 0) return [];
+    const model = options.model || options.modelName || 'gemini-3.1-flash-lite';
+    const apiKey = options.apiKey || state.getNextApiKey();
+    if (!apiKey || !pairs || pairs.length === 0) return [];
+
+    const existingTerms = Array.isArray(options.existingTerms) ? options.existingTerms : [];
+    const sceneContext = String(options.sceneContext || '').trim();
 
     // 分片處理：每 50 組對話為一組，防止單次 Payload 過大
     const chunkSize = 50;
@@ -335,7 +338,15 @@ export async function extractTermsFromTranslation(pairs, options = {}) {
 
     log.info('TranslateAPI', `[術語萃取] 開始分片處理：共 ${pairs.length} 組對話，分為 ${chunks.length} 個批次執行。`);
 
-    const allNewTerms = [];
+    const existingGlossaryBlock = existingTerms.length > 0
+        ? `\n<existing_glossary>\nAlready established terms (STRICTLY FORBIDDEN to overwrite, reuse, or map new Katakana to these translations):\n${existingTerms.map(t => `• "${t.ori}" ➔ "${t.trans}"`).join('\n')}\n</existing_glossary>`
+        : '';
+    const sceneContextBlock = sceneContext
+        ? `\n<scene_context>\n${sceneContext}\n</scene_context>`
+        : '';
+
+    const allRawExtractedTerms = [];
+
     for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const inputText = chunk.map(p => `${p.original} → ${p.translation}`).join('\n');
@@ -350,7 +361,9 @@ STRICT EXTRACTION RULES:
 4. NO ONOMATOPOEIA: Strictly exclude sound effects (e.g. ドカン, バキッ, ザーザー are FORBIDDEN).
 5. MINIMUM LENGTH: Proper nouns usually have 2+ characters.
 6. CORRESPONDENCE: Ensure the Traditional Chinese (zh-TW) translation matches the original name's sound and context.
-7. NO MULTI-TO-ONE MISMATCH: Strictly avoid mapping phonetically distinct Katakana names to the exact same Traditional Chinese translation (e.g., mapping both "ミュディ" and "アミュディ" to "謬蒂" is FORBIDDEN).
+7. ONE-TO-ONE MAPPING ONLY (STRICT): Each distinct Japanese original name (ori) MUST have a unique Chinese translation (trans). Strictly FORBIDDEN to map new Katakana or character names to translations already established in the existing glossary, or to have two different "ori" share the same "trans" within the output! If names sound similar or you are unsure, transliterate independently according to kana pronunciation or skip.
+8. OPTIONAL NOTE: If confident about the character's gender or social/workplace relationship (referring to scene_context if provided), provide a brief note in Traditional Chinese (e.g., "女", "男", "女/前輩", "男/上司"). If uncertain or not a character name, leave note empty "".
+${existingGlossaryBlock}${sceneContextBlock}
 
 Input Text to Analyze (Chunk ${i + 1}/${chunks.length}):
 ${inputText}`;
@@ -365,7 +378,8 @@ ${inputText}`;
                         type: 'object',
                         properties: {
                             ori: { type: 'string' },
-                            trans: { type: 'string' }
+                            trans: { type: 'string' },
+                            note: { type: 'string' }
                         },
                         required: ['ori', 'trans']
                     }
@@ -411,24 +425,7 @@ ${inputText}`;
                 const parsed = JSON.parse(cleanStr);
                 
                 if (Array.isArray(parsed)) {
-                    // 執行嚴格的後置物理過濾，防止大模型幻覺與中中對照污染詞庫
-                    const katakanaOnlyTerms = parsed.filter(t => {
-                        if (!t.ori || !t.trans) return false;
-                        
-                        const oriTrimmed = t.ori.trim();
-                        const transTrimmed = t.trans.trim();
-                        
-                        // 1. 原文與譯文不可相同 (排除中中對照)
-                        if (oriTrimmed === transTrimmed) return false;
-                        
-                        // 2. 原文必須完全由片假名、長音符、中黑點組成 (排除漢字、平假名、英文與中文)
-                        // 片假名區間 \u30a0-\u30ff，長音符 \u30fc，點號 \u30fb
-                        const isPureKatakana = /^[・ー\u30a0-\u30ff]+$/.test(oriTrimmed);
-                        if (!isPureKatakana) return false;
-                        
-                        return true;
-                    });
-                    allNewTerms.push(...katakanaOnlyTerms);
+                    allRawExtractedTerms.push(...parsed);
                 }
                 
                 log.api('TranslateAPI', `術語萃取成功 (${i + 1}/${chunks.length})`, { model, latencyMs, keyAlias, status: 'OK' });
@@ -445,7 +442,88 @@ ${inputText}`;
         }
     }
 
-    return allNewTerms;
+    // 執行嚴格的後置物理過濾，防止大模型幻覺、中中對照污染詞庫與撞名
+    // 1. 篩選基本合規的片假名詞條
+    const validCandidateTerms = allRawExtractedTerms.filter(t => {
+        if (!t || typeof t !== 'object') return false;
+        if (!t.ori || !t.trans) return false;
+
+        const oriTrimmed = String(t.ori).trim();
+        const transTrimmed = String(t.trans).trim();
+
+        // 原文與譯文不可相同 (排除中中對照)
+        if (oriTrimmed === transTrimmed) return false;
+
+        // 原文必須完全由片假名、長音符、中黑點組成 (排除漢字、平假名、英文與中文)
+        // 片假名區間 \u30a0-\u30ff，長音符 \u30fc，點號 \u30fb
+        const isPureKatakana = /^[・ー\u30a0-\u30ff]+$/.test(oriTrimmed);
+        if (!isPureKatakana) return false;
+
+        return true;
+    });
+
+    // 2. 建立既有詞庫索引
+    const existingOriSet = new Set(existingTerms.map(t => String(t.ori || '').trim().toLowerCase()));
+    const existingTransMap = new Map();
+    existingTerms.forEach(t => {
+        const o = String(t.ori || '').trim().toLowerCase();
+        const tr = String(t.trans || '').trim().toLowerCase();
+        if (tr) existingTransMap.set(tr, o);
+    });
+
+    // 3. 檢查本批次萃取出的項目中，是否有 2 個以上不同的 oriKey 指向同一個 transKey (張冠李戴衝突)
+    const transToOriKeys = new Map();
+    for (const item of validCandidateTerms) {
+        const oriKey = String(item.ori).trim().toLowerCase();
+        const transKey = String(item.trans).trim().toLowerCase();
+        if (!transToOriKeys.has(transKey)) {
+            transToOriKeys.set(transKey, new Set());
+        }
+        transToOriKeys.get(transKey).add(oriKey);
+    }
+    const conflictedTransKeys = new Set();
+    for (const [transKey, oriKeys] of transToOriKeys.entries()) {
+        if (oriKeys.size > 1) {
+            conflictedTransKeys.add(transKey);
+        }
+    }
+
+    // 4. 逐筆過濾與在地化
+    const enableTwLoc = (await state.get('enableTaiwanLocalization', true)) !== false;
+    const finalTerms = [];
+    const seenOriKeys = new Set();
+
+    for (const item of validCandidateTerms) {
+        const oriTrimmed = String(item.ori).trim();
+        const transTrimmed = String(item.trans).trim();
+        const oriKey = oriTrimmed.toLowerCase();
+        const transKey = transTrimmed.toLowerCase();
+
+        // 剔除同批次張冠李戴衝突
+        if (conflictedTransKeys.has(transKey)) continue;
+
+        // 若已存在於既有詞庫的原文，跳過
+        if (existingOriSet.has(oriKey)) continue;
+
+        // 若與既有詞庫已存在的譯名衝突 (且對應原文不同)，直接剔除
+        if (existingTransMap.has(transKey) && existingTransMap.get(transKey) !== oriKey) continue;
+
+        // 同批次去重
+        if (seenOriKeys.has(oriKey)) continue;
+        seenOriKeys.add(oriKey);
+
+        const localizedTrans = enableTwLoc ? convertCnToTwLocal(transTrimmed) : transTrimmed;
+        const rawNote = typeof item.note === 'string' ? item.note.trim() : '';
+        const localizedNote = (enableTwLoc && rawNote) ? convertCnToTwLocal(rawNote) : rawNote;
+
+        finalTerms.push({
+            ori: oriTrimmed,
+            trans: localizedTrans,
+            ...(localizedNote ? { note: localizedNote } : {})
+        });
+    }
+
+    return finalTerms;
 }
 
 /**
@@ -456,7 +534,7 @@ ${inputText}`;
  * @param {string} glossarySnippet - 術語注入片段
  * @returns {Array} 長度固定等於 base64Array.length 的結果陣列
  */
-export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null, signal = null, previousContextSnippet = '') {
+export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnippet = '', apiKey = null, modelOverride = null, signal = null, previousContextSnippet = '', options = {}) {
     if (signal?.aborted) {
         const cancelErr = new Error('Request aborted by user STOP');
         cancelErr.name = 'AbortError';
@@ -472,36 +550,64 @@ export async function callGeminiAPIBatch(base64Array, customPrompt, glossarySnip
     const resolvedKey = apiKey || state.getNextApiKey();
     if (!resolvedKey) throw new Error('API Key is missing');
 
-    // 組合系統指令 (System Instruction) - 升級為 XML 約束結構並包裹術語庫，觸發 Gemini Context Caching
-    const systemPrompt = `
+    const enableSceneContext = options.enableSceneContext !== undefined
+        ? Boolean(options.enableSceneContext)
+        : (await state.get('enableSceneContext', true)) !== false;
+    let useSceneContext = enableSceneContext;
+
+    function buildBatchBody(useSceneCtx) {
+        const sceneAnchorPrompt = useSceneCtx
+            ? '\n[SCENE & CHARACTER ANCHOR]: Before translating pages, populate "sceneContext" in Traditional Chinese (1 short sentence, <= 60 chars) noting ONLY the setting (e.g., 職場辦公室/校園/奇幻) and visible characters\' gender & social/workplace relationship (e.g., 男下屬與女上司/女前輩與男後輩). Strictly DO NOT describe nudity, body parts, or intimate acts.'
+            : '';
+
+        const systemPrompt = `
 <system_instructions>
 ${customPrompt || 'You are a professional manga translator.'}
-${SYSTEM_BATCH_RULES}
+${SYSTEM_BATCH_RULES}${sceneAnchorPrompt}
 </system_instructions>
 ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previousContextSnippet ? `\n<previous_dialogue_reference>\nFor character name, gender, and honorific consistency across batches, here are the most recent translated lines from the preceding pages:\n${previousContextSnippet}\n</previous_dialogue_reference>` : ''}`;
 
-    // 建立 User Parts (支援單圖損毀防禦，避免空圖片觸發 API 400 錯誤)
-    const userParts = [];
-    base64Array.forEach((b64, idx) => {
-        userParts.push({ text: `\n=== PAGE_BOUNDARY: IMAGE_INDEX=${idx} ===\n` });
-        if (typeof b64 === 'string' && b64.length > 50) {
-            userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
-        } else {
-            userParts.push({ text: `[IMAGE_INDEX=${idx} IS EMPTY OR CORRUPTED, PLEASE OUTPUT {"pageIndex": ${idx}, "results": []}]` });
-        }
-    });
-    // 強制單次 Request 輸出總量對齊約束
-    userParts.push({ text: `\n=== VERIFICATION REQUIREMENT: Total ${n} images provided (Index 0 to ${n - 1}). Your output JSON "pages" array MUST have EXACTLY ${n} objects for each image in sequential order. Do NOT skip any page. ===\n` });
+        const userParts = [];
+        base64Array.forEach((b64, idx) => {
+            userParts.push({ text: `\n=== PAGE_BOUNDARY: IMAGE_INDEX=${idx} ===\n` });
+            if (typeof b64 === 'string' && b64.length > 50) {
+                userParts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+            } else {
+                userParts.push({ text: `[IMAGE_INDEX=${idx} IS EMPTY OR CORRUPTED, PLEASE OUTPUT {"pageIndex": ${idx}, "results": []}]` });
+            }
+        });
+        userParts.push({ text: `\n=== VERIFICATION REQUIREMENT: Total ${n} images provided (Index 0 to ${n - 1}). Your output JSON "pages" array MUST have EXACTLY ${n} objects for each image in sequential order. Do NOT skip any page. ===\n` });
 
-    const body = {
-        system_instruction: {
-            parts: [{ text: systemPrompt }]
-        },
-        contents: [{ role: 'user', parts: userParts }],
-        generationConfig: {
-            temperature: 0.3,
-            response_mime_type: 'application/json',
-            response_schema: {
+        const responseSchema = useSceneCtx
+            ? {
+                type: 'OBJECT',
+                properties: {
+                    sceneContext: { type: 'STRING' },
+                    pages: {
+                        type: 'ARRAY',
+                        items: {
+                            type: 'OBJECT',
+                            properties: {
+                                pageIndex: { type: 'INTEGER' },
+                                results: {
+                                    type: 'ARRAY',
+                                    items: {
+                                        type: 'OBJECT',
+                                        properties: {
+                                            original: { type: 'STRING' },
+                                            translation: { type: 'STRING' }
+                                        },
+                                        required: ['original', 'translation']
+                                    }
+                                }
+                            },
+                            required: ['pageIndex', 'results']
+                        }
+                    }
+                },
+                required: ['sceneContext', 'pages']
+            }
+            : {
                 type: 'OBJECT',
                 properties: {
                     pages: {
@@ -527,18 +633,27 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previ
                     }
                 },
                 required: ['pages']
-            }
-        },
-        safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-        ]
-    };
+            };
 
+        return {
+            system_instruction: {
+                parts: [{ text: systemPrompt }]
+            },
+            contents: [{ role: 'user', parts: userParts }],
+            generationConfig: {
+                temperature: 0.3,
+                response_mime_type: 'application/json',
+                response_schema: responseSchema
+            },
+            safetySettings: [
+                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+            ]
+        };
+    }
 
-    // 超時時間動態計算：基準 25 秒 + 每張 3 秒，上限 60 秒 (超時果斷切換下一個 Key)
     const timeoutMs = Math.min(25 + n * 3, 60) * 1000;
     const controller = new AbortController();
     let externalAborted = false;
@@ -564,13 +679,14 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previ
     const keyAlias = state.getApiKeyAlias(resolvedKey);
 
     try {
-        const response = await fetch(url, {
+        let body = buildBatchBody(useSceneContext);
+        let response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
             signal: controller.signal
         });
-        const latencyMs = Math.round(performance.now() - startTime);
+        let latencyMs = Math.round(performance.now() - startTime);
 
         if (!response.ok) {
             const errorText = await response.text();
@@ -580,17 +696,50 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previ
             throw err;
         }
 
-        const json = await response.json();
-        const candidate = json.candidates?.[0];
-        const finishReason = candidate?.finishReason;
+        let json = await response.json();
+        let candidate = json.candidates?.[0];
+        let finishReason = candidate?.finishReason;
+        let blockReason = json.promptFeedback?.blockReason;
+        let isBlocked = finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT' || (!candidate && Boolean(blockReason));
+
+        // 安全審查撞牆自動降級重試（Safety Fallback）
+        if (isBlocked && useSceneContext) {
+            console.warn('[API Batch] 觸發安全審查，自動關閉 sceneContext 原地重試一次...');
+            log.warn('TranslateAPI', '[API Batch] 觸發安全審查，自動關閉 sceneContext 原地重試一次...');
+            useSceneContext = false;
+            body = buildBatchBody(false);
+            response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: controller.signal
+            });
+            latencyMs = Math.round(performance.now() - startTime);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                log.api('TranslateAPI', '批次翻譯失敗 (降級後)', { model, latencyMs, keyAlias, status: `HTTP ${response.status}` });
+                const err = new Error(`批次 API 錯誤 (${response.status}): ${errorText}`);
+                err.statusCode = response.status;
+                throw err;
+            }
+
+            json = await response.json();
+            candidate = json.candidates?.[0];
+            finishReason = candidate?.finishReason;
+            blockReason = json.promptFeedback?.blockReason;
+            isBlocked = finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT' || (!candidate && Boolean(blockReason));
+        }
+
         const rawText = candidate?.content?.parts?.[0]?.text || '';
 
         if (!rawText) {
-            if (finishReason === 'SAFETY' || finishReason === 'BLOCKLIST' || finishReason === 'PROHIBITED_CONTENT') {
-                log.warn('TranslateAPI', `[批次] 觸發模型安全審查過濾 (finishReason: ${finishReason})`);
-                const err = new Error(`觸發 Google AI 安全性審查過濾 (finishReason: ${finishReason})，模型拒絕翻譯 (Prohibited Content)`);
+            if (isBlocked) {
+                const reason = finishReason || blockReason;
+                log.warn('TranslateAPI', `[批次] 觸發模型安全審查過濾 (finishReason: ${reason})`);
+                const err = new Error(`觸發 Google AI 安全性審查過濾 (finishReason: ${reason})，模型拒絕翻譯 (Prohibited Content)`);
                 err.isProhibited = true;
-                err.finishReason = finishReason;
+                err.finishReason = reason;
                 throw err;
             }
             throw new Error(`批次 API 回傳為空 (finishReason: ${finishReason || 'UNKNOWN'})`);
@@ -598,11 +747,12 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previ
 
         const cleanStr = sanitizeJsonForParsing(rawText);
         let data;
+        const enableTwLoc = (await state.get('enableTaiwanLocalization', true)) !== false;
         try {
             data = JSON.parse(cleanStr);
             
             // 台灣用語在地化轉換
-            if (await state.get('enableTaiwanLocalization', true)) {
+            if (enableTwLoc) {
                 localizeObjectStrings(data);
             }
         } catch (parseErr) {
@@ -615,6 +765,14 @@ ${glossarySnippet ? `\n<glossary>\n${glossarySnippet}\n</glossary>` : ''}${previ
         // 將 pageIndex 對應結果放回正確位置，長度固定等於 n
         const results = parseBatchOutput(data, n);
         results.forEach(r => { r.usedModelName = model; });
+
+        const rawSceneContext = (useSceneContext && typeof data.sceneContext === 'string')
+            ? data.sceneContext.trim()
+            : '';
+        results.sceneContext = (enableTwLoc && rawSceneContext)
+            ? convertCnToTwLocal(rawSceneContext)
+            : rawSceneContext;
+
         return results;
 
     } catch (e) {

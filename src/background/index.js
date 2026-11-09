@@ -840,7 +840,12 @@ async function processDurableNovelJobs() {
                     setTimeout(async () => {
                     if (!novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) return;
                     try {
-                        const newTerms = await extractTermsFromTranslation(translatedPairs, { model: modelName });
+                        const currentGlossaryEntry = await loadGlossary(mangaKey);
+                        const newTerms = await extractTermsFromTranslation(translatedPairs, {
+                            model: modelName,
+                            existingTerms: currentGlossaryEntry?.terms || [],
+                            sceneContext: ''
+                        });
                         if (newTerms && newTerms.length > 0 && novelCancellationRegistry.isCurrentSession(job.tabId, job.sessionId)) {
                             const currentEntry = await loadGlossary(mangaKey) || { terms: [] };
                             const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], newTerms);
@@ -2397,6 +2402,8 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
         let previousContextSnippet = '';
+        const enableSceneContext = await state.get('enableSceneContext', true);
+        let lastSceneContext = '';
 
         for (let i = resumeIndex; i < chapterImages.length; i += batchSize) {
             if (jobData.isCancelled) {
@@ -2420,12 +2427,15 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
                         secondaryModel: secondaryModelName, isHybrid,
                         shouldContinue: () => !jobData.isCancelled,
                         request: ({ apiKey, modelName: requestModel }) => callGeminiAPIBatch(
-                            validItems.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, null, previousContextSnippet
+                            validItems.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, null, previousContextSnippet, { enableSceneContext }
                         )
                     });
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, execution.results, execution.usedModelName);
                     jobData.usedModelName = execution.usedModelName;
-                    previousContextSnippet = buildPreviousContextSnippet(batchResults) || previousContextSnippet;
+                    if (execution.results?.sceneContext) {
+                        lastSceneContext = execution.results.sceneContext;
+                    }
+                    previousContextSnippet = buildPreviousContextSnippet(batchResults, 5, lastSceneContext) || previousContextSnippet;
                 } catch (apiErr) {
                     log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${state.getApiKeyAlias(scheduledKey)} | ${batchModel}): ${apiErr.message}`);
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel, apiErr);
@@ -2516,9 +2526,12 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
     }
 }
 
-function buildPreviousContextSnippet(results) {
-    if (!results) return '';
-    const list = Array.isArray(results) ? results : [results];
+function buildPreviousContextSnippet(results = [], maxLines = 5, sceneContext = '') {
+    if (typeof maxLines === 'string') {
+        sceneContext = maxLines;
+        maxLines = 5;
+    }
+    const list = Array.isArray(results) ? results : (results ? [results] : []);
     const pairs = [];
     for (const item of list) {
         const lines = Array.isArray(item?.results) ? item.results : (Array.isArray(item) ? item : []);
@@ -2528,7 +2541,17 @@ function buildPreviousContextSnippet(results) {
             }
         }
     }
-    return pairs.slice(-5).join('\n');
+    const limit = typeof maxLines === 'number' && maxLines > 0 ? maxLines : 5;
+    const dialogueLines = pairs.slice(-limit);
+    const trimmedScene = typeof sceneContext === 'string' ? sceneContext.trim() : '';
+
+    if (trimmedScene && dialogueLines.length > 0) {
+        return `[場景與角色關係]: ${trimmedScene}\n${dialogueLines.join('\n')}`;
+    }
+    if (trimmedScene) {
+        return `[場景與角色關係]: ${trimmedScene}`;
+    }
+    return dialogueLines.join('\n');
 }
 
 /**
@@ -2843,6 +2866,8 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
         let completedCount = durableJob.processedCount;
         let allBatchResults = [];
         let recentDialoguePairs = [];
+        const enableSceneContext = await state.get('enableSceneContext', true);
+        let lastSceneContext = '';
         if (Array.isArray(durableJob.results) && durableJob.results.length > 0) {
             for (const row of durableJob.results) {
                 if (Array.isArray(row?.results)) {
@@ -2950,9 +2975,12 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                 let batchSuccess = false;
                 let batchWasStopped = false;
                 const mangaSignal = getMangaAbortSignal();
-                const previousContextSnippet = recentDialoguePairs.length > 0
+                const previousDialogueText = recentDialoguePairs.length > 0
                     ? recentDialoguePairs.map(p => `${p.original} -> ${p.translation}`).join('\n')
                     : '';
+                const previousContextSnippet = (lastSceneContext && previousDialogueText)
+                    ? `[場景與角色關係]: ${lastSceneContext}\n${previousDialogueText}`
+                    : (lastSceneContext ? `[場景與角色關係]: ${lastSceneContext}` : previousDialogueText);
 
                 if (batchSize > 1) {
                     if (i > 0 && effectiveDelay > 0) {
@@ -2974,7 +3002,10 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                     if (!await checkContinue()) {
                                         throw new HybridRequestAbortedError();
                                     }
-                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal, previousContextSnippet);
+                                    const subResults = await callGeminiAPIBatch(subBatch.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal, previousContextSnippet, { enableSceneContext });
+                                    if (subResults?.sceneContext) {
+                                        lastSceneContext = subResults.sceneContext;
+                                    }
                                     if (!await checkContinue()) {
                                         throw new HybridRequestAbortedError();
                                     }
@@ -3000,8 +3031,11 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                 shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted,
                                 request: async ({ apiKey, modelName: requestModel }) => {
                                     const singleResults = await callGeminiAPIBatch(
-                                        [item.b64], finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal, previousContextSnippet
+                                        [item.b64], finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal, previousContextSnippet, { enableSceneContext }
                                     );
+                                    if (singleResults?.sceneContext) {
+                                        lastSceneContext = singleResults.sceneContext;
+                                    }
                                     return singleResults[0] || { results: [] };
                                 }
                             });
@@ -3143,7 +3177,12 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
             log.info('Background', `[術語萃取] 開始分析漫畫譯文，共 ${allBatchResults.length} 組對話...`);
             setTimeout(async () => {
                 try {
-                    const newTerms = await extractTermsFromTranslation(allBatchResults, { model: modelName });
+                    const currentGlossaryEntry = await loadGlossary(currentMangaKey);
+                    const newTerms = await extractTermsFromTranslation(allBatchResults, {
+                        model: modelName,
+                        existingTerms: currentGlossaryEntry?.terms || [],
+                        sceneContext: lastSceneContext || ''
+                    });
                     if (newTerms && newTerms.length > 0) {
                         const currentEntry = await loadGlossary(currentMangaKey) || { terms: [] };
                         const { terms: mergedTerms, addedCount } = mergeGlossaryTerms(currentEntry.terms || [], newTerms);
