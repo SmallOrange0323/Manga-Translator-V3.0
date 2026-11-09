@@ -24,6 +24,12 @@ export function sanitizeTranslationText(text) {
     return clean;
 }
 
+// 輔助函式：將本地大型 data:image/... 轉換為空字串，避免 sendMessage 超出 Chrome 64 MiB 限制
+function toLightweightRetryImageRef(item) {
+    const src = typeof item === 'string' ? item : (item?.retryUrl || item?.image || '');
+    return src.startsWith('data:image/') ? '' : src;
+}
+
 // 解析 URL 取得來源分頁 ID
 const urlParams = new URLSearchParams(window.location.search);
 sourceTabId = parseInt(urlParams.get('tabId'));
@@ -191,7 +197,6 @@ document.addEventListener('DOMContentLoaded', () => {
         
         toggleModeBtn.addEventListener('click', () => {
             // 保存當前的翻譯資料和進度狀態到 sessionStorage
-            sessionStorage.setItem('mt_translated_data', JSON.stringify(translatedData));
             const overlayHidden = document.getElementById('loading-overlay').classList.contains('hidden');
             sessionStorage.setItem('mt_translation_complete', overlayHidden ? '1' : '0');
             sessionStorage.setItem('mt_progress_text', document.getElementById('progress-text').innerText);
@@ -218,7 +223,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const mobileToggleDesktopBtn = document.getElementById('mobile-toggle-desktop-btn');
     if (mobileToggleDesktopBtn) {
         mobileToggleDesktopBtn.addEventListener('click', () => {
-            sessionStorage.setItem('mt_translated_data', JSON.stringify(translatedData));
             const overlayHidden = document.getElementById('loading-overlay').classList.contains('hidden');
             sessionStorage.setItem('mt_translation_complete', overlayHidden ? '1' : '0');
             sessionStorage.setItem('mt_progress_text', document.getElementById('progress-text').innerText);
@@ -249,16 +253,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const retranslateAllBtn = document.getElementById('retranslate-all-btn');
     if (retranslateAllBtn) {
         retranslateAllBtn.addEventListener('click', () => {
-            const images = translatedData
-                .map(item => item.retryUrl || item.image)
-                .filter(url => url);
-
-            if (images.length === 0) {
+            const validItems = translatedData.filter(item => item && (item.retryUrl || item.image));
+            if (validItems.length === 0) {
                 alert('目前沒有已載入的圖片可以重新翻譯！');
                 return;
             }
+            const images = validItems.map(item => toLightweightRetryImageRef(item));
+            const retryPageIndices = validItems.map((item, idx) => item.pageIndex || (idx + 1));
 
-            if (!confirm(`確定要重新翻譯整本漫畫（共 ${images.length} 頁）嗎？這將會清除當前所有翻譯結果並從第 1 頁重頭開始翻譯。`)) {
+            if (!confirm(`確定要重新翻譯整本漫畫（共 ${validItems.length} 頁）嗎？這將會清除當前所有翻譯結果並從第 1 頁重頭開始翻譯。`)) {
                 return;
             }
 
@@ -267,12 +270,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (retryContainer) retryContainer.style.display = 'none';
             const overlay = document.getElementById('loading-overlay');
             if (overlay) overlay.classList.remove('hidden');
-            document.getElementById('progress-text').innerText = `正在準備重新翻譯 ${images.length} 張圖片...`;
+            document.getElementById('progress-text').innerText = `正在準備重新翻譯 ${validItems.length} 張圖片...`;
 
             chrome.runtime.sendMessage({
                 action: 'RETRANSLATE_ALL_BATCH',
-                images: images,
-                sourceTabId: sourceTabId,
+                images,
+                retryPageIndices,
+                sourceTabId: sourceTabId ? parseInt(sourceTabId) : null,
                 mangaKey: activeMangaKey
             }, (response) => {
                 if (response?.status !== 'retrying') {
@@ -283,34 +287,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 綁定「重翻當前批次」按鈕
     const retranslateBatchBtn = document.getElementById('retranslate-batch-btn');
     if (retranslateBatchBtn) {
         retranslateBatchBtn.addEventListener('click', () => {
-            const entries = translatedData
-                .filter(item => Number.isInteger(item.pageIndex) && item.pageIndex > 0)
-                .map(item => ({ image: item.retryUrl || item.image, pageIndex: item.pageIndex }))
-                .filter(item => item.image);
-            const images = entries.map(item => item.image);
-
-            if (images.length === 0) {
+            const validItems = translatedData.filter(item => item && (item.retryUrl || item.image) && Number.isInteger(item.pageIndex) && item.pageIndex > 0);
+            if (validItems.length === 0) {
                 alert('目前沒有已載入的批次圖片可以重翻！');
                 return;
             }
+            const images = validItems.map(item => toLightweightRetryImageRef(item));
+            const retryPageIndices = validItems.map(item => item.pageIndex);
 
-            if (!confirm(`確定要重新翻譯當前這批圖片（共 ${images.length} 張）嗎？`)) {
+            if (!confirm(`確定要重新翻譯當前這批圖片（共 ${validItems.length} 張）嗎？`)) {
                 return;
             }
 
             const overlay = document.getElementById('loading-overlay');
             if (overlay) overlay.classList.remove('hidden');
-            document.getElementById('progress-text').innerText = `正在重翻當前批次 (${images.length} 張)...`;
+            document.getElementById('progress-text').innerText = `正在重翻當前批次 (${validItems.length} 張)...`;
 
             chrome.runtime.sendMessage({
                 action: 'RETRY_FAILED_BATCH',
-                images: images,
-                retryPageIndices: entries.map(item => item.pageIndex),
-                sourceTabId: sourceTabId,
+                images,
+                retryPageIndices,
+                sourceTabId: sourceTabId ? parseInt(sourceTabId) : null,
                 mangaKey: activeMangaKey
             }, (response) => {
                 if (response?.status !== 'retrying') {
@@ -1038,12 +1038,17 @@ function getBatchImagesByIndex(batchIndex, gridEl) {
     return images;
 }
 
+
+
 function getBatchRetryEntries(batchIndex) {
     return translatedData
         .filter(item => item.batchIndex === batchIndex && Number.isInteger(item.pageIndex) && item.pageIndex > 0)
         .sort((a, b) => a.pageIndex - b.pageIndex)
-        .map(item => ({ image: item.retryUrl || item.image, pageIndex: item.pageIndex }))
-        .filter(item => item.image && !item.image.includes('data:image/svg'));
+        .map(item => {
+            const rawImage = item.retryUrl || item.image || '';
+            return { rawImage, image: toLightweightRetryImageRef(rawImage), pageIndex: item.pageIndex };
+        })
+        .filter(item => item.rawImage && !item.rawImage.includes('data:image/svg'));
 }
 
 function updateBatchDropdownMenu() {
@@ -1530,9 +1535,13 @@ function buildCard(item, index) {
         const errorGroup = document.createElement('div');
         errorGroup.className = 'text-group';
 
+        let errorMsg = null;
+        let bannerEl = null;
+
         if (isProhibited && item.isBatchFirstProhibited) {
             // 整批翻譯第一張圖片：渲染醒目的 Prohibited 專屬警示橫幅
             const prohibitedBanner = document.createElement('div');
+            bannerEl = prohibitedBanner;
             prohibitedBanner.className = 'prohibited-banner';
             prohibitedBanner.innerHTML = `
                 <div class="prohibited-header">
@@ -1553,7 +1562,7 @@ function buildCard(item, index) {
             errorLabel.textContent = isProhibited ? '🚫 內容審查受限 (Prohibited)' : '翻譯失敗';
             errorGroup.appendChild(errorLabel);
 
-            const errorMsg = document.createElement('div');
+            errorMsg = document.createElement('div');
             errorMsg.className = 'error-message';
             errorMsg.textContent = item.error;
             errorGroup.appendChild(errorMsg);
@@ -1606,7 +1615,13 @@ function buildCard(item, index) {
                     card.classList.add('is-error');
                     retryBtn.disabled = false;
                     retryBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg> 再次翻譯`;
-                    errorMsg.textContent = '仍然失敗: ' + (response?.error || '未知錯誤');
+                    const failText = `❌ 重試失敗: ${response?.error || chrome.runtime.lastError?.message || '未知錯誤'}`;
+                    if (errorMsg) {
+                        errorMsg.textContent = failText;
+                    } else if (bannerEl) {
+                        const subText = bannerEl.querySelector('div:last-child');
+                        if (subText) subText.textContent = failText;
+                    }
                 }
             });
         });
@@ -2133,11 +2148,21 @@ if (retryBtn) {
         // 收集所有失敗卡片的 data-retry-url
         const failedCards = container.querySelectorAll('.result-card.is-error[data-retry-url]');
         const entries = Array.from(failedCards)
-            .map(card => ({ image: card.dataset.retryUrl, pageIndex: Number(card.dataset.pageIndex) }))
-            .filter(item => item.image && Number.isInteger(item.pageIndex) && item.pageIndex > 0);
-        const images = entries.map(item => item.image);
+            .map(card => {
+                const rawUrl = card.dataset.retryUrl || '';
+                const pageIndex = Number(card.dataset.pageIndex);
+                return {
+                    rawUrl,
+                    image: toLightweightRetryImageRef(rawUrl),
+                    pageIndex
+                };
+            })
+            .filter(item => item.rawUrl && Number.isInteger(item.pageIndex) && item.pageIndex > 0);
 
-        if (images.length === 0) return;
+        if (entries.length === 0) return;
+
+        const images = entries.map(item => item.image);
+        const retryPageIndices = entries.map(item => item.pageIndex);
 
         if (!confirm(`確定要重新批次翻譯 ${images.length} 張失敗圖片嗎？`)) return;
 
@@ -2151,8 +2176,9 @@ if (retryBtn) {
         chrome.runtime.sendMessage({
             action: 'RETRY_FAILED_BATCH',
             images: images,
-            retryPageIndices: entries.map(item => item.pageIndex),
-            sourceTabId: sourceTabId,
+            retryPageIndices: retryPageIndices,
+            sourceTabId: sourceTabId ? parseInt(sourceTabId) : null,
+            mangaKey: activeMangaKey,
             resultTabId: null // background 會用 sender.tab.id 自動填入
         }, (response) => {
             if (response?.status !== 'retrying') {

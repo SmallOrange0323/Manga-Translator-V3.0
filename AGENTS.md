@@ -1,7 +1,9 @@
-# Manga Translator V3.0 開發規範 (AGENTS.md)
+# Manga Translator 開發規範 (AGENTS.md)
+
+> **最後更新版本**：V3.2.1
 
 ## 📌 專案脈絡 (Context)
-本專案為 Manga Translator Extension 的現代化重構版本（V3.0）。主要目標是從「單體腳本」重構為符合 Vite 模組化規範的專案，解決 Manifest V3 下 Service Worker 隨機失效的痛點，並實現 PC 模式與行動端（Mobile）的差異化 UI 策略。
+本專案為 Manga Translator Extension 的現代化重構版本（V3.0+）。主要目標是從「單體腳本」重構為符合 Vite 模組化規範的專案，解決 Manifest V3 下 Service Worker 隨機失效的痛點，並實現 PC 模式與行動端（Mobile）的差異化 UI 策略。
 
 ## 🛠 技術棧 (Tech Stack)
 - **建置工具**：Vite + `@crxjs/vite-plugin`
@@ -28,3 +30,12 @@
 ## ⚠️ 開發限制 (Constraints)
 - **嚴禁寫死路徑**：所有動態載入的資源必須透過 chrome.runtime.getURL 獲取。
 - **UI 隔離**：注入網頁的 UI 必須使用 Shadow DOM，嚴禁污染宿主網頁 CSS。
+
+## 九、 版本演進歷史摘要
+
+| 版本 | 日期 | 重點摘要 |
+| :--- | :--- | :--- |
+| **V3.2.1** | 2026-11 | 修復網頁 Canvas 圖片分頁識別與分段上傳、結果頁大容量本地圖片重翻輕量化、切換模式配額保護、整頁文字重譯原文對齊，並補齊單張與預翻模式跨批對話上下文。 |
+| **V3.2.0** | 2026-10 | 全面收斂為一階段極速模式、結構化 Schema 與 XML 標籤約束、2D 二維交錯輪替調度 (Key × Model)。 |
+| **V3.1.11** | 2026-09 | 強化閱讀器跨話連續自動預翻與 4 大字型即時切換穩定度。 |
+| **V3.0** | 2026-05 | 現代化模組架構重構 (Vite + MV3)、Storage-First 狀態機。 |

@@ -74,46 +74,6 @@ async function init() {
     scanImages();
 }
 
-function injectMobileStreamBtn() {
-    const btnSelectAll = document.getElementById('btn-select-all');
-    if (!btnSelectAll || document.getElementById('btn-stream-read')) return;
-
-    const btnStream = document.createElement('button');
-    btnStream.id = 'btn-stream-read';
-    btnStream.className = 'text-btn';
-    btnStream.style.color = '#34c759'; // 美麗的綠色
-    btnStream.style.fontWeight = 'bold';
-    btnStream.textContent = '⚡ 串聯流式閱讀';
-    
-    btnStream.addEventListener('click', async () => {
-        if (!sourceTabId) return;
-        btnStream.disabled = true;
-        btnStream.textContent = '⏳ 讀取中...';
-
-        const unlockTimer = setTimeout(() => {
-            btnStream.disabled = false;
-            btnStream.textContent = '⚡ 串聯流式閱讀';
-        }, 5000);
-
-        chrome.tabs.sendMessage(sourceTabId, { action: 'extractNEMetadata' }, async (response) => {
-            clearTimeout(unlockTimer);
-            btnStream.disabled = false;
-            btnStream.textContent = '⚡ 串聯流式閱讀';
-
-            if (chrome.runtime.lastError || !response || !response.success || !response.metadata) {
-                alert('無法自來源網頁提取漫畫資訊，請確保來源網頁是在 N/E 網的漫畫詳情首頁！');
-                return;
-            }
-            
-            await chrome.storage.local.set({ mt_current_stream: response.metadata });
-            const readerUrl = chrome.runtime.getURL('src/reader/stream-reader.html');
-            chrome.tabs.create({ url: readerUrl });
-        });
-    });
-
-    btnSelectAll.parentNode.insertBefore(btnStream, btnSelectAll.nextSibling);
-}
-
 /**
  * 掃描來源頁面的圖片
  */

@@ -356,6 +356,7 @@ function updateNovelStatus(progress) {
 
 // 選圖階段暫存變數
 let candidateImages = [];
+let isCandidateFromLocalFiles = false;
 let candidateNavLinks = { prev: null, next: null }; // 同步儲存導航連結
 
 // 綁定按鈕動作
@@ -399,6 +400,7 @@ document.getElementById('mt-start-btn').onclick = () => {
                 }
                 if (response && Array.isArray(response.images)) {
                     candidateImages = response.images;
+                    isCandidateFromLocalFiles = false;
                     // 同步儲存導航連結，用於後續批次翻譯時帶入
                     candidateNavLinks = response.navLinks || { prev: null, next: null };
                     if (candidateImages.length === 0) {
@@ -496,6 +498,7 @@ function handleFiles(files) {
         
         // 將讀取的 base64 圖片加入候選清單
         candidateImages = results.map(r => ({ ...r, id: crypto.randomUUID() }));
+        isCandidateFromLocalFiles = true;
         candidateNavLinks = { prev: null, next: null }; // 本地上傳無導航
         
         renderPreviewList();
@@ -559,12 +562,13 @@ document.getElementById('mt-batch-trans-btn').onclick = async () => {
         }
 
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const isLocal = selectedUrls.every(image => image.src.startsWith('data:image/'));
+        const hasDataUrl = selectedUrls.some(image => image.src.startsWith('data:image/'));
+        const isLocal = (typeof isCandidateFromLocalFiles !== 'undefined' && isCandidateFromLocalFiles) || (!tab?.id && selectedUrls.every(image => image.src.startsWith('data:image/')));
         if (!isLocal && !tab?.id) throw new Error('找不到來源分頁，請重新開啟漫畫網頁');
         const options = { tabId: isLocal ? null : tab.id, openerTabId: tab?.id, windowId: tab?.windowId,
-            navLinks: candidateNavLinks, mangaKey: currentMangaKey };
+            navLinks: candidateNavLinks, mangaKey: currentMangaKey, isLocal };
         button.textContent = '正在準備圖片…';
-        const response = isLocal
+        const response = hasDataUrl
             ? await uploadLocalMangaImages(chrome, selectedUrls, options, (current, total) => {
                 button.textContent = `正在傳送圖片 (${current}/${total})…`;
             })
@@ -596,6 +600,7 @@ function clearPreviewList() {
     document.querySelector('.mt-batch-controls').style.display = 'none';
     document.querySelector('.mt-main-actions').style.display = 'flex';
     candidateImages = [];
+    isCandidateFromLocalFiles = false;
 }
 
 /**
@@ -606,6 +611,7 @@ function showTranslatingCard(imgCount = 0) {
     // 先清空容器（移除勾選清單）
     resultsContainer.innerHTML = '';
     candidateImages = [];
+    isCandidateFromLocalFiles = false;
 
     const card = document.createElement('div');
     card.id = 'mt-translating-card';

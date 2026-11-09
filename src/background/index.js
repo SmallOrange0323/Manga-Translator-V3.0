@@ -1387,7 +1387,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (uploadId && sender.url !== chrome.runtime.getURL('src/sidepanel/index.html')) throw new Error('請從擴充套件側邊欄啟動本地翻譯');
           const images = uploadId ? localMangaUploads.take(uploadId) : message.payload?.images;
           if (!Array.isArray(images) || !images.length) throw new Error('請至少選取一張圖片');
-          const isLocal = images.every(image => (typeof image === 'string' ? image : image?.src)?.startsWith('data:image/'));
+          const isLocal = typeof message.payload?.isLocal === 'boolean'
+              ? message.payload.isLocal
+              : images.every(image => (typeof image === 'string' ? image : image?.src)?.startsWith('data:image/'));
           const tabId = isLocal ? null : (message.payload.tabId || sender.tab?.id);
           const resultTabId = await openNewResultPage(tabId, images, navLinks, mangaKey, mobile, windowId,
               openerTabId || message.payload.tabId || sender.tab?.id);
@@ -1751,17 +1753,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   if (!Array.isArray(result.results) || result.results.length !== texts.length || !texts.length) {
                       throw new Error('重譯回應行數不完整，請重試');
                   }
+                  const normalizedResults = lineIndex !== undefined
+                      ? [{ ...result.results[0], original: texts[0] }]
+                      : result.results.map((item, idx) => ({ ...item, original: texts[idx] ?? item.original }));
                   if (initialJob && Number.isInteger(pageIndex) && pageIndex > 0) {
                       const expectedRow = initialJob.results?.find(r => r.pageIndex === pageIndex);
-                      const results = lineIndex !== undefined
-                          ? [{ ...result.results[0], original: texts[0] }]
-                          : result.results;
                       const update = createMangaResultUpdate(expectedRow,
-                          { results, usedModelName: result.usedModelName || usedModel }, lineIndex ?? null);
+                          { results: normalizedResults, usedModelName: result.usedModelName || usedModel }, lineIndex ?? null);
                       const saved = await mangaRecovery.replaceResult(resultTabId, initialJob.id, pageIndex, update);
                       if (!saved) throw new Error('頁面或任務已更新，請重新發起重譯');
                   }
-                  sendResponse({ results: result.results, usedModelName: result.usedModelName || usedModel });
+                  sendResponse({ results: normalizedResults, usedModelName: result.usedModelName || usedModel });
               } else {
                   throw new Error('API 回應格式異常');
               }
@@ -2024,11 +2026,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ status: 'error', error: '缺少圖片清單、原始頁碼或結果分頁 ID' });
           return false;
       }
-      startNewMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, true, targetBatchIndex, mangaKey || null, retryPageIndices)
-          .catch(err => {
-              log.error('Background', `重試批次啟動失敗: ${err.message}`);
-              chrome.tabs.sendMessage(retryResultTabId, { action: 'mangaRecoveryError', error: err.message }).catch(() => {});
-          });
+      (async () => {
+          let resolvedImages = images;
+          if (images.some(img => !img)) {
+              await mangaRecovery.ready;
+              const job = await mangaRecovery.snapshot(retryResultTabId);
+              resolvedImages = images.map((img, i) => {
+                  if (img) return img;
+                  const pageIdx = retryPageIndices[i];
+                  return mangaRecovery.getMemoryImage?.(retryResultTabId, pageIdx, job?.id)
+                      || job?.images?.[pageIdx - 1]
+                      || job?.results?.find(r => r.pageIndex === pageIdx)?.image
+                      || '';
+              });
+          }
+          if (resolvedImages.some(img => !img)) {
+              throw new Error('部分本地圖片快取已釋放，請從側邊欄重新上傳翻譯');
+          }
+          await startNewMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, resolvedImages, null, true, targetBatchIndex, mangaKey || null, retryPageIndices);
+      })().catch(err => {
+          log.error('Background', `重試批次啟動失敗: ${err.message}`);
+          chrome.tabs.sendMessage(retryResultTabId, { action: 'mangaRecoveryError', error: err.message }).catch(() => {});
+      });
       log.info('Background', `[重試批次] 收到 ${images.length} 張圖片，重翻指定批次 #${targetBatchIndex !== undefined ? targetBatchIndex + 1 : '全'} (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
       sendResponse({ status: 'retrying' });
       return false;
@@ -2036,7 +2055,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // ── 批次重翻整個作品/整批 ──
   if (message.action === 'RETRANSLATE_ALL_BATCH') {
-      const { images, sourceTabId: retrySourceTabId, mangaKey } = message;
+      const { images, retryPageIndices, sourceTabId: retrySourceTabId, mangaKey } = message;
       const retryResultTabId = message.resultTabId || sender.tab?.id;
       if (!images || images.length === 0 || !retryResultTabId) {
           sendResponse({ status: 'error', error: '缺少圖片清單或結果分頁 ID' });
@@ -2047,15 +2066,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.set('isStopping', true);
 
       setTimeout(async () => {
-          log.info('Background', `[重翻批次] 收到 ${images.length} 張圖片，開始重新翻譯 (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
-          startNewMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, images, null, false, null, mangaKey || null)
-              .catch(err => log.error('Background', `重翻批次啟動失敗: ${err.message}`));
+          try {
+              let resolvedImages = images;
+              if (images.some(img => !img)) {
+                  await mangaRecovery.ready;
+                  const job = await mangaRecovery.snapshot(retryResultTabId);
+                  resolvedImages = images.map((img, i) => {
+                      if (img) return img;
+                      const pageIdx = Array.isArray(retryPageIndices) && retryPageIndices[i] ? retryPageIndices[i] : (i + 1);
+                      return mangaRecovery.getMemoryImage?.(retryResultTabId, pageIdx, job?.id)
+                          || job?.images?.[pageIdx - 1]
+                          || job?.results?.find(r => r.pageIndex === pageIdx)?.image
+                          || '';
+                  });
+              }
+              if (resolvedImages.some(img => !img)) {
+                  throw new Error('部分本地圖片快取已釋放，請從側邊欄重新上傳翻譯');
+              }
+              log.info('Background', `[重翻批次] 收到 ${resolvedImages.length} 張圖片，開始重新翻譯 (作品: ${mangaKey || '自動辨識'})... (resultTabId: ${retryResultTabId})`);
+              await startNewMangaBatchProcessing(retrySourceTabId || null, retryResultTabId, resolvedImages, null, false, null, mangaKey || null);
+          } catch (err) {
+              log.error('Background', `重翻批次啟動失敗: ${err.message}`);
+              chrome.tabs.sendMessage(retryResultTabId, { action: 'mangaRecoveryError', error: err.message }).catch(() => {});
+          }
       }, 300);
 
       sendResponse({ status: 'retrying' });
       return false;
   }
-
   return false;
 });
 
@@ -2358,6 +2396,7 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
         const isHybrid = (await state.get('hybridModeEnabled', true)) && !modelName.toLowerCase().includes('gemma');
         const secondaryModelName = await state.get('secondaryModelName', 'gemini-3.5-flash-lite');
         const effectiveDelay = getEffectiveDelay(requestDelay, isHybrid, candidateKeys.length);
+        let previousContextSnippet = '';
 
         for (let i = resumeIndex; i < chapterImages.length; i += batchSize) {
             if (jobData.isCancelled) {
@@ -2381,11 +2420,12 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
                         secondaryModel: secondaryModelName, isHybrid,
                         shouldContinue: () => !jobData.isCancelled,
                         request: ({ apiKey, modelName: requestModel }) => callGeminiAPIBatch(
-                            validItems.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel
+                            validItems.map(v => v.b64), finalPrompt, glossarySnippet, apiKey, requestModel, null, previousContextSnippet
                         )
                     });
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, execution.results, execution.usedModelName);
                     jobData.usedModelName = execution.usedModelName;
+                    previousContextSnippet = buildPreviousContextSnippet(batchResults) || previousContextSnippet;
                 } catch (apiErr) {
                     log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${state.getApiKeyAlias(scheduledKey)} | ${batchModel}): ${apiErr.message}`);
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel, apiErr);
@@ -2474,6 +2514,21 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
         if (activePretranslateJob === jobData) activePretranslateJob = null;
         swKeepAlive.stop();
     }
+}
+
+function buildPreviousContextSnippet(results) {
+    if (!results) return '';
+    const list = Array.isArray(results) ? results : [results];
+    const pairs = [];
+    for (const item of list) {
+        const lines = Array.isArray(item?.results) ? item.results : (Array.isArray(item) ? item : []);
+        for (const line of lines) {
+            if (line?.original && line?.translation) {
+                pairs.push(`${line.original} -> ${line.translation}`);
+            }
+        }
+    }
+    return pairs.slice(-5).join('\n');
 }
 
 /**
@@ -2943,19 +2998,12 @@ async function processMangaBatchPCMode(sourceTabId, resultTabId, images, navLink
                                 candidateKeys, scheduledKey, scheduledModel: batchModel, primaryModel: modelName,
                                 secondaryModel: secondaryModelName, isHybrid,
                                 shouldContinue: async () => !(await state.get('isStopping')) && !mangaSignal.aborted,
-                                request: ({ apiKey, modelName: requestModel }) => translateTexts([], {
-                                    model: requestModel,
-                                    apiKey,
-                                    prompt: finalPrompt,
-                                    glossarySnippet,
-                                    imageBase64: item.b64,
-                                    signal: mangaSignal,
-                                    schema: {
-                                        type: 'OBJECT',
-                                        properties: { results: { type: 'ARRAY', items: { type: 'OBJECT', properties: { original: { type: 'STRING' }, translation: { type: 'STRING' } }, required: ['original', 'translation'] } } },
-                                        required: ['results']
-                                    }
-                                })
+                                request: async ({ apiKey, modelName: requestModel }) => {
+                                    const singleResults = await callGeminiAPIBatch(
+                                        [item.b64], finalPrompt, glossarySnippet, apiKey, requestModel, mangaSignal, previousContextSnippet
+                                    );
+                                    return singleResults[0] || { results: [] };
+                                }
                             });
                             allPageResults[item.originalIdx] = execution.results;
                             batchModel = execution.usedModelName;

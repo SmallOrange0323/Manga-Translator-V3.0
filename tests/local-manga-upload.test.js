@@ -22,7 +22,7 @@ function bridge(store, overrides = {}) {
     });
     return { chrome: { runtime: { sendMessage }, ...overrides }, start, largest: () => largest };
 }
-function buttonFixture(images, chrome) {
+function buttonFixture(images, chrome, { isCandidateFromLocalFiles = false } = {}) {
     const elements = new Map(['mt-batch-trans-btn', 'mt-stop-btn', 'mt-start-btn'].map(id => [id, { style: {} }]));
     const controls = { style: {} }, actions = { style: {} };
     const show = vi.fn(), alert = vi.fn();
@@ -31,7 +31,8 @@ function buttonFixture(images, chrome) {
     const dependencies = { chrome, document: { getElementById: id => elements.get(id),
         querySelector: selector => selector === '.mt-batch-controls' ? controls : actions },
         resultsContainer: { querySelectorAll: () => images.map((_, index) => ({ dataset: { index: String(index) } })) },
-        uploadLocalMangaImages, showTranslatingCard: show, updateBatchCount: vi.fn(), alert };
+        uploadLocalMangaImages, showTranslatingCard: show, updateBatchCount: vi.fn(), alert,
+        isCandidateFromLocalFiles };
     const read = new Function(...Object.keys(dependencies), 'images',
         'let candidateImages = images; let candidateNavLinks = {prev:null,next:null}; let currentMangaKey = null;\n' +
         sidepanel.slice(start, end) + '\nreturn () => candidateImages;')(...Object.values(dependencies), images);
@@ -169,6 +170,30 @@ describe('local image upload and translation launch', () => {
         expect(sendMessage.mock.calls[0][0].payload).toMatchObject({ tabId: 9, windowId: 4, images: [{ src: 'https://manga.test/page.jpg' }] });
         expect(page.show).toHaveBeenCalledWith(1);
     });
+
+    it('uploads webpage canvas data URLs in chunks while keeping active tabId and isLocal false', async () => {
+        const store = createLocalMangaUploads();
+        const f = bridge(store, {
+            tabs: { query: async () => [{ id: 9, windowId: 4 }] }
+        });
+        const images = [
+            { id: 'canvas-1', src: temporary('CANVAS_PAGE_1') },
+            { id: 'canvas-2', src: temporary('CANVAS_PAGE_2') }
+        ];
+        const page = buttonFixture(images, f.chrome, { isCandidateFromLocalFiles: false });
+        await page.button.onclick();
+
+        expect(page.alert).not.toHaveBeenCalled();
+        expect(page.show).toHaveBeenCalledWith(2);
+        expect(f.start).toHaveBeenCalledOnce();
+        const launched = f.start.mock.calls[0][0];
+        expect(launched.payload).toMatchObject({
+            tabId: 9,
+            windowId: 4,
+            isLocal: false
+        });
+        await expect(f.start.mock.results[0].value).resolves.toMatchObject({ received: images });
+    });
 });
 
 describe('bounded local image result delivery', () => {
@@ -217,5 +242,67 @@ describe('bounded local image result delivery', () => {
         const completed = messages.findIndex(message => message.job?.status === 'completed');
         expect(messages.filter(message => message.action === 'mangaImageChunk')).toHaveLength(2);
         expect(completed).toBeGreaterThan(messages.findLastIndex(message => message.action === 'mangaImageChunk'));
+    });
+});
+
+describe('manga recovery and atomic retranslation', () => {
+    it('restores empty image strings from mangaRecovery during retry batch', async () => {
+        const start = background.indexOf("  if (message.action === 'RETRY_FAILED_BATCH')");
+        const end = background.indexOf("  // ── 批次重翻整個作品/整批 ──", start);
+        const startProcessing = vi.fn(async () => {});
+        const recovery = {
+            ready: Promise.resolve(),
+            snapshot: vi.fn(async () => ({ id: 'job-1' })),
+            getMemoryImage: vi.fn((tabId, pageIdx) => `data:image/jpeg;base64,PAGE_${pageIdx}`)
+        };
+        const log = { info() {}, error() {}, warn() {} };
+        const route = new Function('message', 'sender', 'sendResponse', 'mangaRecovery', 'startNewMangaBatchProcessing', 'log', 'chrome', background.slice(start, end));
+        const reply = vi.fn();
+        const handled = route({
+            action: 'RETRY_FAILED_BATCH',
+            resultTabId: 2,
+            images: [''],
+            retryPageIndices: [3],
+            targetBatchIndex: 0
+        }, {}, reply, recovery, startProcessing, log, { tabs: { sendMessage: vi.fn() } });
+        expect(handled).toBe(false);
+        expect(reply).toHaveBeenCalledWith({ status: 'retrying' });
+        await vi.waitFor(() => expect(startProcessing).toHaveBeenCalledOnce());
+        expect(startProcessing).toHaveBeenCalledWith(null, 2, ['data:image/jpeg;base64,PAGE_3'], null, true, 0, null, [3]);
+    });
+
+    it('normalizes results and preserves user-edited original during whole-page text retranslation', async () => {
+        const start = background.indexOf("  if (message.action === 'retranslateText')");
+        const end = background.indexOf("  if (message.action === 'retranslateNovelParagraph')", start);
+        const replaceResult = vi.fn(async () => true);
+        const recovery = {
+            ready: Promise.resolve(),
+            replaceResult,
+            snapshot: vi.fn(async () => ({
+                id: 'job-1',
+                results: [{ pageIndex: 1, results: [{ original: 'old', translation: '舊譯' }] }]
+            }))
+        };
+        const translateTexts = vi.fn(async () => ({
+            results: [{ original: 'API_ORIGINAL_IGNORED', translation: '新譯' }],
+            usedModelName: 'gemini-test'
+        }));
+        const log = { info() {}, error() {}, warn() {} };
+        const Constants = { DEFAULT_PROMPT_GEMMA_ONE_STEP: '', DEFAULT_PROMPT_TWO_STEP: '' };
+        const route = new Function('message', 'sender', 'sendResponse', 'mangaRecovery', 'translateTexts', 'createMangaResultUpdate', 'log', 'state', 'Constants', background.slice(start, end));
+        const reply = vi.fn();
+        const handled = route({
+            action: 'retranslateText',
+            resultTabId: 2,
+            pageIndex: 1,
+            text: '使用者修改後的原文'
+        }, { tab: { id: 2 } }, reply, recovery, translateTexts, (row, update) => update, log, { get: async () => 'key' }, Constants);
+        expect(handled).toBe(true);
+        await vi.waitFor(() => expect(reply).toHaveBeenCalledOnce());
+        const response = reply.mock.calls[0][0];
+        expect(response.results).toEqual([{ original: '使用者修改後的原文', translation: '新譯' }]);
+        expect(replaceResult).toHaveBeenCalledWith(2, 'job-1', 1, expect.objectContaining({
+            results: [{ original: '使用者修改後的原文', translation: '新譯' }]
+        }));
     });
 });

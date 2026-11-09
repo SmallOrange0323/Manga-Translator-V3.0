@@ -1,12 +1,22 @@
-# 漫譯 V3.1.11 (Manga Translator V3.1.11) 🎌
+# 漫譯 Manga-Translator V3.2.1 🎌
 
-![Version](https://img.shields.io/badge/version-3.1.11-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.2.1-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.1.11** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
+**漫譯 V3.2.1** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
 支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**一條龍看圖翻譯、2D 二維交錯輪替調度（Key × Model 負載分配）、核心狀態隊列鎖防護、跨話自動連續預翻、集中閱讀、左右/上下對話框對照、4 大經典字型切換與 Google Drive 雙向雲端同步**。
+
+---
+
+## 🚀 V3.2.1 / V3.2.0 近期更新重點 (Recent Highlights)
+
+* **全面收斂為一階段極速模式 (Unified One-Step Pipeline)**：退役繁瑣易錯的兩階段 OCR 流程，以高傳真端到端視覺語言模型全面驅動，翻譯速度與穩定度倍增。
+* **結構化 Schema 對話類型 (`type`) 與單行語境 (`context`)**：精準標註對話氣泡、內心獨白 (OS)、狀聲詞與背景說明，並透過單行 context 確保句子流暢不換行撕裂。
+* **跨批次上下文銜接 (`previous_dialogue_reference`)**：在分批次翻譯時無縫注入前一批次的最後對話語境，徹底解決跨頁劇情與人名代名詞斷裂問題。
+* **大容量本地與 Canvas 圖片分段上傳與串流派送 (Chunked Streaming)**：突破 Chrome 擴充功能 Port 與 Message 訊息大小上限，支援大量本地漫畫與 Canvas 動態解密圖片分段上傳與串流派送。
+* **結果頁大量本地圖片重翻輕量化與模式切換穩定性修正**：單頁重翻不再重複傳輸大量本機 Base64 造成記憶體爆棚；切換模式增加配額保護與原文精確對齊。
 
 ---
 
