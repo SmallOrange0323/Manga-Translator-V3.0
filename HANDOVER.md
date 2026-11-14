@@ -1,105 +1,127 @@
-# 漫譯 V3.1.10 (Manga Translator V3.1.10) 專案交接與進度備忘錄
+# 漫譯 V3.2.3 (Manga Translator V3.2.3) 專案交接與架構備忘錄
 
-> 歷史交接紀錄（2026-09-06）。本文描述當時的開發狀態，其中雙階段劇本預讀、OCR 模型與本機 WASM OCR 路線已退役；目前支援的一條龍翻譯流程與設定請以 README 為準。
-
-**文件生成時間**：2026-09-06  
-**最新版本號**：`V3.1.10`  
-**遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`  
-**工作區狀態**：已全面升級為 **V3.1.10**。完成【State 即時跨 Context 同步與金鑰池動態刷新】、【Manga/Novel STOP 零延遲中斷】、【Rawkuma [data-image-data] 漫畫容器支援】與【337 項全自動化單元/整合測試 100% 綠燈】。已通過 Vite 生產構建。
+**最新版本號**：`V3.2.3`
+**技術規格**：Chrome Extension Manifest V3 / Vite 5 + `@crxjs/vite-plugin` / Storage-First 狀態機
+**支援平台**：桌面端（Chrome / Edge）與行動端（Edge Android）
+**遠端倉庫**：`https://github.com/SmallOrange0323/Manga-Translator-V3.0.git`
 
 ---
 
-## 💻 一、 家用電腦無縫接手指令 (Quick Start for Home PC)
+## 一、 V3.2.3 核心架構總覽
 
-回到家裡電腦打開終端機，執行以下指令即可拉取最新環境：
+### 1. 一階段端到端視覺翻譯管線與 2D 二維交錯輪替調度（Key × Model）
+- **架構收斂（One-Step Vision Pipeline）**：
+  - 專案已全面收斂為高傳真一階段端到端看圖直譯架構（`src/background/translate-api.js` 的 `callGeminiAPIBatch`），並已完成退役「兩階段 OCR 與全域劇本預讀」死碼清理（移除 `callGeminiAPIBatchOcr`、`extractTextFromImage`、`extractGlobalStoryAndGlossary`、`DEFAULT_PROMPT_OCR` 及對應的舊版 Stage 1/1.5/2 生命週期守衛）。
+  - 純文字重譯路徑（`retranslateText`）與小說翻譯維持 `translateTexts` 與 `DEFAULT_PROMPT_TWO_STEP` 獨立運作。
+- **2D 二維交錯輪替調度 (`src/background/hybrid-scheduler.js` / `src/background/hybrid-retry.js`)**：
+  - 透過 `(keyIndex + roundIndex) % 2` 計算每批次的 `(apiKey, modelName)` 分配：第 1 輪為 `Key1(A) → Key2(B) → Key3(A) → Key4(B)`，第 2 輪起交錯反轉為 `Key1(B) → Key2(A) → ...`，平衡各 API Key 與模型配額。
+  - `executeHybridRequest` 支援遇 `429` / `503` 時跨模型 Failover，並嚴格檢查 `AbortSignal` 與 `shouldContinue`，確保使用者觸發 STOP 時立即終止，不會多發重試請求。
+- **生命週期與備援 (`src/background/manga-lifecycle.js` / `src/background/manga-cancellation.js`)**：
+  - 批次失敗後可由 `executeFallbackImages` 進行逐張備援翻譯；透過 `isMangaCancellation`、`shouldCompleteMangaTranslation`、`shouldPublishMangaBatchResults` 防止 STOP 中斷後誤發布結果或誤標記完成。
 
-```bash
-# 1. 切換至目標分支並拉取最新程式碼
-git fetch origin
-git checkout feature/prompt-xml-upgrade
-git pull origin feature/prompt-xml-upgrade
+---
 
-# 2. 安裝依賴套件 (如有更新)
-npm install
+### 2. 詞庫防污染與雙向唯一鎖引擎 ＋ 可開關視覺情境錨點
+- **詞庫資料核心與持久化 (`src/utils/glossary-data.js` / `src/background/glossary-manager.js`)**：
+  - **雙向唯一鎖與歷史排毒 (`sanitizeCollidingAiTerms`)**：防止多個不同日文原文（`ori`）被 AI 誤配到同一個中文譯名（`trans`）。當偵測到譯名撞車時：手動詞條（`source === 'user'`）優先保留並剔除撞名 AI 詞條；純 AI 撞名則只保留最早建立（`createdAt` 最小）的第一筆，其餘自動剔除並寫入 `termTombstones` 防止透過雲端同步還魂。
+  - **角色性別與關係備註 (`note`)**：支援為詞條標註性別、稱謂與上下級關係，減少跨頁代名詞（他／她）與稱呼誤譯。
+  - **跨 Context 序列化與無痕隔離**：`glossary-manager.js` 透過單一 Promise 隊列序列化寫入，並為一般視窗與無痕視窗區分 `writerScope` register，避免多背景程序覆寫彼此資料。
+- **可開關視覺情境錨點 (`enableSceneContext`)**：
+  - 在 `callGeminiAPIBatch` 中依 `enableSceneContext`（預設開啟，可透過側邊欄「情境」快捷開關或設定頁即時雙向切換）前置辨識當前場所、登場角色性別與關係，並透過跨批對話參考（`previousContextSnippet`）銜接上下文。
+  - 若因 R18 / 特殊題材觸發模型安全審查過濾，支援降級關閉情境錨點重試與 UI 提示引導。
 
-# 3. 執行編譯與上架 ZIP 打包
-npm run build
-npm run pack
+---
+
+### 3. 網站專屬適配器隔離架構 (`src/utils/site-adapters.js`)
+- **設計原則**：將特定網站的特殊 DOM 容器與懶載入佔位圖豁免邏輯收斂至可序列化的 `SITE_ADAPTER_RULES`，與通用爬蟲核心徹底隔離，確保支援新網站時**絕對不影響既有網站（如 WNACG、Jestful、Rawkuma 等）**的過濾與抓取規則。
+- **核心介面**：
+  - `getSiteAdapter(urlOrHostname)`：依域名規則匹配專屬適配器，未匹配網站回傳 `null`。
+  - `getExtraMangaContainers(urlOrHostname)`：提供該網站專屬的漫畫圖片容器選擇器（一般網站回傳 `[]`）。
+  - `isSitePlaceholderExempt(imgElement, dataSrc, url, urlOrHostname)`：僅在匹配網站且具備有效 `dataSrc` 時，豁免初始 1x1 透明佔位圖或 `placeholder/loading` 圖示被 `isTooSmall` / `isContainerJunk` 過濾（一般網站一律回傳 `false`）。
+- **目前整合點**：
+  - `src/content/manga-engine.js`：前端 `crawlImages()` 動態合併專屬容器與佔位圖豁免判斷。
+  - `src/utils/chapter-parser.js`：背景預翻解析 `parseImages(html, baseUrl)` 與章節解析 `parseChapterHtml` 共享網站專屬容器識別（如 JManga 的 `#images-content`、`#vertical-content`、`.container-reader-chapter`、`.iv-card` 與 `ul.reading-list`）。
+
+---
+
+### 4. 暫存圖片 IndexedDB 持久化恢復機制 (`src/background/manga-image-idb.js` + `src/background/manga-recovery.js`)
+- **解決痛點**：Manifest V3 Service Worker 閒置休眠重啟後會清空記憶體 `Map`，導致本地上傳圖片或網頁 Canvas 解密產生的 `data:image/...` 暫存圖在結果頁重整或續譯時遺失。
+- **持久化設計 (`src/background/manga-image-idb.js`)**：
+  - `createMangaImageIdbStore(indexedDBApi)` 使用資料庫 `'mt_manga_temp_images_v1'` 與 ObjectStore `'page_images'`（主鍵 `${tabId}:${jobId}:${pageIndex}`）。
+  - 當環境不支援 `indexedDB`（例如預設 Node 單元測試環境）時自動降級為安全 no-op，不拋出例外。
+  - 提供 `putImages`、`getJobImages`、`getImage`、`removeForTab`、`pruneTabs` 等非同步操作，僅持久化非 HTTP 暫存圖（`!/^https?:\/\//i.test(rawImg)`）。
+- **恢復與無痕隔離 (`src/background/manga-recovery.js`)**：
+  - `createMangaRecovery` 保留既有同步 `memoryImagesByTab` 行為，並在非無痕模式下非同步寫入 IndexedDB；於 `snapshot(tabId)` 與 `publish(job, liveItems)` 時透過 `ensureMemoryHydrated` 自動從 IndexedDB 補回記憶體圖資。
+  - **無痕視窗鐵律**：當 `isPrivateWorker` 為 `true` 或分頁為 `incognito` 時，**嚴格禁止寫入或讀取 IndexedDB**，所有暫存資料僅存於該無痕行程記憶體中。
+  - 分頁關閉呼叫 `remove(tabId)` 或 SW 啟動恢復執行 `pruneTabs` 時自動清理過期分頁圖資。
+
+---
+
+## 二、 專案目錄結構 (Directory Map)
+
+```text
+Manga-Translator-V3.0/
+├── dist-v3/                     # Vite 編譯產出目錄（瀏覽器載入此目錄，嚴禁手動修改）
+├── public/assets/               # 靜態立繪與動畫素材（build 時複製至 dist-v3/assets）
+├── src/
+│   ├── background/              # MV3 Service Worker 核心
+│   │   ├── index.js             # 背景進入點與訊息路由
+│   │   ├── translate-api.js     # Gemini 批次視覺/文字 API 通訊與 Schema 解析
+│   │   ├── hybrid-scheduler.js  # 2D 二維交錯輪替排程 (Key × Model)
+│   │   ├── hybrid-retry.js      # 429/503 跨模型 Failover 與中斷守衛
+│   │   ├── manga-lifecycle.js   # 預翻完成度、備援降級與發布守衛
+│   │   ├── manga-cancellation.js# 漫畫任務 AbortController 管理
+│   │   ├── manga-recovery.js    # 任務狀態恢復與結果頁圖資派送
+│   │   ├── manga-image-idb.js   # 非 HTTP 暫存圖片 IndexedDB 持久化儲存層
+│   │   ├── manga-job-store.js   # 任務紀錄儲存層
+│   │   ├── glossary-manager.js  # 詞庫序列化寫入與跨程序合併
+│   │   ├── wnacg-acceleration.js# WNACG 專屬加速抓取
+│   │   └── jestful-prefetch.js  # Jestful 專屬預取
+│   ├── content/                 # 網頁注入腳本與 Shadow DOM UI
+│   │   ├── manga-engine.js      # 前端漫畫爬蟲與 Canvas 解密擷取
+│   │   ├── novel-engine.js      # 前端小說章節擷取
+│   │   └── ui/                  # Shadow DOM 懸浮按鈕與控制面板
+│   ├── reader/                  # 和紙結果閱讀器與串流閱讀器
+│   ├── sidepanel/               # 桌面端側邊欄控制台（含情境開關）
+│   ├── mobile/                  # Edge Android 獨立控制台頁面
+│   ├── options/                 # 設定頁（API Key、模型、Prompt、詞庫管理）
+│   └── utils/                   # 共用工具模組
+│       ├── site-adapters.js     # 網站專屬適配器規則與查詢 API
+│       ├── chapter-parser.js    # 背景預翻 HTML 解析與章節偵測
+│       ├── glossary-data.js     # 詞庫正規化、撞名排毒與合併純函式
+│       ├── constants.js         # 預設 Prompt 與靜態素材清單
+│       ├── state.js             # chrome.storage.local Storage-First 狀態機
+│       └── sync.js / sync-engine.js # Google Drive AppData 雙向同步
+├── tests/                       # Vitest 自動化測試套件
+├── build-zip.js                 # 依 package.json 版本號產生商店上架 ZIP
+└── vite.config.js               # Vite + CRXJS 建置配置
 ```
 
 ---
 
-## 🚀 二、 本次工作區間完成之重大里程碑與功能
+## 三、 常用開發、測試與打包指令
 
-### 1. 🏪 Edge 商店審核與版本號升級 (`3.0.1`)
-- **版本號升級**：將 `package.json` 與 `manifest.json` 同步由 `3.0.0` 升級為 **`3.0.1`**，解決 Microsoft Partner Center「版本號必須高於前版」的提交限制。
-- **動態打包腳本**：更新 `build-zip.js`，自動讀取 `package.json` 的版本號動態產出上架檔名：
-  - `Manga_Translator_V3.0.1_Store_Package.zip` (9.59 MB)
-  - `Manga_Translator_V3.0.1_Store_Package_Light.zip` (2.80 MB)
-- **認證注意事項範本**：已擬定專業的「認證注意事項 (Notes for Certification)」測試說明文案，可直接複製貼入合作夥伴中心。
+```bash
+# 1. 安裝相依套件
+npm install
 
----
+# 2. 執行全量自動化單元與整合測試 (Vitest)
+npm test
 
-### 2. 📱 行動端 (Edge Android) 兩大體驗痛點修復
-- **解除批次容器橫滑綁定 (單頁 100vw 平滑滑動)**：
-  - 修復 `result.css` 中 `.batch-section` 容器干擾 `scroll-snap` 的問題，讓每張卡片 (`.result-card`) 重獲獨立單頁寬度。
-  - 在手機上往左右滑動時，實現精準 1 頁 1 頁切換，徹底消除「滑一次跳過一整批 10 頁」的問題。
-- **翻譯面板與頁碼實時動態連動**：
-  - 在 `result.js` 中優化 `IntersectionObserver` 滾動感測，滑動至 P.2、P.3 時，浮動按鈕與彈窗自動實時更新為「📖 查看 P.2 翻譯」、「📄 P.2 翻譯內容」，譯文 100% 對應當前頁面。
-- **行動控制台主動觸發串流按鈕**：
-  - 在 `src/mobile/index.html` 內置主動按鈕：`⚡ 啟動串聯流式閱讀 (N網/E網專屬)`。
-  - 即使宿主網頁沒有成功注入按鈕，使用者也能在行動控制台隨時點擊主動開啟集中流式閱讀器。
+# 3. 執行單一或指定測試檔案
+npx vitest run tests/translation-lifecycle.test.js
 
----
+# 4. 啟動開發模式（監聽變更並輸出至 dist-v3/）
+npm run dev
 
-### 3. 📖 雙階段模式 (Two-Step Story Pipeline) 重大升級
-將原本預留的「雙階段模式」重構為**「全書劇本預讀 ➔ 單話劇情暫存 ➔ 帶全域背景 Vision 精翻」**的高品質工作流：
+# 5. 編譯生產版本（輸出至 dist-v3/）
+npm run build
 
-#### 🏛️ 核心資料分層設計：
-1. **長期持久層 (Persistent Glossary)**：
-   - 僅長期存放作品通用名詞、角色日中對照、招式名。
-   - 透過 `saveGlossary(mangaKey, terms)` 跨話數持久化保存。
-2. **短期任務暫存層 (Episodic Session Context)**：
-   - 存放於當次任務記憶體變數 `sessionStoryContext[resultTabId]`。
-   - 包含：`storySummary` (當話劇情大綱)、`characterRelationships` (角色互動與稱謂)。
-   - **任務完成後自動釋放，絕不污染長期詞庫，更不干擾後續話數的獨立劇情！**
+# 6. 打包商店上架用 ZIP 壓縮檔（讀取 package.json 版本號）
+npm run pack
+```
 
-#### 🔄 雙階段三步執行流程：
-- **階段 1 (OCR 劇本提取)**：依 `ocrBatchSize` 使用指定的 `ocrModelName` 提取全書日文對白，拼成純文字劇本。
-- **階段 1.5 (全域劇本通讀)**：發送 **1 次輕量純文字請求 (`extractGlobalStoryAndGlossary`)**，大模型 1 秒讀完全書台詞，萃取大綱與角色設定。
-- **階段 2 (帶背景精翻)**：封裝【暫存劇情 + 暫存角色稱謂 + 術語庫】為 `sessionContextSnippet`，進行批次 Vision 精翻。
-
-#### ⚙️ 設定頁面 (`options`) UI 升級：
-- 選擇雙階段模式時，自動展開「階段一：文字辨識 OCR 模型」下拉選單：
-  - `Gemini 3.1 Flash-Lite (推薦)`
-  - `Gemini 3.5 Flash-Lite`
-  - `Gemma 4 26B (視覺專用)`
-  - `💻 瀏覽器本地端 OCR (WebAssembly / 0 API 消耗 / 支援手機)`
-- **一條龍模式 (One-Step)** 100% 保持現狀，雙軌並行互不干擾。
-
----
-
-## 📁 三、 核心異動檔案清單 (Key Files Modified)
-
-| 檔案路徑 | 異動摘要 |
-| :--- | :--- |
-| `manifest.json` / `package.json` | 升級版本號至 `3.0.1` |
-| `build-zip.js` | 支援動態讀取版本號產出 ZIP 檔案 |
-| `src/background/translate-api.js` | 新增 `extractGlobalStoryAndGlossary` 與 `extractTextFromImage` |
-| `src/background/index.js` | 實作 `processMangaBatchTwoStepMode`、`dispatchMangaBatchProcessing` 與 `sessionStoryContext` 短期暫存 |
-| `src/options/index.html` | 新增 `ocrModelContainer` 與本地端 WASM OCR 選項 |
-| `src/options/main.js` | 新增模式切換動態展開 OCR 選擇區事件 |
-| `src/reader/result.css` | 解除 `.batch-section` 對 `scroll-snap` 的綁定，實現單頁 100vw 橫滑 |
-| `src/reader/result.js` | 實作行動版頁碼與浮動面板實時動態連動 |
-| `src/mobile/index.html` / `main.js` | 新增主動觸發 `⚡ 啟動串聯流式閱讀` 按鈕與事件綁定 |
-
----
-
-## 🎯 四、 家用電腦接手後的測試重點 (Verification Checklist)
-
-1. **一條龍模式驗證**：在設定頁選「⚡ 一條龍模式」，開啟任意漫畫，確認即時分批看圖直翻功能運作正常。
-2. **雙階段模式驗證**：在設定頁切換為「📖 雙階段劇本預讀模式」，觀察背景是否依序執行：
-   - 階段 1：提取全書劇本。
-   - 階段 1.5：通讀劇本並輸出劇情大綱（確認記憶體暫存，不污染詞庫）。
-   - 階段 2：帶著全域背景輸出精翻。
-3. **行動版閱讀體驗**：使用手機 Edge 開啟 `result.html`，測試左右單頁滑動與翻譯面板頁碼連動。
+### 瀏覽器載入方式
+1. 執行 `npm run build` 產生 `dist-v3/`。
+2. 開啟 `chrome://extensions/` 或 `edge://extensions/`，啟用「開發者模式」。
+3. 點擊「載入解壓縮的擴充功能」，選擇專案根目錄下的 `dist-v3/` 資料夾。

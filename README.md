@@ -1,16 +1,24 @@
-# 漫譯 Manga-Translator V3.2.2 🎌
+# 漫譯 Manga-Translator V3.2.3 🎌
 
-![Version](https://img.shields.io/badge/version-3.2.2-blue.svg?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.2.3-blue.svg?style=flat-square)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-green.svg?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Chrome%20%7C%20Edge%20%7C%20Edge%20Android-informational.svg?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg?style=flat-square)
 
-**漫譯 V3.2.2** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
+**漫譯 V3.2.3** 是一款現代化、具備工業級穩定度與沉浸式和風美學的**跨平台漫畫與小說 AI 翻譯擴充功能**。
 支援電腦端（Chrome / Edge）與手機端（Edge Android），深度整合 Google Gemini 系列多模態模型，提供**一條龍看圖翻譯、2D 二維交錯輪替調度（Key × Model 負載分配）、核心狀態隊列鎖防護、跨話自動連續預翻、集中閱讀、左右/上下對話框對照、4 大經典字型切換與 Google Drive 雙向雲端同步**。
 
 ---
 
-## 🚀 V3.2.2 近期更新重點 (Recent Highlights)
+## 🚀 V3.2.3 近期更新重點 (Recent Highlights)
+
+* **網站專屬適配器隔離架構 (`site-adapters.js`)**：將特定網站的 DOM 容器與懶載入佔位圖豁免邏輯獨立隔離，支援新漫畫網站（如 JManga）時完全不影響既有網站抓取邏輯。
+* **暫存圖片 IndexedDB 持久化恢復 (`manga-image-idb.js`)**：將本地上傳圖片與網頁 Canvas 暫存圖升級至 IndexedDB 持久化，解決 MV3 Service Worker 休眠重啟後圖片遺失問題，並維持無痕模式嚴格隔離。
+* **退役兩階段 OCR 死碼清理**：移除舊版兩階段 OCR 與全域劇本預讀殘留函式、Prompt 與生命週期守衛，精簡背景核心管線。
+
+---
+
+## 🚀 V3.2.2 歷史更新重點 (V3.2.2 Highlights)
 
 * **詞庫防污染與撞名自動排毒引擎 (Glossary Anti-Pollution & Bi-directional Uniqueness)**：
   * **雙向唯一鎖**：嚴格杜絕不同日文原名被誤對應到相同中文譯名（攔截 AI 多對一譯名撞車與人物張冠李戴）。

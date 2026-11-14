@@ -1,7 +1,7 @@
 {
   "name": "manga-translator-v3",
-  "version": "3.2.2",
-  "description": "Manga Translator V3.2.2 - 2D Alternating Round-Robin Hybrid Pipeline & Manga Precision Engine",
+  "version": "3.2.3",
+  "description": "Manga Translator V3.2.3 - 2D Alternating Round-Robin Hybrid Pipeline & Manga Precision Engine",
   "type": "module",
   "scripts": {
     "dev": "vite",

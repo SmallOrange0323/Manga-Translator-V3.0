@@ -1,4 +1,5 @@
 // Pure helpers shared by the content script and the MV3 service worker.
+import { getExtraMangaContainers, isSitePlaceholderExempt } from './site-adapters.js';
 
 const IMAGE_ATTRIBUTES = [
     'data-src', 'data-lazy-src', 'data-original', 'data-aload',
@@ -154,6 +155,13 @@ function parseEpisodeJsonImages(html, baseUrl) {
 function parseImages(html, baseUrl) {
     const jestfulChapter = /(^|\.)jestful\.net$/i.test(new URL(baseUrl).hostname)
         && /-chapter-[\d.]+\.html$/i.test(new URL(baseUrl).pathname);
+    const extraReaderContainers = getExtraMangaContainers(baseUrl)
+        .map(selector => selector.trim())
+        .filter(selector => /^[#.]/.test(selector))
+        .map(selector => selector.slice(1).toLowerCase());
+    const readerContainers = extraReaderContainers.length > 0
+        ? new Set([...READER_CONTAINERS, ...extraReaderContainers])
+        : READER_CONTAINERS;
     const tags = htmlTags(html.replace(/<(script|style)\b(?:"[^"]*"|'[^']*'|[^'">])*?>[\s\S]*?<\/\1\s*>/gi, ''));
     const records = [];
     const stack = [];
@@ -169,18 +177,27 @@ function parseImages(html, baseUrl) {
         const name = opening[1].toLowerCase();
         const attrs = attributes(tag);
         if (name === 'img') {
-            const width = Number.parseInt(attrs.width, 10);
-            const height = Number.parseInt(attrs.height, 10);
-            if ((width > 0 && width < 200) || (height > 0 && height < 200)) continue;
             const inReader = stack.some(item => item.reader);
             const url = imageUrl(attrs, baseUrl, inReader);
-            if (url) records.push({ url, inReader,
+            if (!url) continue;
+            const width = Number.parseInt(attrs.width, 10);
+            const height = Number.parseInt(attrs.height, 10);
+            if ((width > 0 && width < 200) || (height > 0 && height < 200)) {
+                const lazySrc = IMAGE_ATTRIBUTES
+                    .filter(key => key !== 'src' && key !== 'srcset')
+                    .map(key => attrs[key])
+                    .find(Boolean) || '';
+                if (!inReader || !isSitePlaceholderExempt({ src: attrs.src || '' }, lazySrc, url, baseUrl)) {
+                    continue;
+                }
+            }
+            records.push({ url, inReader,
                 jestfulPage: stack.some(item => item.jestfulReader) && /^Page\s+\d+$/i.test(attrs.alt || '') });
         } else if (!/\/>$/.test(tag) && !/^(?:area|base|br|embed|hr|input|link|meta|source|wbr)$/.test(name)) {
             const names = [attrs.id, ...(attrs.class || '').split(/\s+/)].filter(Boolean);
             stack.push({ name, jestfulReader: names.some(value => value.toLowerCase() === 'list-imga'),
                 reader: Object.hasOwn(attrs, 'data-image-data')
-                || names.some(value => READER_CONTAINERS.has(value.toLowerCase())) });
+                || names.some(value => readerContainers.has(value.toLowerCase())) });
         }
     }
     const candidates = jestfulChapter ? records.filter(item => item.jestfulPage)

@@ -218,3 +218,238 @@ describe('foreground manga recovery coordinator', () => {
     });
 
 });
+
+function createFakeIndexedDB() {
+    const databases = new Map();
+
+    function ensureDb(name) {
+        if (!databases.has(name)) {
+            databases.set(name, { stores: new Map() });
+        }
+        return databases.get(name);
+    }
+
+    function makeStoreWrapper(storeData) {
+        const wrapper = {
+            createIndex() {},
+            indexNames: { contains: () => false },
+            put(value, key) {
+                const req = {};
+                queueMicrotask(() => {
+                    storeData.set(key, structuredClone(value));
+                    req.result = key;
+                    req.onsuccess?.({ target: req });
+                });
+                return req;
+            },
+            get(key) {
+                const req = {};
+                queueMicrotask(() => {
+                    req.result = storeData.has(key) ? structuredClone(storeData.get(key)) : undefined;
+                    req.onsuccess?.({ target: req });
+                });
+                return req;
+            },
+            delete(key) {
+                const req = {};
+                queueMicrotask(() => {
+                    storeData.delete(key);
+                    req.onsuccess?.({ target: req });
+                });
+                return req;
+            },
+            openCursor() {
+                const entries = Array.from(storeData.entries());
+                let idx = 0;
+                const req = {};
+                function advance() {
+                    queueMicrotask(() => {
+                        if (idx >= entries.length) {
+                            req.result = null;
+                            req.onsuccess?.({ target: req });
+                            return;
+                        }
+                        const [key, value] = entries[idx++];
+                        req.result = {
+                            key,
+                            primaryKey: key,
+                            value: structuredClone(value),
+                            continue: advance,
+                            delete() {
+                                storeData.delete(key);
+                            }
+                        };
+                        req.onsuccess?.({ target: req });
+                    });
+                }
+                advance();
+                return req;
+            },
+            openKeyCursor() {
+                const keys = Array.from(storeData.keys());
+                let idx = 0;
+                const req = {};
+                function advance() {
+                    queueMicrotask(() => {
+                        if (idx >= keys.length) {
+                            req.result = null;
+                            req.onsuccess?.({ target: req });
+                            return;
+                        }
+                        const key = keys[idx++];
+                        req.result = {
+                            key,
+                            primaryKey: key,
+                            continue: advance
+                        };
+                        req.onsuccess?.({ target: req });
+                    });
+                }
+                advance();
+                return req;
+            }
+        };
+        return wrapper;
+    }
+
+    return {
+        open(name) {
+            const req = {};
+            queueMicrotask(() => {
+                const state = ensureDb(name);
+                const db = {
+                    objectStoreNames: {
+                        contains: storeName => state.stores.has(storeName)
+                    },
+                    createObjectStore(storeName) {
+                        if (!state.stores.has(storeName)) {
+                            state.stores.set(storeName, new Map());
+                        }
+                        return makeStoreWrapper(state.stores.get(storeName));
+                    },
+                    transaction(storeName) {
+                        const tx = {
+                            objectStore: () => makeStoreWrapper(state.stores.get(storeName) || new Map())
+                        };
+                        // 延後一輪 macrotask/microtask 確保所有 store req 都已執行完畢才觸發 tx.oncomplete
+                        setTimeout(() => tx.oncomplete?.(), 0);
+                        return tx;
+                    },
+                    close() {}
+                };
+                req.result = db;
+                req.onupgradeneeded?.({ target: req });
+                req.onsuccess?.({ target: req });
+            });
+            return req;
+        },
+        dump(dbName = 'mt_manga_temp_images_v1', storeName = 'page_images') {
+            return new Map(databases.get(dbName)?.stores.get(storeName) || []);
+        }
+    };
+}
+
+describe('IndexedDB transient image persistence', () => {
+    it('restores transient data URLs via snapshot and publish after Service Worker restart', async () => {
+        const fakeIdb = createFakeIndexedDB();
+        const f = fixture();
+        const tempImg1 = 'data:image/jpeg;base64,TEMP_PAGE_1';
+        const tempImg2 = 'data:image/jpeg;base64,TEMP_PAGE_2';
+        const recovery = createMangaRecovery(f.chrome, { indexedDB: fakeIdb });
+        const job = await recovery.begin({
+            ...options,
+            images: [tempImg1, tempImg2],
+            batchSize: 1
+        });
+        await recovery.commit(job, 1, [{
+            image: tempImg1,
+            results: [{ original: 'A', translation: '甲' }],
+            pageIndex: 1,
+            batchIndex: 0
+        }]);
+        expect(JSON.stringify(f.data)).not.toContain('TEMP_PAGE_');
+        expect(fakeIdb.dump().size).toBe(2);
+
+        // 模擬 Service Worker 休眠重啟：建立全新實例（記憶體 Map 為空）
+        const restarted = createMangaRecovery(f.chrome, { indexedDB: fakeIdb });
+        expect(restarted.getMemoryImage(2, 1, job.id)).toBe('');
+
+        const restored = await restarted.snapshot(2);
+        expect(restored.results[0].image).toBe(tempImg1);
+        expect(restarted.getMemoryImage(2, 1, job.id)).toBe(tempImg1);
+        expect(restarted.getMemoryImage(2, 2, job.id)).toBe(tempImg2);
+        expect(await restarted.getStoredImage(2, 2, job.id)).toBe(tempImg2);
+
+        f.chrome.tabs.sendMessage.mockClear();
+        await restarted.publish(restored);
+        const chunkMsgs = f.chrome.tabs.sendMessage.mock.calls
+            .map(([, msg]) => msg)
+            .filter(msg => msg.action === 'mangaImageChunk');
+        expect(chunkMsgs.some(msg => msg.pageIndex === 1 && msg.data === tempImg1)).toBe(true);
+    });
+
+    it('never writes or reads IndexedDB in incognito mode (isPrivate = true or incognito tab)', async () => {
+        const fakeIdb = createFakeIndexedDB();
+        const f = fixture(true);
+        const tempImg = 'data:image/jpeg;base64,INCOGNITO_SECRET';
+        const openSpy = vi.spyOn(fakeIdb, 'open');
+        const recovery = createMangaRecovery(f.chrome, { indexedDB: fakeIdb });
+        await recovery.ready;
+        const job = await recovery.begin({ ...options, images: [tempImg] });
+        await recovery.commit(job, 1, [{
+            image: tempImg,
+            results: [{ original: 'A', translation: '甲' }],
+            pageIndex: 1,
+            batchIndex: 0
+        }]);
+        expect(recovery.getMemoryImage(2, 1, job.id)).toBe(tempImg);
+        expect(openSpy).not.toHaveBeenCalled();
+        expect(fakeIdb.dump().size).toBe(0);
+
+        // 即使非無痕 worker 遇到 incognito: true 的分頁，也嚴禁寫入 IndexedDB
+        const mixedChrome = fixture(false).chrome;
+        mixedChrome.tabs.get = vi.fn(async id => ({ id, url: 'chrome-extension://test/src/reader/result.html', incognito: true }));
+        const mixedRecovery = createMangaRecovery(mixedChrome, { indexedDB: fakeIdb });
+        const mixedJob = await mixedRecovery.begin({ ...options, images: [tempImg] });
+        await mixedRecovery.commit(mixedJob, 1, [{
+            image: tempImg,
+            results: [{ original: 'A', translation: '甲' }],
+            pageIndex: 1,
+            batchIndex: 0
+        }]);
+        expect(fakeIdb.dump().size).toBe(0);
+    });
+
+    it('removes persisted images for a tab on remove(tabId) and prunes closed tabs on startup', async () => {
+        const fakeIdb = createFakeIndexedDB();
+        const f = fixture();
+        const tempImg = 'data:image/jpeg;base64,CLEAR_ME';
+        const recovery = createMangaRecovery(f.chrome, { indexedDB: fakeIdb });
+        const job = await recovery.begin({ ...options, images: [tempImg] });
+        await recovery.commit(job, 1, [{
+            image: tempImg,
+            results: [{ original: 'A', translation: '甲' }],
+            pageIndex: 1,
+            batchIndex: 0
+        }]);
+        expect(fakeIdb.dump().size).toBe(1);
+
+        await recovery.remove(2);
+        expect(fakeIdb.dump().size).toBe(0);
+
+        // 驗證啟動時會自動清理已關閉分頁的遺留 IndexedDB 圖片
+        const job2 = await recovery.begin({ ...options, images: [tempImg] });
+        await recovery.commit(job2, 1, [{
+            image: tempImg,
+            results: [{ original: 'A', translation: '甲' }],
+            pageIndex: 1,
+            batchIndex: 0
+        }]);
+        expect(fakeIdb.dump().size).toBe(1);
+
+        f.tabs.delete(2);
+        const restarted = createMangaRecovery(f.chrome, { indexedDB: fakeIdb });
+        await restarted.ready;
+        expect(fakeIdb.dump().size).toBe(0);
+    });
+});

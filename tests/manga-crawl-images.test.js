@@ -19,12 +19,21 @@ if (!globalThis.window) {
 }
 
 import { crawlImages, crawlImagesForRequest } from '../src/content/manga-engine.js';
+import { parseChapterHtml } from '../src/utils/chapter-parser.js';
+import {
+    SITE_ADAPTER_RULES,
+    getSiteAdapter,
+    getExtraMangaContainers,
+    isSitePlaceholderExempt
+} from '../src/utils/site-adapters.js';
 
 describe('manga-engine: crawlImages 容器與圖片抓取測試', () => {
 
     beforeEach(() => {
         vi.restoreAllMocks();
         globalThis.document.getElementById = () => null;
+        globalThis.document.querySelector = () => null;
+        globalThis.document.querySelectorAll = () => [];
         globalThis.window.location.href = 'https://rawkuma.net/manga/test/chapter-83.2/';
     });
 
@@ -348,5 +357,160 @@ describe('manga-engine: crawlImages 容器與圖片抓取測試', () => {
 
         const result = crawlImages();
         expect(result.images).toHaveLength(2);
+    });
+
+    it('JManga 網站下 #images-content .iv-card img 使用 1x1 base64 佔位圖與 data-src 時可正確抓出圖片', () => {
+        globalThis.window.location.href = 'https://jmanga.email/read/sample-manga/ja/chapter-1-raw/';
+
+        const blankGif = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        const createJmangaImg = (dataSrc) => ({
+            tagName: 'IMG',
+            src: blankGif,
+            naturalWidth: 1,
+            naturalHeight: 1,
+            width: 1,
+            height: 1,
+            offsetWidth: 1,
+            offsetHeight: 1,
+            classList: { contains: () => false },
+            style: {},
+            getAttribute: (attr) => {
+                if (attr === 'src') return blankGif;
+                if (attr === 'data-src') return dataSrc;
+                return null;
+            },
+            closest: (selector) => (selector === '#images-content' || selector === '.iv-card') ? {} : null,
+            getBoundingClientRect: () => ({ width: 1, height: 1, left: 0, top: 0 })
+        });
+
+        const page1 = createJmangaImg('https://cdn.jmanga.email/chapters/sample/01.jpg');
+        const page2 = createJmangaImg('https://cdn.jmanga.email/chapters/sample/02.jpg');
+        const outsideBanner = {
+            tagName: 'IMG',
+            src: 'https://jmanga.email/assets/site-banner.jpg',
+            naturalWidth: 900,
+            naturalHeight: 500,
+            width: 900,
+            height: 500,
+            offsetWidth: 900,
+            offsetHeight: 500,
+            classList: { contains: () => false },
+            style: {},
+            getAttribute: (attr) => attr === 'src' ? 'https://jmanga.email/assets/site-banner.jpg' : null,
+            closest: () => null,
+            getBoundingClientRect: () => ({ width: 900, height: 500, left: 0, top: 0 })
+        };
+
+        globalThis.document.querySelectorAll = vi.fn((selector) => {
+            if (selector.includes('img')) return [page1, page2, outsideBanner];
+            return [];
+        });
+
+        const result = crawlImages();
+        expect(result.images).toEqual([
+            { src: 'https://cdn.jmanga.email/chapters/sample/01.jpg' },
+            { src: 'https://cdn.jmanga.email/chapters/sample/02.jpg' }
+        ]);
+    });
+
+    it('非 JManga 網站 (如 rawkuma.net) 下 1x1 小圖即使有 data-src 依然會被正常過濾（網站隔離有效）', () => {
+        globalThis.window.location.href = 'https://rawkuma.net/manga/test/chapter-83.2/';
+
+        const blankGif = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        const tinyTrackerInReader = {
+            tagName: 'IMG',
+            src: blankGif,
+            naturalWidth: 1,
+            naturalHeight: 1,
+            width: 1,
+            height: 1,
+            offsetWidth: 1,
+            offsetHeight: 1,
+            classList: { contains: () => false },
+            style: {},
+            getAttribute: (attr) => {
+                if (attr === 'src') return blankGif;
+                if (attr === 'data-src') return 'https://rawkuma.net/wp-content/uploads/pixel-1x1.jpg';
+                return null;
+            },
+            closest: (selector) => selector === '#readerarea' ? {} : null,
+            getBoundingClientRect: () => ({ width: 1, height: 1, left: 0, top: 0 })
+        };
+
+        const normalPage = {
+            tagName: 'IMG',
+            src: 'https://rawkuma.net/wp-content/uploads/page-01.jpg',
+            naturalWidth: 800,
+            naturalHeight: 1200,
+            width: 800,
+            height: 1200,
+            offsetWidth: 800,
+            offsetHeight: 1200,
+            classList: { contains: () => false },
+            style: {},
+            getAttribute: (attr) => attr === 'src' ? 'https://rawkuma.net/wp-content/uploads/page-01.jpg' : null,
+            closest: (selector) => selector === '#readerarea' ? {} : null,
+            getBoundingClientRect: () => ({ width: 800, height: 1200, left: 0, top: 0 })
+        };
+
+        globalThis.document.querySelectorAll = vi.fn((selector) => {
+            if (selector.includes('img')) return [tinyTrackerInReader, normalPage];
+            return [];
+        });
+
+        const result = crawlImages();
+        expect(result.images).toEqual([
+            { src: 'https://rawkuma.net/wp-content/uploads/page-01.jpg' }
+        ]);
+    });
+
+    it('parseChapterHtml 在 JManga 網址下能從 #images-content 與 ul.reading-list 解析圖片與下一話連結', () => {
+        const chapterUrl = 'https://jmanga.email/read/sample-manga/ja/chapter-1-raw/';
+        const blankGif = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        const html = `
+            <img src="/assets/site-cover.jpg">
+            <ul class="reading-list">
+                <li><a href="/read/sample-manga/ja/chapter-2-raw/">Chapter 2</a></li>
+                <li class="active"><a href="/read/sample-manga/ja/chapter-1-raw/">Chapter 1</a></li>
+            </ul>
+            <div id="images-content">
+                <div class="iv-card">
+                    <img src="${blankGif}" data-src="https://cdn.jmanga.email/ch1/01.jpg" width="1" height="1">
+                </div>
+                <div class="iv-card">
+                    <img src="/loading.gif" data-src="https://cdn.jmanga.email/ch1/02.jpg">
+                </div>
+            </div>
+        `;
+
+        const parsed = parseChapterHtml(html, chapterUrl);
+        expect(parsed.images).toEqual([
+            'https://cdn.jmanga.email/ch1/01.jpg',
+            'https://cdn.jmanga.email/ch1/02.jpg'
+        ]);
+        expect(parsed.navLinks).toEqual({
+            prev: null,
+            next: 'https://jmanga.email/read/sample-manga/ja/chapter-2-raw/'
+        });
+    });
+
+    it('site-adapters 規則可 JSON 序列化且未匹配網站維持零干預', () => {
+        const cloned = JSON.parse(JSON.stringify(SITE_ADAPTER_RULES));
+        expect(getSiteAdapter('https://jmanga.email/read/x', cloned)?.id).toBe('jmanga');
+        expect(getExtraMangaContainers('https://jmanga.email/read/x', cloned)).toEqual([
+            '#images-content',
+            '#vertical-content',
+            '.container-reader-chapter',
+            '.iv-card'
+        ]);
+
+        expect(getSiteAdapter('https://rawkuma.net/manga/test/')).toBeNull();
+        expect(getExtraMangaContainers('https://rawkuma.net/manga/test/')).toEqual([]);
+        expect(isSitePlaceholderExempt(
+            { src: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' },
+            'https://rawkuma.net/1.jpg',
+            'https://rawkuma.net/1.jpg',
+            'rawkuma.net'
+        )).toBe(false);
     });
 });

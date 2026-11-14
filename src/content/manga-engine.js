@@ -2,6 +2,7 @@
 import { detectNavigationLinks } from '../utils/nav-detector.js';
 import { parseWnacgPageUrls } from '../utils/wnacg-parser.js';
 import { computeMangaTargetDimensions } from '../utils/constants.js';
+import { getExtraMangaContainers, isSitePlaceholderExempt } from '../utils/site-adapters.js';
 
 let overlay = null;
 let selectionBox = null;
@@ -522,13 +523,17 @@ export function crawlImages() {
     const imgs = Array.from(document.querySelectorAll('img, canvas, svg image, div[style*="background"], div[class*="page"]'));
     
     // 生肉網站與日本電子漫畫閱讀器常見核心容器（複合選擇器優先，並相容手寫單一選擇器 Mock）
-    const MANGA_CONTAINERS = [
+    const BASE_MANGA_CONTAINERS = [
         '#list-imga', '#readerarea', '.reading-content', '.ts-main-image', 
         '.manga-image', '.page-break', '.blocks-gallery-item', '.js-page-image', 
         '.viewer-page', '.page-container', '[class*="page-image"]',
         '.chap-content', '.viewer-cnt', '#reader', '.readerarea',
         '[data-image-data]'
     ];
+    const extraContainers = getExtraMangaContainers(page.hostname);
+    const MANGA_CONTAINERS = extraContainers.length > 0
+        ? [...new Set([...BASE_MANGA_CONTAINERS, ...extraContainers])]
+        : BASE_MANGA_CONTAINERS;
     const MANGA_CONTAINER_SELECTOR = MANGA_CONTAINERS.join(', ');
 
     const JUNK_BOX_SELECTOR =
@@ -615,6 +620,9 @@ export function crawlImages() {
             (img.classList && img.classList.contains('chapter-img'))
         );
 
+        // 網站專屬佔位圖豁免（僅在網站規則明確允許且圖片位於主容器內時生效）
+        const isPlaceholderExempt = isInMangaContainer && isSitePlaceholderExempt(img, dataSrc, url, page.hostname);
+
         // 徹底排除無效雜項容器 (驗證碼、模態框、登入框、麵包屑、導航列、頂部封面、側邊欄)
         const isInJunkBox = !!(img && img.closest && img.closest(JUNK_BOX_SELECTOR));
 
@@ -624,7 +632,10 @@ export function crawlImages() {
 
         // 嚴格尺寸門檻 (漫畫頁面高度普遍 >= 350px, 寬度 >= 250px)
         let isTooSmall = false;
-        if (isInMangaContainer) {
+        if (isPlaceholderExempt) {
+            // 網站專屬規則豁免 1x1 / 佔位圖初始尺寸過小排除，改採解析後的 dataSrc
+            isTooSmall = false;
+        } else if (isInMangaContainer) {
             // 漫畫閱讀容器內：排除小於 250x350 的小圖示（不需觸發 getBoundingClientRect）
             isTooSmall = (width > 0 && width < 250) || (height > 0 && height < 350);
         } else {
@@ -656,7 +667,7 @@ export function crawlImages() {
         ];
 
         // 容器保護機制：主閱讀容器內正文圖片僅排除明確載入轉輪佔位符，豁免一般 URL 詞彙檢測
-        const isContainerJunk = ['spinner', 'loading', 'placeholder', 'lzloader', 'loader'].some(key => url && url.toLowerCase().includes(key));
+        const isContainerJunk = !isPlaceholderExempt && ['spinner', 'loading', 'placeholder', 'lzloader', 'loader'].some(key => url && url.toLowerCase().includes(key));
         const isJunkUrl = isInMangaContainer
             ? isContainerJunk
             : junkKeywords.some(key => url && url.toLowerCase().includes(key));

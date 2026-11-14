@@ -198,18 +198,6 @@ export const DEFAULT_PROMPT_TWO_STEP = `<system_instructions>
   </critical_rules>
 </system_instructions>`;
 
-// 4. OCR 專用
-export const DEFAULT_PROMPT_OCR = `<system_instructions>
-  You are a professional manga OCR system. Extract ALL Japanese text from the image.
-
-  <critical_rules>
-    1. Extract speech bubbles, narrations, character thoughts, in-world signs, story synopses, and author afterwords (あとがき/巻末コメント).
-    2. Only ignore page numbers or publisher barcodes at extreme margins.
-    3. Follow standard manga reading order (right-to-left, top-to-bottom).
-    4. OUTPUT FORMAT: Return ONLY the extracted Japanese text. Separate distinct dialogue blocks with a double newline (\\n\\n). Do NOT wrap in markdown code blocks.
-  </critical_rules>
-</system_instructions>`;
-
 // 5. 批次處理規則 (快取優化版 - 移除動態變數以穩定 Context Caching Prefix)
 export const SYSTEM_BATCH_RULES = `
 <batch_rules>
