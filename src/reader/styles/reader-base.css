@@ -1,0 +1,324 @@
+/* 漫譯閱讀器基礎樣式：主題變數、全域佈局、頂部導航列與字型控制 */
+:root {
+    /* 📜 和紙暖色調色盤 (Washi Paper & Sumi Ink) */
+    --bg-washi: #f7f3eb;              /* 和紙暖米底色 */
+    --bg-page: #fdfbf7;               /* 紙頁純暖白 */
+    --bg-card: #f4eee1;               /* 次要紙質淡底 */
+    --border-paper: #e6ded1;          /* 紙張折痕線 */
+    --border-subtle: #ede7dc;
+    --text-sumi: #282420;             /* 松煙濃墨（主文字） */
+    --text-charcoal: #575048;         /* 炭黑（次要文字） */
+    --text-faint: #666666;            /* 淡墨灰字（日文原文） */
+    --accent-vermilion: #b83b32;      /* 朱紅/赤墨（主印鑑色） */
+    --accent-vermilion-soft: #fbf0ee;
+    --accent-amber: #a2682a;          /* 琥珀茶色 */
+    --accent-pine: #23a566;           /* 更加明亮青翠的若竹翡翠綠 */
+    --shadow-paper: 0 4px 20px rgba(60, 50, 40, 0.05), 0 1px 3px rgba(60, 50, 40, 0.04);
+    --font-serif: 'Noto Serif TC', 'Songti TC', 'SimSun', serif;
+    --font-maru: 'Zen Maru Gothic', 'M PLUS Rounded 1c', 'Hiragino Maru Gothic Pro', sans-serif;
+    --font-gensen: 'GenSenGothic', 'GenSenGothic TW', '源石黑體', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+    --font-kai: 'DFKai-SB', 'BiauKai', 'Kaiti TC', 'STKaiti', serif;
+    --font-sans: 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', -apple-system, system-ui, sans-serif;
+    --font-jp: 'Noto Sans JP', var(--font-sans);
+    --font-trans: var(--font-serif);  /* 動態全域可切換譯文字型 */
+    --radius-paper: 8px;
+    --transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background-color: var(--bg-washi);
+    color: var(--text-sumi);
+    font-family: var(--font-serif);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 微和紙顆粒質感 */
+.paper-texture {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 99999;
+    opacity: 0.035;
+    background-image: radial-gradient(#282420 0.75px, transparent 0.75px);
+    background-size: 8px 8px;
+}
+
+/* ─── Header 頂部和風導航欄 ─── */
+
+.result-header {
+    position: sticky;
+    top: 0;
+    z-index: 10000;
+    height: 60px;
+    background: rgba(247, 243, 235, 0.96);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-paper);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 28px;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+/* 朱印風格 Logo */
+.seal-stamp {
+    width: 32px;
+    height: 32px;
+    border: 2px solid var(--accent-vermilion);
+    border-radius: 6px;
+    color: var(--accent-vermilion);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 900;
+    font-family: var(--font-serif);
+    background: var(--accent-vermilion-soft);
+    box-shadow: inset 0 0 4px rgba(184, 59, 50, 0.15);
+    flex-shrink: 0;
+    letter-spacing: -1px;
+}
+
+.title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+.manga-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-sumi);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 240px; /* 嚴格單行截斷超長生肉羅馬拼音 */
+    letter-spacing: 0.01em;
+    cursor: default;
+}
+@media (max-width: 1200px) {
+    .manga-title { max-width: 160px; }
+}
+@media (max-width: 900px) {
+    .manga-title { max-width: 120px; font-size: 13px; }
+}
+
+.glossary-seal {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: #eef3ef;
+    color: var(--accent-pine);
+    border: 1px solid #d8e5dc;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* ─── 頂部中央章節導航列 (Chapter Navigation) ─── */
+.chapter-nav-bar {
+    display: flex;
+    align-items: center;
+    background: var(--bg-page);
+    border: 1px solid var(--border-paper);
+    border-radius: 6px;
+    padding: 3px;
+    box-shadow: 0 1px 3px rgba(60, 50, 40, 0.04);
+    gap: 2px;
+    flex-shrink: 0;
+}
+.nav-btn {
+    font-family: var(--font-serif);
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border: none;
+    background: transparent;
+    color: var(--text-charcoal);
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.12s ease;
+}
+.nav-btn:hover {
+    background: var(--bg-card);
+    color: var(--text-sumi);
+}
+.chapter-select-btn {
+    background: var(--accent-vermilion);
+    color: #ffffff !important;
+    font-weight: 700;
+    padding: 5px 14px;
+    box-shadow: inset 0 0 4px rgba(0,0,0,0.1);
+}
+.chapter-select-btn:hover {
+    background: #a33129;
+}
+
+/* ─── 頂部和風字型選單 ─── */
+.font-family-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.font-select-washi {
+    font-family: var(--font-trans, var(--font-serif));
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-sumi);
+    background: var(--bg-page);
+    border: 1px solid var(--border-paper);
+    border-radius: 6px;
+    padding: 5px 8px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(60, 50, 40, 0.04);
+    outline: none;
+    transition: all var(--transition);
+}
+.font-select-washi:hover, .font-select-washi:focus {
+    border-color: var(--accent-vermilion);
+    background: var(--bg-card);
+}
+
+/* ─── 頂部字體縮放調節器 ─── */
+.font-size-stepper {
+    display: flex;
+    align-items: center;
+    background: var(--bg-page);
+    border: 1px solid var(--border-paper);
+    border-radius: 6px;
+    padding: 2px;
+    box-shadow: 0 1px 3px rgba(60, 50, 40, 0.04);
+}
+.btn-stepper {
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+    font-weight: 800 !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+.btn-stepper:hover {
+    background: var(--bg-card) !important;
+    color: var(--accent-vermilion) !important;
+}
+.font-size-text {
+    font-family: var(--font-serif);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-charcoal);
+    padding: 0 6px;
+    min-width: 38px;
+    text-align: center;
+    user-select: none;
+}
+
+/* ─── 和風按鈕群組 ─── */
+.actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.btn-washi {
+    font-family: var(--font-serif);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 4px;
+    border: 1px solid var(--border-paper);
+    background: var(--bg-page);
+    color: var(--text-charcoal);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all var(--transition);
+    box-shadow: 0 1px 2px rgba(60, 50, 40, 0.04);
+    user-select: none;
+}
+.btn-washi:hover {
+    border-color: var(--text-charcoal);
+    color: var(--text-sumi);
+    transform: translateY(-1px);
+}
+.btn-vermilion {
+    background: var(--accent-vermilion);
+    color: #ffffff;
+    border-color: var(--accent-vermilion);
+}
+.btn-vermilion:hover {
+    background: #a33129;
+    border-color: #a33129;
+    color: #ffffff;
+}
+.btn-icon {
+    padding: 6px 10px;
+    font-weight: 800;
+}
+
+/* 下拉選單 */
+.dropdown-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 180px;
+    background: var(--bg-page);
+    border: 1px solid var(--border-paper);
+    border-radius: 6px;
+    box-shadow: 0 10px 30px rgba(40, 36, 32, 0.12);
+    padding: 6px;
+    z-index: 20000;
+}
+.dropdown-item {
+    width: 100%;
+    padding: 8px 12px;
+    font-family: var(--font-serif);
+    font-size: 13px;
+    color: var(--text-charcoal);
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.1s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.dropdown-item:hover {
+    background: var(--bg-card);
+    color: var(--text-sumi);
+}
+
+/* ─── Results 內容主容器 ─── */
+.results-container {
+    max-width: 1360px;
+    width: 100%;
+    margin: 24px auto 80px;
+    padding: 0 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+}

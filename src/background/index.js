@@ -3,20 +3,39 @@ import { createMangaResultUpdate } from './manga-result-update.js';
 import { createLocalMangaUploads } from './local-manga-uploads.js';
 import { mangaWireSnapshot } from '../utils/manga-image-messages.js';
 import { installWnacgAcceleration } from './wnacg-acceleration.js';
-import { parseChapterHtml } from '../utils/chapter-parser.js';
-import { crawlJestfulChapterInTab } from './jestful-prefetch.js';
 import { createPretranslationQueueStore } from './pretranslation-queue-store.js';
 import { createMangaNavigationStore } from './manga-navigation-store.js';
 import { state } from '../utils/state.js';
 import * as Constants from '../utils/constants.js';
 import { extractMangaTitle } from '../utils/manga-utils.js';
 import './download-helper.js';
-import { loadGlossary, saveGlossary, upsertGlossaryTerm, mergeGlossaryTerms, buildGlossaryPromptSnippet, deleteGlossaryTerm, deleteGlossary, updateGlossaryDisplayName, importGlossaryTerms, deleteMultipleGlossaryTerms } from './glossary-manager.js';
+import { loadGlossary, saveGlossary, mergeGlossaryTerms, buildGlossaryPromptSnippet } from './glossary-manager.js';
 import { translateTexts, extractTermsFromTranslation, callGeminiAPIBatch } from './translate-api.js';
 import { log } from '../utils/logger.js';
 import { Semaphore, KeyRateLimiter } from '../utils/concurrency.js';
-import { syncEngine } from '../utils/sync-engine.js';
 import { createMangaStartLock } from './manga-start-lock.js';
+import {
+    cropImageBase64,
+    resizeImageBlobToBase64,
+    crawlChapterImagesAndNavCore,
+    buildPreviousContextSnippet,
+    fetchAndResizeBatch as fetchAndResizeBatchCore,
+    handleProcessScreenshot,
+    handleRetranslateImage
+} from './image-processor.js';
+import {
+    registerTabBatchHandlers,
+    cleanupGhostTabs,
+    sendMessageWithRetry,
+    autoStartBatchWithRetry,
+    ensureContentScriptInjected,
+    incrementDailyUsage,
+    handlePreCaptureForSelection,
+    handleGlossaryInfoRequest,
+    handleGlossaryOrSyncMessage,
+    handleTranslateUIBatch,
+    installCloudSyncStorageListener
+} from './tab-helpers.js';
 import { getPretranslationCompletion, mapPretranslationBatchResults, shouldCompleteMangaTranslation, shouldPublishMangaBatchResults, executeFallbackImages, isMangaCancellation } from './manga-lifecycle.js';
 import { getHybridSchedule, getEffectiveDelay } from './hybrid-scheduler.js';
 import { executeHybridRequest, HybridRequestAbortedError } from './hybrid-retry.js';
@@ -36,7 +55,6 @@ import {
     buildNovelIsolationMappedResult
 } from './novel-refusal.js';
 
-let capturedScreenshotForSelection = null;
 // 記錄每個分頁最後的小說網址，防止 onUpdated 重複觸發自動翻譯
 // 注意：此為記憶體變數，SW 重啟後清空屬正常行為
 const lastNovelUrlByTab = {};
@@ -1157,92 +1175,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'translateUIBatch') {
-      const { texts } = message;
-      (async () => {
-          try {
-              const model = await state.get('novelModelName', 'gemini-3.5-flash-lite');
-              const fallbackModel = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
-              
-              let glossarySnippet = '';
-              const tabId = sender.tab?.id;
-              const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
-              if (isGlossaryEnabled && tabId) {
-                  const navCtx = await state.get('navigationContext', {});
-                  const mangaKey = navCtx[tabId];
-                  if (mangaKey) {
-                      const gl = await loadGlossary(mangaKey);
-                      if (gl?.terms) glossarySnippet = buildGlossaryPromptSnippet(gl.terms);
-                  }
-              }
-              
-              const prompt = '你是一位專業的翻譯師，將日文翻譯為繁體中文。請保持原文的語意、格式與標點符號，只進行簡潔直譯，不可有任何額外的解釋或包裝。請嚴格遵守 1:1 對位，輸出 JSON 必須包含 index (0-based) 與 text (譯文)。';
-              
-              // 加上 [idx] 前綴
-              const indexedTexts = texts.map((t, idx) => `[${idx}] ${t}`);
-              
-              // 使用嚴格的 JSON 結構化輸出以確保安全對齊
-              const schema = {
-                  type: 'OBJECT',
-                  properties: {
-                      translations: {
-                          type: 'ARRAY',
-                          items: {
-                              type: 'OBJECT',
-                              properties: {
-                                  index: { type: 'INTEGER' },
-                                  text: { type: 'STRING' }
-                              },
-                              required: ['index', 'text']
-                          }
-                      }
-                  },
-                  required: ['translations']
-              };
-
-              const result = await translateTexts(indexedTexts, {
-                  model,
-                  fallbackModel,
-                  prompt,
-                  schema,
-                  glossarySnippet
-              });
-              
-              // 建立預設以原文填充的 translations 陣列，長度 100% 相同
-              const finalTranslations = [...texts];
-              let hasValidResult = false;
-              
-              if (result && result.translations && Array.isArray(result.translations)) {
-                  result.translations.forEach(item => {
-                      const idx = item.index;
-                      if (typeof idx === 'number' && idx >= 0 && idx < texts.length) {
-                          finalTranslations[idx] = item.text || texts[idx];
-                      }
-                  });
-                  hasValidResult = true;
-              } else {
-                  // 回退機制：嘗試一般解析
-                  if (Array.isArray(result)) {
-                      result.forEach((resText, idx) => {
-                          if (idx < texts.length) {
-                              finalTranslations[idx] = resText || texts[idx];
-                          }
-                      });
-                      hasValidResult = true;
-                  }
-              }
-
-              if (hasValidResult) {
-                  await incrementDailyUsage(model);
-                  sendResponse({ translations: finalTranslations });
-              } else {
-                  // 最終 fallback：返回全部空譯文或日文原文
-                  sendResponse({ translations: texts.map(() => '') });
-              }
-          } catch (err) {
-              log.error('Background', 'translateUIBatch 發生錯誤:', err);
-              sendResponse({ translations: texts.map(() => ''), error: err.message });
-          }
-      })();
+      handleTranslateUIBatch(message, sender).then(sendResponse);
       return true; // 保持非同步通道
   }
   
@@ -1485,34 +1418,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
     if (message.action === 'GET_GLOSSARY_INFO') {
-        const { mangaKey } = message.payload;
-        loadGlossary(mangaKey).then(entry => {
-            sendResponse({ 
-                success: true, 
-                displayName: entry?.displayName || mangaKey,
-                termCount: entry?.terms?.length || 0 
-            });
-        }).catch(err => {
-            console.error('[Background] GET_GLOSSARY_INFO failed:', err);
-            sendResponse({ success: false, error: err.message });
-        });
-        return true;
+        return handleGlossaryInfoRequest(message, sendResponse);
     }
 
     if (message.action === 'PRE_CAPTURE_FOR_SELECTION') {
-    const windowId = sender.tab ? sender.tab.windowId : null;
-    chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 100 }, (result) => {
-        if (chrome.runtime.lastError) {
-          console.warn("[PreCapture] 截圖失敗:", chrome.runtime.lastError.message);
-          capturedScreenshotForSelection = null;
-          sendResponse({ success: false });
-        } else {
-          capturedScreenshotForSelection = result;
-          sendResponse({ success: true });
-        }
-    });
-    return true; // 保持通道以進行異步回應
-  }
+        return handlePreCaptureForSelection(sender, sendResponse);
+    }
 
   if (message.action === 'PROCESS_SCREENSHOT') {
     handleProcessScreenshot(message.rect, sender.tab.id)
@@ -1583,128 +1494,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
   }
 
-  if (message.action === 'saveGlossaryTerm' || message.action === 'upsertGlossaryTerm') {
-      upsertGlossaryTerm(message.mangaKey, message.term || { ori: message.ori, trans: message.trans }, message.oldOri)
-          .then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
-  }
-  if (message.action === 'syncGlossariesNow') {
-      syncEngine.syncNow(message.token).then(lastSyncTime => sendResponse({ success: true, lastSyncTime }))
-          .catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
+  const glossarySyncResult = handleGlossaryOrSyncMessage(message, sendResponse);
+  if (glossarySyncResult !== null) {
+      return glossarySyncResult;
   }
 
-  if (message.action === 'deleteGlossaryTerm') {
-      const { mangaKey, ori } = message;
-      if (!mangaKey || !ori) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      deleteGlossaryTerm(mangaKey, ori).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
-  }
-
-  if (message.action === 'deleteMultipleGlossaryTerms') {
-      const { mangaKey, oris } = message;
-      if (!mangaKey || !oris) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      deleteMultipleGlossaryTerms(mangaKey, oris).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
-  }
-
-  if (message.action === 'deleteGlossary') {
-      const { mangaKey } = message;
-      if (!mangaKey) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      deleteGlossary(mangaKey).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
-  }
-
-  if (message.action === 'updateGlossaryDisplayName') {
-      const { mangaKey, newDisplayName } = message;
-      if (!mangaKey || !newDisplayName) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      updateGlossaryDisplayName(mangaKey, newDisplayName).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
-  }
-
-  if (message.action === 'importGlossaryTerms') {
-      const { mangaKey, terms } = message;
-      if (!mangaKey || !terms) { sendResponse({ success: false, error: '缺少必要欄位' }); return false; }
-      importGlossaryTerms(mangaKey, terms).then(res => sendResponse(res)).catch(err => sendResponse({ success: false, error: err.message }));
-      return true;
-  }
   if (message.action === 'retranslateImage') {
-      const { url, pageIndex, tabId, mangaKey } = message;
-      (async () => {
-          try {
-              const resultTabId = sender.tab?.id;
-              const initialJob = resultTabId ? await mangaRecovery.snapshot(resultTabId) : null;
-              const fallbackMemImg = (resultTabId && Number.isInteger(pageIndex))
-                  ? (mangaRecovery.getMemoryImage?.(resultTabId, pageIndex, initialJob?.id) || initialJob?.results?.find(r => r.pageIndex === pageIndex)?.image || '')
-                  : '';
-              const effectiveUrl = url || fallbackMemImg;
-
-              let base64 = null;
-              if (effectiveUrl && effectiveUrl.startsWith('data:image')) {
-                  base64 = effectiveUrl.split(',')[1];
-              } else if (effectiveUrl) {
-                  const maxDim = await state.get('imageMaxDimension', 1024);
-                  const res = await fetch(effectiveUrl);
-                  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-                  const blob = await res.blob();
-                  base64 = await resizeImageBlobToBase64(blob, maxDim);
-              }
-              if (!base64) throw new Error('無法取得圖片 Base64');
-              const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
-              const fallbackModelName = await state.get('fallbackModelName', 'gemini-3.5-flash-lite');
-              const savedPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
-              
-              // 救援行動強制使用備援模型
-              const usedModel = fallbackModelName || modelName;
-              const finalPrompt = Constants.resolveMangaOneStepPrompt(savedPrompt, usedModel);
-              
-              let glossarySnippet = '';
-              const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
-              if (isGlossaryEnabled && mangaKey) {
-                  const gl = await loadGlossary(mangaKey);
-                  if (gl?.terms) glossarySnippet = buildGlossaryPromptSnippet(gl.terms);
-              }
-              const result = await translateTexts([], {
-                  model: usedModel,
-                  prompt: finalPrompt,
-                  glossarySnippet,
-                  imageBase64: base64,
-                  schema: {
-                      type: 'OBJECT',
-                      properties: {
-                          results: {
-                              type: 'ARRAY',
-                              items: {
-                                  type: 'OBJECT',
-                                  properties: {
-                                      original: { type: 'STRING' },
-                                      translation: { type: 'STRING' }
-                                  },
-                                  required: ['original', 'translation']
-                              }
-                          }
-                      },
-                      required: ['results']
-                  }
-              });
-              if (result?.results) {
-                  // 優先採用 translateTexts 回傳的 usedModelName，並同步持久化寫回 mangaRecovery
-                  if (initialJob && Number.isInteger(pageIndex) && pageIndex > 0) {
-                      const expectedRow = initialJob.results?.find(r => r.pageIndex === pageIndex);
-                      const update = createMangaResultUpdate(expectedRow,
-                          { image: effectiveUrl, results: result.results, usedModelName: result.usedModelName || usedModel });
-                      const saved = await mangaRecovery.replaceResult(resultTabId, initialJob.id, pageIndex, update);
-                      if (!saved) throw new Error('頁面或任務已更新，請重新發起重譯');
-                  }
-                  sendResponse({ results: result.results, usedModelName: result.usedModelName || usedModel });
-              } else {
-                  throw new Error('API 回應格式異常');
-              }
-          } catch(e) {
-              console.error('[Background] retranslateImage failed:', e);
-              sendResponse({ success: false, error: e.message });
-          }
-      })();
+      handleRetranslateImage(message, sender, mangaRecovery)
+          .then(res => sendResponse(res))
+          .catch(err => {
+              console.error('[Background] retranslateImage failed:', err);
+              sendResponse({ success: false, error: err.message });
+          });
       return true;
   }
 
@@ -2103,74 +1904,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 
-async function cropImageBase64(fullBase64, rect) {
-    if (!fullBase64) throw new Error("No base64 image provided");
-    const res = await fetch(fullBase64);
-    const blob = await res.blob();
-    const bitmap = await createImageBitmap(blob);
-    const canvas = new OffscreenCanvas(rect.width, rect.height);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(bitmap, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
-    const croppedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.95 });
-    
-    // ArrayBuffer to Base64 (Safe for Service Workers)
-    const arrayBuffer = await croppedBlob.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-}
-
-/**
- * resizeImageBlobToBase64 — 將抓取到的 Blob 轉換為 ImageBitmap，並利用 OffscreenCanvas 等比例縮小到 maxDim (e.g. 1024px) 後，以 JPEG 壓縮格式輸出為 Base64。
- * 如果 maxDim 為 0 或未設定，則不進行縮放，直接轉 Base64。
- */
-async function resizeImageBlobToBase64(blob, maxDim) {
-    if (!maxDim || maxDim <= 0) {
-        const arrayBuffer = await blob.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
-        let binary = '';
-        const chunk_size = 0x8000;
-        for (let b = 0; b < bytes.byteLength; b += chunk_size) {
-            binary += String.fromCharCode.apply(null, bytes.subarray(b, b + chunk_size));
-        }
-        return btoa(binary);
-    }
-
-    try {
-        const bitmap = await createImageBitmap(blob);
-        const { width, height } = Constants.computeMangaTargetDimensions(bitmap.width, bitmap.height, maxDim);
-
-        const canvas = new OffscreenCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bitmap, 0, 0, width, height);
-        
-        // 匯出為壓縮度與辨識度最佳平衡的 jpeg (品質提升為 0.90，確保密集日文漢字與濁音點銳利清晰)
-        const compressedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.90 });
-        const arrayBuffer = await compressedBlob.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
-        let binary = '';
-        const chunk_size = 0x8000;
-        for (let b = 0; b < bytes.byteLength; b += chunk_size) {
-            binary += String.fromCharCode.apply(null, bytes.subarray(b, b + chunk_size));
-        }
-        bitmap.close(); // 即時釋放顯存/記憶體
-        return btoa(binary);
-    } catch (err) {
-        log.warn('Background', `圖片壓縮處理失敗，退回原圖: ${err.message}`);
-        const arrayBuffer = await blob.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
-        let binary = '';
-        const chunk_size = 0x8000;
-        for (let b = 0; b < bytes.byteLength; b += chunk_size) {
-            binary += String.fromCharCode.apply(null, bytes.subarray(b, b + chunk_size));
-        }
-        return btoa(binary);
-    }
-}
-
 // ── 跨話無縫連續追漫：預翻快取池與任務控制器 ──
 const pretranslatedChaptersMap = new Map(); // key: chapterUrl, value: { url, images, results, navLinks, usedModelName, isDone, inProgress, error, associatedResultTabId, sourceTabId }
 let activePretranslateJob = null;
@@ -2253,26 +1986,7 @@ async function getPretranslatedChapterFromStorage(url) {
  * crawlChapterImagesAndNav — 在背景靜默抓取下一話 HTML，並提取漫畫圖片清單與下下一話導航連結
  */
 async function crawlChapterImagesAndNav(chapterUrl, sourceTabId) {
-    try {
-        if (isJestfulChapterUrl(chapterUrl)) {
-            if (!sourceTabId) throw new Error('找不到來源分頁');
-            return await crawlJestfulChapterInTab(chrome, chapterUrl, sourceTabId, ensureContentScriptInjected);
-        }
-        log.info('Background', `[跨話靜默探針] 正在抓取下一話 HTML: ${chapterUrl}...`);
-        const res = await fetch(chapterUrl, {
-            headers: {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': navigator.userAgent
-            }
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const html = await res.text();
-
-        return parseChapterHtml(html, chapterUrl);
-    } catch (err) {
-        log.warn('Background', `[跨話靜默探針] HTML 抓取解析失敗: ${err.message}`);
-        return { images: [], navLinks: { prev: null, next: null } };
-    }
+    return crawlChapterImagesAndNavCore(chapterUrl, sourceTabId, ensureContentScriptInjected, isJestfulChapterUrl);
 }
 
 /**
@@ -2435,7 +2149,9 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
                     if (execution.results?.sceneContext) {
                         lastSceneContext = execution.results.sceneContext;
                     }
-                    previousContextSnippet = buildPreviousContextSnippet(batchResults, 5, lastSceneContext) || previousContextSnippet;
+                    if (typeof buildPreviousContextSnippet === 'function') {
+                        previousContextSnippet = buildPreviousContextSnippet(batchResults, 5, lastSceneContext) || previousContextSnippet;
+                    }
                 } catch (apiErr) {
                     log.warn('Background', `[跨話連續追漫] 批次翻譯錯誤 (${state.getApiKeyAlias(scheduledKey)} | ${batchModel}): ${apiErr.message}`);
                     batchResults = mapPretranslationBatchResults(currentBatch, base64List, validItems, null, batchModel, apiErr);
@@ -2526,130 +2242,11 @@ async function runPretranslateNextChapter(nextUrl, sourceTabId, resultTabId, for
     }
 }
 
-function buildPreviousContextSnippet(results = [], maxLines = 5, sceneContext = '') {
-    if (typeof maxLines === 'string') {
-        sceneContext = maxLines;
-        maxLines = 5;
-    }
-    const list = Array.isArray(results) ? results : (results ? [results] : []);
-    const pairs = [];
-    for (const item of list) {
-        const lines = Array.isArray(item?.results) ? item.results : (Array.isArray(item) ? item : []);
-        for (const line of lines) {
-            if (line?.original && line?.translation) {
-                pairs.push(`${line.original} -> ${line.translation}`);
-            }
-        }
-    }
-    const limit = typeof maxLines === 'number' && maxLines > 0 ? maxLines : 5;
-    const dialogueLines = pairs.slice(-limit);
-    const trimmedScene = typeof sceneContext === 'string' ? sceneContext.trim() : '';
-
-    if (trimmedScene && dialogueLines.length > 0) {
-        return `[場景與角色關係]: ${trimmedScene}\n${dialogueLines.join('\n')}`;
-    }
-    if (trimmedScene) {
-        return `[場景與角色關係]: ${trimmedScene}`;
-    }
-    return dialogueLines.join('\n');
-}
-
 /**
  * fetchAndResizeBatch — 專職負責將指定批次的圖片進行並行抓取、Blob 轉換與 OffscreenCanvas 等比例縮放
- * 支援雙緩衝管線 (Pipeline Prefetching) 在背景非同步提前預載
- * @param {Array} batch - 當前批次圖片陣列
- * @param {number} maxDim - 最大限制尺寸
- * @param {number|string} sourceTabId - 來源分頁 ID
- * @returns {Promise<Array<string|null>>} Base64 字串陣列
  */
 async function fetchAndResizeBatch(batch, maxDim, sourceTabId) {
-    return Promise.all(batch.map(async (imgData) => {
-        const imgSrc = imgData.src || imgData;
-        if (!imgSrc) return null;
-        if (typeof imgSrc === 'string' && imgSrc.startsWith('data:image')) {
-            return imgSrc.split(',')[1];
-        }
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-            const res = await fetch(imgSrc, { signal: controller.signal });
-            clearTimeout(timeoutId);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const blob = await res.blob();
-            return await resizeImageBlobToBase64(blob, maxDim);
-        } catch (fetchErr) {
-            // 退回 Content Script 備援
-            if (sourceTabId && sourceTabId !== 'current') {
-                const resp = await Promise.race([
-                    new Promise(resolve => chrome.tabs.sendMessage(sourceTabId, { action: 'fetchBase64', url: imgSrc, maxDim }, resolve)),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Content Script fetch Timeout')), 15000))
-                ]).catch(e => ({ error: e.message }));
-                return resp?.base64 || null;
-            }
-            return null;
-        }
-    }));
-}
-
-async function handleProcessScreenshot(rect, tabId) {
-    try {
-        if (!capturedScreenshotForSelection) {
-            throw new Error("截圖資料遺失，請重新框選");
-        }
-        
-        // 1. 裁切圖片取得 base64 (不含 data:image/jpeg;base64, 前綴)
-        const croppedBase64 = await cropImageBase64(capturedScreenshotForSelection, rect);
-        
-        // 2. 獲取翻譯設定與詞庫
-        const modelName = await state.get('modelName', 'gemini-3.1-flash-lite');
-        const customPrompt = await state.get('customPrompt', Constants.DEFAULT_PROMPT_ONE_STEP);
-        const navCtx = await state.get('navigationContext', {});
-        const mangaKey = navCtx[tabId];
-        let glossarySnippet = '';
-        const isGlossaryEnabled = await state.get('globalGlossaryEnabled', true);
-        if (isGlossaryEnabled && mangaKey) {
-            const currentGlossary = await loadGlossary(mangaKey);
-            if (currentGlossary && currentGlossary.terms) {
-                glossarySnippet = buildGlossaryPromptSnippet(currentGlossary.terms);
-            }
-        }
-
-        // 3. 呼叫翻譯 (一條龍 Vision 模式)
-        const finalPrompt = Constants.resolveMangaOneStepPrompt(customPrompt, modelName);
-
-        const result = await translateTexts([], {
-            model: modelName,
-            prompt: finalPrompt,
-            glossarySnippet: glossarySnippet,
-            imageBase64: croppedBase64,
-            schema: {
-                type: 'OBJECT',
-                properties: {
-                    results: {
-                        type: 'ARRAY',
-                        items: {
-                            type: 'OBJECT',
-                            properties: {
-                                original: { type: 'STRING' },
-                                translation: { type: 'STRING' }
-                            },
-                            required: ['original', 'translation']
-                        }
-                    }
-                },
-                required: ['results']
-            }
-        });
-
-        if (result && result.results) {
-            return { success: true, result: result };
-        } else {
-            throw new Error("API 請求成功但無回傳文字");
-        }
-    } catch (err) {
-        console.error("[ProcessScreenshot] 處理過程發生錯誤:", err);
-        return { success: false, error: err.message };
-    }
+    return fetchAndResizeBatchCore(batch, maxDim, sourceTabId);
 }
 
 /**
@@ -3407,163 +3004,10 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   });
 });
 
-// 主動垃圾回收：啟動時及定時清除已關閉分頁的歷史殘留 (幽靈分頁清理)
-async function cleanupGhostTabs() {
-    try {
-        const openTabs = await chrome.tabs.query({});
-        const activeTabIds = new Set(openTabs.map(t => String(t.id)));
-        
-        await state.update('navigationContext', (current = {}) => {
-            const cleaned = {};
-            for (const [tId, val] of Object.entries(current)) {
-                if (activeTabIds.has(String(tId))) cleaned[tId] = val;
-            }
-            return cleaned;
-        });
-
-        await state.update('navLinksStore', (current = {}) => {
-            const cleaned = {};
-            for (const [tId, val] of Object.entries(current)) {
-                if (activeTabIds.has(String(tId))) cleaned[tId] = val;
-            }
-            return cleaned;
-        });
-    } catch(e) {}
-}
-
+// 註冊分頁接力翻譯與結果頁啟動依賴，並啟動幽靈分頁垃圾回收
+registerTabBatchHandlers({ openNewResultPage, startNewMangaBatchProcessing });
 cleanupGhostTabs();
 setInterval(cleanupGhostTabs, 60000); // 每分鐘定期清理一次
-
-/**
- * 【缺口F移植】帶重試的訊息傳送工具 (移植自 V1.8.6 sendMessageWithRetry)
- * 解決頁面剛載入時 content script 尚未就緒的問題
- */
-async function sendMessageWithRetry(tabId, message, maxRetries = 8, interval = 1500) {
-    for (let i = 0; i < maxRetries; i++) {
-        try {
-            log.info('Background', `[AutoBatch] 正在連線分頁 content script (${i + 1}/${maxRetries})... action: ${message.action}`);
-            const response = await new Promise((resolve, reject) => {
-                chrome.tabs.sendMessage(tabId, message, (resp) => {
-                    if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-                    else resolve(resp);
-                });
-            });
-            log.info('Background', `[AutoBatch] 連線成功 (${message.action})`);
-            return response;
-        } catch (e) {
-            log.warn('Background', `[AutoBatch] 通訊重試失敗 (${i + 1}/${maxRetries}): ${e.message}`);
-            if (i === maxRetries - 1) throw e;
-            await new Promise(r => setTimeout(r, interval));
-        }
-    }
-}
-
-/**
- * 【缺口F移植】帶重試的接力翻譯啟動函式 (移植自 V1.8.6 autoStartBatch)
- * 跳轉後由 onTabsUpdated 呼叫，確保 content script 就緒後再抓圖
- */
-async function autoStartBatchWithRetry(tabId, resultTabId, mangaKey, mobile) {
-    log.info('Background', `[AutoBatch] 嘗試開始接力翻譯 - TabID: ${tabId}, Mobile: ${!!mobile}`);
-    try {
-        // 先確保 content script 已注入（Edge Android 背景分頁跳轉後可能未自動注入）
-        log.info('Background', `[AutoBatch] 確認 content script 注入狀態...`);
-        await ensureContentScriptInjected(tabId);
-
-        // 輪詢等待生肉網站非同步/AJAX 圖片加載完畢並達到穩定狀態 (防止只抓到剛載入的前幾張)
-        let lastCount = 0;
-        let stableCountMatches = 0;
-        let crawlResult = null;
-
-        for (let attempt = 1; attempt <= 12; attempt++) {
-            const res = await sendMessageWithRetry(tabId, { action: 'crawlImages' });
-            if (res?.error) {
-                log.warn('Background', `[AutoBatch] ${res.error}`);
-                chrome.tabs.sendMessage(tabId, {
-                    action: 'TRANSLATION_STATUS',
-                    payload: { msg: res.error, type: 'error', crawlBlocked: true }
-                }).catch(() => {});
-                if (resultTabId) chrome.tabs.sendMessage(resultTabId, {
-                    action: 'mangaRecoveryError', error: res.error
-                }).catch(() => {});
-                return;
-            }
-            const currentImages = res?.images || [];
-            const count = currentImages.length;
-
-            if (count > 0) {
-                if (count === lastCount) {
-                    stableCountMatches++;
-                    // 連續 2 次數量不變，確認所有圖片已完全注入！
-                    if (stableCountMatches >= 2 || (count >= 15 && stableCountMatches >= 1)) {
-                        crawlResult = res;
-                        log.info('Background', `[AutoBatch] 圖片數量已完全穩定：共獲取 ${count} 張圖片！(檢測嘗試 ${attempt} 次)`);
-                        break;
-                    }
-                } else {
-                    // 圖片數量持續增長中 (例如 3 ➔ 8 ➔ 12)，重置穩定次數，繼續等待下一輪
-                    stableCountMatches = 0;
-                    lastCount = count;
-                    log.info('Background', `[AutoBatch] 偵測到生肉圖片動態注入中 (當前 ${count} 張)，等待全部加載完畢...`);
-                }
-            } else {
-                log.info('Background', `[AutoBatch] 第 ${attempt}/12 次抓圖尚未發現圖片，等待頁面渲染...`);
-            }
-
-            crawlResult = res;
-            await new Promise(r => setTimeout(r, 600));
-        }
-
-        if (!crawlResult || !crawlResult.images || crawlResult.images.length === 0) {
-            log.warn('Background', '[AutoBatch] 接力翻譯：多次輪詢後抓圖結果仍為空，中止');
-            if (resultTabId) chrome.tabs.sendMessage(resultTabId, {
-                action: 'mangaRecoveryError', error: '下一話尚未載入可辨識的漫畫圖片。請在原網頁確認圖片顯示後重新翻譯。'
-            }).catch(() => {});
-            return;
-        }
-
-        const images = crawlResult.images;
-        const navLinks = crawlResult.navLinks || { prev: null, next: null };
-
-        if (resultTabId) {
-            try {
-                const existingResultTab = await chrome.tabs.get(resultTabId);
-                if (existingResultTab) {
-                    chrome.tabs.update(resultTabId, { active: true });
-                    chrome.tabs.sendMessage(resultTabId, {
-                        action: 'reloadAndTranslate',
-                        sourceTabId: tabId,
-                        images,
-                        navLinks,
-                        mangaKey: mangaKey || null
-                    }, (res) => {
-                        if (chrome.runtime.lastError) {
-                            log.warn('Background', '[AutoBatch] 結果頁無回應，改開新頁');
-                            openNewResultPage(tabId, images, navLinks, mangaKey, mobile).catch(err => log.error('Background', err.message));
-                        } else {
-                            startNewMangaBatchProcessing(tabId, resultTabId, images, navLinks)
-                                .catch(err => log.error('Background', `[AutoBatch] 接力翻譯啟動失敗: ${err.message}`));
-                        }
-                    });
-                    return;
-                }
-            } catch (_) {
-                log.warn('Background', '[AutoBatch] 原有結果頁已關閉，開新頁');
-            }
-        }
-        openNewResultPage(tabId, images, navLinks, mangaKey, mobile).catch(err => log.error('Background', err.message));
-    } catch (err) {
-        log.error('Background', `[AutoBatch] 接力翻譯啟動失敗（8次重試均失敗）: ${err.message}`);
-        // 廣播錯誤狀態給行動端（生肉網頁）的控制面板日誌區，方便實機除錯
-        if (tabId) {
-            chrome.tabs.sendMessage(tabId, {
-                action: 'TRANSLATION_STATUS',
-                payload: { msg: `🚨 接力翻譯啟動失敗: ${err.message}`, type: 'error' }
-            }).catch(() => {});
-        }
-    }
-}
-
-
 
 // 依據裝置設定 Action 行為 (點擊擴充功能圖示)
 const isMobileEnv = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
@@ -3591,104 +3035,5 @@ chrome.contextMenus.onClicked.addListener((info) => {
   }
 });
 
-
-/**
- * ensureContentScriptInjected — 確保 Content Script 已在目標分頁中快行
- * 對齊 v1.8.7 的相同函式，用於 prepareTab 與 setNovelMode handler
- * @param {number} tabId 
- * @returns {Promise<boolean>} 是否就緒
- */
-async function ensureContentScriptInjected(tabId) {
-    try {
-        // 1. 先嘗試 Ping — 若成功表示已就緒
-        await chrome.tabs.sendMessage(tabId, { action: 'ping' });
-        log.info('Background', `[PrepareTab] 分頁 ${tabId} 已具備環境`);
-        return true;
-    } catch {
-        // 2. Ping 失敗 (通常因擴充套件重新載入導致舊分頁變成孤兒腳本)，自動嘗試動態重注入
-        try {
-            log.info('Background', `[PrepareTab] 檢測到分頁 ${tabId} 斷線，正在自動動態注入 Content Script...`);
-            const manifest = chrome.runtime.getManifest();
-            const contentScripts = manifest.content_scripts?.[0]?.js || ['src/content/main.js'];
-            await chrome.scripting.executeScript({
-                target: { tabId },
-                files: contentScripts
-            });
-            await new Promise(r => setTimeout(r, 400));
-            // 再次驗證連線
-            await chrome.tabs.sendMessage(tabId, { action: 'ping' });
-            log.info('Background', `[PrepareTab] 分頁 ${tabId} 自動注入成功並已恢復通訊！`);
-            return true;
-        } catch (injectErr) {
-            log.warn('Background', `[PrepareTab] 分頁 ${tabId} 自動注入失敗 (${injectErr.message})，提示使用者手動重新整理`);
-            return false;
-        }
-    }
-}
-
-/**
- * 更新每日翻譯次數統計（用於 getDailyTokenCount 配額顯示）
- * 支援單張或整批圖片完成後一次累加，減少 storage.local I/O 次數
- * @param {string} modelName - 當前使用的模型名稱
- * @param {number} delta - 本次累加張數（預設 1）
- */
-async function incrementDailyUsage(modelName = '', delta = 1) {
-    try {
-        const increment = Math.max(1, Number(delta) || 1);
-        if (modelName && modelName.toLowerCase().includes('gemma')) {
-            log.info('Background', `使用 Gemma 模型 (${modelName})，不記入每日額度`);
-            return;
-        }
-        const today = new Date().toISOString().split('T')[0];
-        const savedDate = await state.get('usageDate', '');
-        let newCount = increment;
-        if (savedDate !== today) {
-            await state.set('usageDate', today);
-            await state.set('usageCount', newCount);
-        } else {
-            const count = await state.get('usageCount', 0);
-            newCount = count + increment;
-            await state.set('usageCount', newCount);
-        }
-        // 廣播更新給 Sidepanel
-        chrome.runtime.sendMessage({ action: 'updateTokenDisplay', count: newCount }).catch(() => {});
-    } catch { /* 統計失敗不影響主要功能 */ }
-}
-
 // 雲端自動同步全域監聽器
-chrome.storage.onChanged.addListener((changes, namespace) => {
-    if (namespace !== 'local') return;
-
-    // 關鍵設定的 Keys (包含翻譯語言、API Key、獨立時間戳、自訂詞彙、模型設定、自訂提示詞)
-    const criticalKeys = [
-        'apiKey',
-        'apiKeyLastModified',
-        'settingsLastModified',
-        'targetLanguage',
-        'mangaGlossaries', 'mangaGlossaryTombstones',
-        'modelName',
-        'novelModelName',
-        'customPrompt',
-        'novelPrompt'
-    ];
-
-    // 檢查是否有任何關鍵設定被修改
-    const hasCriticalChange = Object.keys(changes).some(key => criticalKeys.includes(key));
-
-    if (hasCriticalChange) {
-        // 非同步讀取 enableCloudSync 狀態，避免阻塞
-        chrome.storage.local.get(['enableCloudSync'], (result) => {
-            const enableCloudSync = result.enableCloudSync || false;
-            if (enableCloudSync) {
-                log.info('BackgroundSync', '檢測到關鍵設定變更且已啟用雲端同步，準備觸發同步引擎...');
-                try {
-                    // 自動在背景非同步喚醒同步引擎
-                    syncEngine.triggerSync(changes);
-                } catch (syncErr) {
-                    // 健全的錯誤處理，防止斷線或 token 失效等例外阻塞 SW
-                    log.error('BackgroundSync', '喚醒同步引擎時發生異常:', syncErr);
-                }
-            }
-        });
-    }
-});
+installCloudSyncStorageListener();
